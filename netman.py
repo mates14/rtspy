@@ -61,14 +61,14 @@ class NetworkManager:
 
         #command_queue = [] # regular commands
 
-        # Command progress status 
+        # Command progress status
         self.state_start = float('nan')
         self.state_expected_end = float('nan')
 
         # Command handlers dictionary - unified for all commands
         self.command_registry = CommandRegistry()
         #self.command_handlers = {}
-        
+
         # Registry to track known clients and devices
         self.entities = {}  # Indexed by centrald_id -> {name, type, device_type etc.}
 
@@ -87,12 +87,12 @@ class NetworkManager:
         protocol_handler = ProtocolCommands(self)
 #        device_handler = DeviceCommands(self)
         auth_handler = AuthCommands(self)
-        
+
         # Register with registry
         self.command_registry.register_handler(protocol_handler)
 #        self.command_registry.register_handler(device_handler)
         self.command_registry.register_handler(auth_handler)
-        
+
         # Log registered commands
         commands = self.command_registry.get_all_commands()
         logging.debug(f"Registered {len(commands)} commands: {', '.join(sorted(commands))}")
@@ -122,7 +122,7 @@ class NetworkManager:
             daemon=True
         )
         self.network_thread.start()
-        
+
 
         self.connect_to_centrald(self.centrald_host, self.centrald_port)
 
@@ -168,14 +168,14 @@ class NetworkManager:
 
             # Create unique ID for this connection
             conn_id = str(uuid.uuid4())
-            
+
             # Create new connection object
             conn = Connection(conn_id, client_sock, client_addr, conn_type='client')
-            
+
             # Register callbacks
             conn.register_command_callback(self._on_command_received)
             conn.register_closed_callback(self._on_connection_closed)
-            
+
             # Add to connection manager
             self.connection_manager.add_connection(conn)
 
@@ -197,7 +197,7 @@ class NetworkManager:
         while self.running:
             try:
                 current_time = time.time()
-                
+
                 # Run connection cleanup every minute
                 if current_time - last_cleanup_time > 60.0:
                     self.connection_manager.clean_stale_connections()
@@ -214,7 +214,7 @@ class NetworkManager:
                 with self._lock:
                     # Add self-pipe for wakeup
                     readable.append(self.wake_r)
-                    
+
                     # Add server socket
                     if self.server_socket:
                         readable.append(self.server_socket)
@@ -227,7 +227,7 @@ class NetworkManager:
                                 writable.append(conn.socket)
                             else:
                                 readable.append(conn.socket)
-                                
+
                             # Add to writable if there's data to send
                             if conn.write_buffer:
                                 writable.append(conn.socket)
@@ -239,7 +239,7 @@ class NetworkManager:
                 else:
                     select_timeout = 0.000001
 
-                
+
                 # Wait for network events
                 if not readable and not writable:
                     # No sockets to monitor, shorter sleep to check for messages
@@ -330,10 +330,10 @@ class NetworkManager:
             logging.error(f"Socket error connecting to {conn.name}: {os.strerror(err)}")
             conn.close()
             return
-            
+
         # Connection successful
         conn.update_state(ConnectionState.CONNECTED, "Connection established")
-        
+
         # For centrald connections, send registration
         if conn.type == 'centrald' and not conn.registration_sent:
             conn.registration_sent = True
@@ -383,19 +383,19 @@ class NetworkManager:
 #                conn.command_queue = []
             conn.command_queue.put(QueuedCommand(f"{cmd} {params}"))
             return
-        
+
         # For regular commands that need responses, set command_in_progress
         if not is_immediate_command:
             conn.command_in_progress = True
-        
+
         # Dispatch to registry
         if self.command_registry.can_handle(cmd):
             success, result = self.command_registry.dispatch(cmd, conn, params)
-            
+
             # Check if command was handled and still expects a response
             if not is_immediate_command and conn.command_in_progress:
                 needs_response = self.command_registry.needs_response(cmd)
-                
+
                 if needs_response:
                     if success:
                         if isinstance(result, bool):
@@ -413,7 +413,7 @@ class NetworkManager:
             # Unknown command - log and ignore
             logging.warning(f"Unknown command from {conn.name}: '{line}' - ignoring")
             conn.command_in_progress = False
-            
+
         # Check for queued commands if this command has completed
         if not conn.command_in_progress and hasattr(conn, 'command_queue') and conn.command_queue:
             # Check the type of object in the queue before unpacking
@@ -429,7 +429,7 @@ class NetworkManager:
             next_params = next_cmd_item.command.split(maxsplit=1)[1] if " " in next_cmd_item.command else ""
 
             self._process_next_command(conn, next_cmd, next_params)
-            
+
     def _process_next_command(self, conn, cmd, params):
         """Process the next command from the queue."""
         conn.command_in_progress = True
@@ -452,24 +452,24 @@ class NetworkManager:
             # Create new connection object
             conn_id = str(uuid.uuid4())
             conn = Connection(conn_id, sock, (host, port), conn_type='centrald')
-            
+
             # Register callbacks
             conn.register_command_callback(self._on_command_received)
             conn.register_closed_callback(self._on_connection_closed)
-            
+
             # Update state to connecting
             conn.update_state(ConnectionState.CONNECTING, "Connecting to centrald")
-            
+
             # Add to connection manager
             self.connection_manager.add_connection(conn)
 
             logging.debug(f"Connecting to centrald at {host}:{port}")
             return conn_id
-            
+
         except Exception as e:
             logging.error(f"Exception in connect_to_centrald: {e}")
             return None
-    
+
     def _send_meta_info(self, conn):
         """Send metadata information about all values."""
         with self._lock:
@@ -506,7 +506,7 @@ class NetworkManager:
         """Broadcast a value to all authenticated connections."""
         # Get all authenticated connections
         auth_conns = self.connection_manager.get_connections_by_state(ConnectionState.AUTH_OK)
-        
+
         # Send to each connection
         for conn in auth_conns.values():
             self._send_value(conn, value)
@@ -553,7 +553,7 @@ class NetworkManager:
     def set_bop_state(self, state, new_bop_state, message=None):
         """
         Set both device state and BOP state at once.
-        
+
         Args:
             state: Device state
             new_bop_state: Block operation state
@@ -561,7 +561,7 @@ class NetworkManager:
         """
         # Update internal states
         old_state = self.device_state
-        
+
         self.device_state = state
         self.bop_state = new_bop_state
         self.last_status_message = message
@@ -571,7 +571,7 @@ class NetworkManager:
         if message:
             bop_msg += f" \"{message}\""
         bop_msg += "\n"
-        
+
         # Broadcast to all connections
         self.connection_manager.broadcast_message(bop_msg)
 
@@ -605,15 +605,15 @@ class NetworkManager:
         if message:
             status_msg += f" \"{message}\""
         status_msg += "\n"
-        
+
         # Broadcast to all connections
         self.connection_manager.broadcast_message(status_msg)
-        
+
         # Update internal state
         old_state = self.device_state
         self.device_state = state
         self.last_status_message = message
-        
+
         # Call state changed callback if registered
         if old_state != state and self.state_changed_callback:
             self.state_changed_callback(old_state, state, message)
@@ -624,16 +624,16 @@ class NetworkManager:
         if message:
             bop_msg += f" \"{message}\""
         bop_msg += "\n"
-        
+
         # Broadcast to all connections
         self.connection_manager.broadcast_message(bop_msg)
-        
+
         # Update internal states
         old_state = self.device_state
         self.device_state = state
         self.bop_state = bop_state
         self.last_status_message = message
-        
+
         # Call state changed callback if registered
         if old_state != state and self.state_changed_callback:
             self.state_changed_callback(old_state, state, message)
@@ -681,7 +681,7 @@ class NetworkManager:
         """Broadcast a value to all authenticated connections."""
         # Get all authenticated connections
         auth_conns = self.connection_manager.get_connections_by_state(ConnectionState.AUTH_OK)
-        
+
         # Send to each connection
         for conn in auth_conns.values():
             self._send_value(conn, value)
@@ -707,10 +707,10 @@ class NetworkManager:
         if not conn:
             logging.warning(f"Cannot send command to unknown connection: {conn_id}")
             return False
-            
+
         # Use the connection's send_command method
         return conn.send_command(command, callback)
-    
+
     def _complete_client_authorization(self, conn):
         """Complete client authorization process."""
         logging.debug(f"Authorizing client {conn.name} (ID: {conn.device_id})")
@@ -778,12 +778,12 @@ class NetworkManager:
     def handle_value_change_request(self, conn, value_name, value_data):
         """
         Handle a request to change a value.
-        
+
         Args:
             conn: Connection making the request
             value_name: Name of the value to change
             value_data: New value data as string
-            
+
         Returns:
             True if value was changed, False otherwise
         """
@@ -792,32 +792,29 @@ class NetworkManager:
             logging.warning(f"Attempt to change value from non-authenticated connection: {conn.name}")
             self._send_error_response(conn, "Not authenticated")
             return False
-            
+
         # Check if value exists
         with self._lock:
             if value_name not in self.values:
                 logging.warning(f"Attempt to change non-existent value: {value_name}")
                 self._send_error_response(conn, f"No such value: {value_name}")
                 return False
-                
+
             value = self.values[value_name]
-            
+
         # Check if value is writable
         if not value.is_writable():
             logging.warning(f"Attempt to change read-only value: {value_name}")
             self._send_error_response(conn, f"Value {value_name} is read-only")
             return False
-            
+
         # Attempt to update the value
         try:
             # Update the value from client
             value.update_from_network(value_data)
             # The callbacks didn't handle distribution:
             if value.need_send():
-#                logging.debug(f"Value {value_name} needs immediate distribution after callbacks")
                 self.distribute_value_immediate(value)
-#            else:
-#                logging.debug(f"Value {value_name} already distributed by callbacks")
             self._send_ok_response(conn, f"Value {value_name} changed")
             return True
 
@@ -829,13 +826,13 @@ class NetworkManager:
     def distribute_value_immediate(self, value):
         """
         Immediately distribute a value to all connections, bypassing command queue.
-        
+
         Args:
             value: The value to distribute
         """
         # Get all authenticated connections
         auth_conns = self.connection_manager.get_connections_by_state(ConnectionState.AUTH_OK)
-        
+
         # Send raw value message to each connection directly
         for conn in auth_conns.values():
             try:
@@ -843,6 +840,6 @@ class NetworkManager:
                 conn.send(msg)
             except Exception as e:
                 logging.error(f"Error sending immediate value to {conn.name}: {e}")
-        
+
         # Mark value as sent
         value.reset_need_send()

@@ -24,7 +24,7 @@ class TemperatureSensor(Device):
         """Register TemperatureSensor-specific options."""
         parser.add_argument('--initial-temp', type=float, default=20.0,
                           help='Initial temperature value')
-    
+
     @classmethod
     def process_args(cls, device, args):
         """Process arguments for this device."""

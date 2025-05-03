@@ -15,7 +15,7 @@ from commands import CommandRegistry
 
 class Filterd(Device):
     """Base class for filter wheel devices.
-    
+
     This class implements the main functionality of a filter wheel device,
     providing a common interface for different filter wheel implementations.
     """
@@ -28,9 +28,9 @@ class Filterd(Device):
     @classmethod
     def register_options(cls, parser):
         """Register Filterd-specific command line options."""
-        parser.add_argument('-F', '--filters', 
+        parser.add_argument('-F', '--filters',
                           help='Filter names (colon-separated)')
-    
+
     @classmethod
     def process_args(cls, device, args):
         """Process arguments for this specific device."""
@@ -92,7 +92,7 @@ class Filterd(Device):
         if self.default_filter and self.arg_default_filter:
             self.default_filter.copy_sel(self.filter)
             self.default_filter.set_value_char_arr(self.arg_default_filter)
-            
+
         if self.daytime_filter and self.arg_daytime_filter:
             self.daytime_filter.copy_sel(self.filter)
             self.daytime_filter.set_value_char_arr(self.arg_daytime_filter)
@@ -114,7 +114,7 @@ class Filterd(Device):
     def on_state_changed(self, old_state, new_state, message):
         """Handle device state changes."""
         logging.debug(f"Filter state changed from {old_state:x} to {new_state:x}: {message}")
-        
+
         # Check for day/night transition
         # bullshit, this is in centrald state, not here and that would be done really differently
         #try:
@@ -126,13 +126,13 @@ class Filterd(Device):
     def set_filter_num(self, new_filter):
         """
         Set filter number (position).
-        
+
         This is the method that subclasses should override to implement
         hardware-specific filter wheel control.
-        
+
         Args:
             new_filter: New filter position
-            
+
         Returns:
             0 on success, -1 on error
         """
@@ -141,9 +141,9 @@ class Filterd(Device):
     def get_filter_num(self):
         """
         Get current filter number (position).
-        
+
         Subclasses should override this to report the actual hardware position.
-        
+
         Returns:
             Current filter position
         """
@@ -152,7 +152,7 @@ class Filterd(Device):
     def on_filter_changed(self, old_value, new_value):
         """
         Handle filter value change from client.
-        
+
         Args:
             old_value: Previous filter position
             new_value: New filter position
@@ -168,14 +168,14 @@ class Filterd(Device):
             "filter move started",
             self.BOP_EXPOSURE
         )
-        
+
         # Log movement
         logging.info(f"moving filter from #{self.filter.value} ({self.filter.get_sel_name()}) "
                      f"to #{new_filter} ({self.filter.get_sel_name(new_filter)})")
-                     
+
         # Actually move the filter
         ret = self.set_filter_num(new_filter)
-       
+
         if ret == 0:
             logging.info(f"filter moved to #{new_filter} ({self.filter.get_sel_name()})")
             # just make sure that the value is actually updated (command case)
@@ -189,15 +189,15 @@ class Filterd(Device):
             if ret == -1:
                 self.set_state( self._state | self.HW_ERROR, "filter movement failed", 0)
                 return ret
-        
+
         return ret
 
     def home_filter(self):
         """
         Home the filter wheel.
-        
+
         Subclasses should override this for hardware implementations.
-        
+
         Returns:
             0 on success, -1 if not implemented
         """
@@ -206,44 +206,44 @@ class Filterd(Device):
     def set_filters(self, filters_str):
         """
         Set filter names from a string.
-        
+
         Args:
             filters_str: String containing filter names separated by colons
-            
+
         Returns:
             0 on success, -1 on error
         """
         filter_list = []
-        
+
         # Split by colon, handling quotes
         tf = filters_str
-        
+
         while tf:
             # Skip leading spaces and separators
             tf = tf.lstrip(':"\' ')
             if not tf:
                 break
-                
+
             # Find end of filter name
             pos = tf.find(':')
             if pos == -1:
                 # Last filter
                 filter_list.append(tf)
                 break
-                
+
             # Add filter and continue
             filter_list.append(tf[:pos])
             tf = tf[pos+1:]
-        
+
         # If no filters found, return error
         if not filter_list:
             return -1
-            
+
         # Clear and add all filters
         self.filter.clear_selection()
         for f in filter_list:
             self.filter.add_sel_val(f)
-            
+
         return 0
 
     def add_filter(self, new_filter):

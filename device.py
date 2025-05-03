@@ -53,7 +53,7 @@ class Device:
     STOP_EVERYTHING = 0x40000000
     CAN_MOVE = 0x00000000
     STOP_MASK = 0x40000000
-    
+
     # Device blocking bits
     DEVICE_BLOCK_OPEN = 0x00002000
     DEVICE_BLOCK_CLOSE = 0x00004000
@@ -97,7 +97,7 @@ class Device:
         # Track expected progress times
         self.state_start = float('nan')
         self.state_expected_end = float('nan')
-        
+
         # Weather timeout
         self.weather_timeout = 0
         self.weather_reason = None
@@ -135,11 +135,11 @@ class Device:
         """Called when a centrald connection is established and authenticated."""
         # Now we can send our status and metadata
         logging.debug("Connected to centrald, sending device status")
-        
+
         # Send state after connection
         # This should match the C++ behavior
         self.set_state(self._state) # , "Connected to centrald")
-        
+
         # Set BOP state
         self.set_full_bop_state(self._bop_state)
 
@@ -158,24 +158,24 @@ class Device:
     def set_state(self, new_state, description=None, new_bop=None):
         """
         Set device state with optional BOP state.
-        
+
         Args:
             new_state: The new state to set
             description: Optional text description of the state change
             new_bop: Optional BOP state to set (if None, BOP state remains unchanged)
         """
         logging.debug(f"Device.set_state({new_state:x}, '{description}', {new_bop if new_bop is not None else 'None'})")
-        
+
         # Store old states for notifications
         old_state = self._state
-        
+
         # Update internal state
         self._state = new_state
 
         # Process any queued values first - these will be sent immediately
         # This ensures all value changes happen before state changes
         self.check_queued_values()
-        
+
         # Update BOP state if provided
         if new_bop is not None:
             self.set_full_bop_state(new_bop)  # This will handle BOP state changes
@@ -205,7 +205,7 @@ class Device:
         # Skip if BOP state hasn't changed
         if self._bop_state == new_bop_state:
             return
-            
+
         # Adjust BOP state for queued values
         for value, op, new_value in self.queued_values.values():
             if hasattr(self, 'mask_que_value_bop_state'):
@@ -214,7 +214,7 @@ class Device:
         # Store old state values
         old_state = self._state
         old_bop = self._bop_state
-        
+
         # Update internal BOP state
         self._bop_state = new_bop_state
 
@@ -400,7 +400,7 @@ class DeviceCommands:
             with self.network._lock:
                 for value_name, value in self.network.values.items():
                     self.network._send_value(conn, value)
-            
+
             # Send current state
             self.network._send_status(conn)
 

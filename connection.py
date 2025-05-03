@@ -11,11 +11,11 @@ from constants import ConnectionState
 
 class QueuedCommand:
     """Represents a command queued for execution."""
-    
+
     def __init__(self, command: str, callback: Optional[Callable] = None, timeout: float = 60.0):
         """
         Initialize a queued command.
-        
+
         Args:
             command: The command to execute
             callback: Optional callback function for when command completes
@@ -25,7 +25,7 @@ class QueuedCommand:
         self.callback = callback
         self.timeout = timeout
         self.queued_at = time.time()
-        
+
     def is_timed_out(self) -> bool:
         """Check if the command has timed out."""
         return (time.time() - self.queued_at) > self.timeout
@@ -33,19 +33,19 @@ class QueuedCommand:
 class Connection:
     """
     Represents a network connection in the RTS2 system.
-    
+
     This class encapsulates the state and behavior of network connections,
     providing a unified interface for different connection types.
     """
-    
-    def __init__(self, 
-                 conn_id: str, 
-                 sock: socket.socket, 
-                 addr: Tuple[str, int], 
+
+    def __init__(self,
+                 conn_id: str,
+                 sock: socket.socket,
+                 addr: Tuple[str, int],
                  conn_type: str = 'client'):
         """
         Initialize a new connection.
-        
+
         Args:
             conn_id: Unique identifier for this connection
             sock: The socket object
@@ -58,16 +58,16 @@ class Connection:
         self.addr = addr
         self.type = conn_type
         self.state = ConnectionState.CONNECTED
-        
+
         # Buffer management
         self.buffer = bytearray()
         self.write_buffer = bytearray()
-        
+
         # Connection metadata
         self.last_activity = time.time()
         self.connection_time = time.time()
         self.description = f"{conn_type}-{addr[0]}:{addr[1]}"
-        
+
         # Authentication and identification
         self.name = f"{conn_type}-{conn_id}"
         self.device_id = -1
@@ -75,21 +75,21 @@ class Connection:
         self.remote_device_name = None
         self.remote_device_type = None
         self.auth_key = None
-        
+
         # Command tracking
         self.command_in_progress = False
         self.current_command = None
         self.pending_command = None
         self.pending_command_time = None
         self.pending_command_callback = None
-        
+
         # Type-specific properties
         if conn_type == 'centrald':
             self.is_centrald = True
             self.registration_sent = False
         else:
             self.is_centrald = False
-        
+
         # State tracking for remote devices
         self.device_state = 0
         self.bop_state = 0
@@ -104,119 +104,119 @@ class Connection:
         # Add a new thread for processing the command queue
         self.command_queue_thread = None
         self.queue_processor_running = False
-        
+
         # Timeout and keepalive settings - matching C++ implementation
         self.connection_timeout = 300.0  # 5 minutes default timeout
         self.last_keepalive_time = time.time()
 
         logging.debug(f"Created {conn_type} connection {self.name} from {addr[0]}:{addr[1]}")
-    
+
     def set_connection_timeout(self, timeout: float) -> None:
         """
         Set the connection timeout value.
-        
+
         Args:
             timeout: Timeout value in seconds
         """
         self.connection_timeout = timeout
         logging.debug(f"Set connection timeout for {self.name} to {timeout} seconds")
-    
+
     def update_state(self, new_state: ConnectionState, reason: str = "") -> None:
         """
         Update the connection state with logging.
-        
+
         Args:
             new_state: The new state to set
             reason: Optional reason for the state change
         """
         old_state = self.state
         self.state = new_state
-        
+
         # Log the state change
         logging.debug(f"Connection {self.name} state change: {old_state} -> {new_state} {reason}")
-        
+
         # Update last activity timestamp
         self.last_activity = time.time()
-    
+
     def send(self, data: Union[str, bytes]) -> bool:
         """
         Send data through this connection.
-        
+
         Args:
             data: Data to send (string or bytes)
-            
+
         Returns:
             True if data was queued for sending, False otherwise
         """
         if self.socket is None:
             return False
-        
+
         # Convert string to bytes if needed
         if isinstance(data, str):
             data = data.encode('utf-8')
-        
+
         # Log the outgoing message
         logging.debug(f"SEND [{self.description}]: {data!r}")
-        
+
         # Add to write buffer
         self.write_buffer += data
-        
+
         # Update activity timestamp
         self.last_activity = time.time()
-        
+
         # Try to flush immediately if possible
         try:
             if self.socket.getblocking():
                 self.socket.send(data)
         except:
             pass  # Will be sent by write handler
-            
+
         return True
-    
+
     def send_msg(self, message: str) -> int:
         """
         Send a message with trailing newline.
-        
+
         Args:
             message: Message to send
-            
+
         Returns:
             Number of bytes queued or -1 on error
         """
         if not message.endswith('\n'):
             message += '\n'
-            
+
         if self.send(message):
             return len(message.encode('utf-8'))
         return -1
-    
+
     def send_value_raw(self, value_name: str, value_string: str) -> None:
         """
         Send a raw value update message.
-        
+
         Args:
             value_name: Name of the value
             value_string: String representation of the value
         """
         msg = f"V {value_name} {value_string}\n"
         self.send(msg)
-    
+
     def process_data(self, data: bytes) -> None:
         """
         Process received data.
-        
+
         Args:
             data: Newly received data
         """
         # Update activity timestamp
         self.last_activity = time.time()
-        
+
         # Add to buffer
         self.buffer.extend(data)
-        
+
         # Process complete lines
         self._process_buffer()
-    
+
     def _process_buffer(self) -> None:
         """Process data in the connection's buffer."""
         # Keep processing until no more complete lines
@@ -224,45 +224,45 @@ class Connection:
             newline_pos = self.buffer.find(b'\n')
             if newline_pos == -1:
                 break
-                
+
             # Extract line and remove from buffer
             line = self.buffer[:newline_pos].decode('utf-8', errors='replace')
             self.buffer = self.buffer[newline_pos + 1:]
-            
+
             # Skip empty lines
             if not line:
                 continue
-                
+
             # Log the received line
             logging.debug(f"RECV [{self.description}]: {line!r}")
-            
+
             # Return result to pending command if this is a response line
             if line[0] in ['+', '-']:
                 self._handle_command_return(line)
                 continue
-                
+
             # Store for command processing
             self.current_command = line
-            
+
             # Notify NetworkManager of the command
             if hasattr(self, 'command_callback') and callable(self.command_callback):
                 self.command_callback(self.id, line)
-    
+
     def is_timed_out(self, timeout: float) -> bool:
         """
         Check if the connection has timed out.
-        
+
         Args:
             timeout: Timeout duration in seconds
-            
+
         Returns:
             True if timed out, False otherwise
         """
         current_time = time.time()
-        
+
         # Use provided timeout or the connection's configured timeout
         actual_timeout = timeout if timeout is not None else self.connection_timeout
-        
+
         # Different timeout criteria based on connection state and type
         if self.type == 'centrald' and self.state != ConnectionState.AUTH_OK:
             # Shorter timeout for centrald connections that haven't authenticated
@@ -274,22 +274,22 @@ class Connection:
             # In C++ implementation, timeout is enforced after 2x the timeout value
             # So we check if 2 * actual_timeout has passed since last activity
             return current_time - self.last_activity > (2 * actual_timeout)
-    
+
     def check_keepalive(self) -> bool:
         """
         Check if it's time to send a keepalive message.
-        
+
         Following the C++ implementation, we send a keepalive if 1/4 of the
         timeout period has passed since the last activity.
-        
+
         Returns:
             True if keepalive was sent, False otherwise
         """
         current_time = time.time()
-        
+
         # Calculate the idle time threshold (1/4 of timeout)
         idle_threshold = self.connection_timeout / 4
-        
+
         # Check if we've been idle for more than the threshold
         idle_time = current_time - self.last_activity
         if idle_time > idle_threshold:
@@ -297,19 +297,19 @@ class Connection:
             if self.send_keepalive():
                 self.last_keepalive_time = current_time
                 return True
-        
+
         return False
-    
+
     def send_keepalive(self) -> bool:
         """
         Send a keepalive message using the PROTO_TECHNICAL command.
-        
+
         Returns:
             True if successful, False otherwise
         """
         logging.debug(f"Sending keepalive to {self.name}")
         return self.send_msg("T ready")
-    
+
     def start_queue_processor(self):
         """Start the command queue processor thread."""
         if self.command_queue_thread is None or not self.command_queue_thread.is_alive():
@@ -499,21 +499,21 @@ class Connection:
 
         self.socket = None
         self.update_state(ConnectionState.BROKEN, "Connection closed")
-        
+
         # Notify about closure if callback is registered
         if hasattr(self, 'closed_callback') and callable(self.closed_callback):
             self.closed_callback(self.id)
-    
+
     def flush_write_buffer(self) -> bool:
         """
         Attempt to flush the write buffer.
-        
+
         Returns:
             True if successful (or nothing to flush), False on error
         """
         if not self.socket or not self.write_buffer:
             return True
-            
+
         try:
             # Send as much as possible
             sent = self.socket.send(self.write_buffer)
@@ -527,25 +527,25 @@ class Connection:
             logging.error(f"Error writing to {self.name}: {e}")
             self.close()
             return False
-    
+
     def register_command_callback(self, callback: Callable) -> None:
         """
         Register a callback for command processing.
-        
+
         Args:
             callback: Function to call when a command is received
         """
         self.command_callback = callback
-    
+
     def register_closed_callback(self, callback: Callable) -> None:
         """
         Register a callback for connection closure.
-        
+
         Args:
             callback: Function to call when the connection is closed
         """
         self.closed_callback = callback
-   
+
     def update_descriptive_name(self):
         """Update the connection's name to be more descriptive based on available information."""
         # Basic connection type description
@@ -558,17 +558,17 @@ class Connection:
             # Use device_id if available
             #if self.device_id > 0:
             #    self.name = f"client-{self.device_id}"
-                
+
             # Check for entity info in NetworkManager
             from netman import NetworkManager
             net_manager = NetworkManager._instance if hasattr(NetworkManager, '_instance') else None
-            
+
             if net_manager and self.device_id in net_manager.entities:
                 entity = net_manager.entities[self.device_id]
                 if 'type' in entity:
                     client_type = entity.get('type', 'unknown')
                     self.name = f"{client_type}-{self.device_id}"
-            
+
         # If remote device name is known (for device-to-device connections)
         if self.remote_device_name:
             from constants import DevTypes
@@ -586,85 +586,85 @@ class Connection:
 class ConnectionManager:
     """
     Manages a collection of Connection objects.
-    
+
     This class provides a unified interface for managing connections
     of different types.
     """
-    
+
     def __init__(self):
         """Initialize the connection manager."""
         self.connections = {}  # id -> Connection
         self._lock = threading.RLock()
-        
+
     def add_connection(self, connection: Connection) -> None:
         """
         Add a connection to the manager.
-        
+
         Args:
             connection: Connection object to add
         """
         with self._lock:
             self.connections[connection.id] = connection
-            
+
     def remove_connection(self, conn_id: str) -> None:
         """
         Remove a connection from the manager.
-        
+
         Args:
             conn_id: ID of the connection to remove
         """
         with self._lock:
             if conn_id in self.connections:
                 del self.connections[conn_id]
-                
+
     def get_connection(self, conn_id: str) -> Optional[Connection]:
         """
         Get a connection by ID.
-        
+
         Args:
             conn_id: ID of the connection to get
-            
+
         Returns:
             Connection object or None if not found
         """
         with self._lock:
             return self.connections.get(conn_id)
-            
+
     def get_connections_by_type(self, conn_type: str) -> Dict[str, Connection]:
         """
         Get all connections of a specific type.
-        
+
         Args:
             conn_type: Connection type to filter by
-            
+
         Returns:
             Dictionary of connection ID -> Connection object
         """
         with self._lock:
-            return {k: v for k, v in self.connections.items() 
+            return {k: v for k, v in self.connections.items()
                     if v.type == conn_type}
-                    
+
     def get_connections_by_state(self, state: ConnectionState) -> Dict[str, Connection]:
         """
         Get all connections in a specific state.
-        
+
         Args:
             state: Connection state to filter by
-            
+
         Returns:
             Dictionary of connection ID -> Connection object
         """
         with self._lock:
-            return {k: v for k, v in self.connections.items() 
+            return {k: v for k, v in self.connections.items()
                     if v.state == state}
-                    
+
     def find_connection_by_socket(self, sock: socket.socket) -> Optional[Connection]:
         """
         Find a connection by its socket object.
-        
+
         Args:
             sock: Socket object to search for
-            
+
         Returns:
             Connection object or None if not found
         """
@@ -674,19 +674,19 @@ class ConnectionManager:
                 if conn.socket and id(conn.socket) == sock_id:
                     return conn
         return None
-        
+
     def close_all_connections(self) -> None:
         """Close all connections."""
         with self._lock:
             for conn in list(self.connections.values()):
                 conn.close()
-                
-    def broadcast_message(self, message: str, 
+
+    def broadcast_message(self, message: str,
                           conn_type: Optional[str] = None,
                           min_state: Optional[ConnectionState] = None) -> None:
         """
         Broadcast a message to multiple connections.
-        
+
         Args:
             message: Message to broadcast
             conn_type: Optional connection type filter
@@ -699,7 +699,7 @@ class ConnectionManager:
                     continue
                 if min_state and conn.state < min_state:
                     continue
-                    
+
                 # Send message
                 conn.send_msg(message)
 
@@ -733,7 +733,7 @@ class ConnectionManager:
                     return conn
 
         return None
-           
+
     def check_all_keepalives(self) -> None:
         """Check all connections for keepalive needs."""
         with self._lock:
@@ -741,7 +741,7 @@ class ConnectionManager:
                 # Skip broken connections
                 if conn.state in (ConnectionState.BROKEN, ConnectionState.DELETE):
                     continue
-                    
+
                 # For established connections, check if keepalive needed
                 if conn.state not in (ConnectionState.CONNECTING, ConnectionState.INPROGRESS):
                     conn.check_keepalive()
@@ -749,7 +749,7 @@ class ConnectionManager:
     def clean_stale_connections(self, timeout: float = None) -> None:
         """
         Clean up stale connections.
-        
+
         Args:
             timeout: Timeout duration in seconds (default: None, uses connection's timeout)
         """

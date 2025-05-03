@@ -16,7 +16,7 @@ from app import App
 class Alta(Filterd):
     """
     Alta filter wheel driver for spectrograph.
-    
+
     This is a Python implementation of the Alta filter wheel driver from RTS2.
     """
 
@@ -24,7 +24,7 @@ class Alta(Filterd):
     def register_options(cls, parser):
         """Register Alta-specific command line options."""
         super().register_options(parser)
-        parser.add_argument('-f', '--device-file', 
+        parser.add_argument('-f', '--device-file',
                           help='Serial port with the module (usually /dev/ttyUSB for Arduino USB serial connection)')
 
     @classmethod
@@ -41,19 +41,19 @@ class Alta(Filterd):
         # Serial connection
         self.device_file = None
         self.serial_conn = None
-        
+
         # Current filter position
         self.filter_num = 0
-        
+
         # Create values
         self.focpos = ValueInteger("FOCPOS", "[int] focuser position", write_to_fits=True)
         self.focpos.set_writable()
-        
+
         self.neon = ValueSelection("NEON", "[on/off] neon lamp status", write_to_fits=True)
         self.neon.set_writable()
         self.neon.add_sel_val("off")
         self.neon.add_sel_val("on")
-        
+
         # Filter position values
         self.f0pos = ValueInteger("F0POS", "[int] filter 0 position", write_to_fits=True)
         self.f1pos = ValueInteger("F1POS", "[int] filter 1 position", write_to_fits=True)
@@ -63,7 +63,7 @@ class Alta(Filterd):
         self.f5pos = ValueInteger("F5POS", "[int] filter 5 position", write_to_fits=True)
         self.f6pos = ValueInteger("F6POS", "[int] filter 6 position", write_to_fits=True)
         self.f7pos = ValueInteger("F7POS", "[int] filter 7 position", write_to_fits=True)
-        
+
         # Make filter positions writable
         self.f0pos.set_writable()
         self.f1pos.set_writable()
@@ -73,43 +73,43 @@ class Alta(Filterd):
         self.f5pos.set_writable()
         self.f6pos.set_writable()
         self.f7pos.set_writable()
-        
+
         # Motor 0 values (focuser)
         self.m0pwr = ValueSelection("M0PWR", "[true/false] motor power status", write_to_fits=True)
         self.m0pwr.set_writable()
         self.m0pwr.add_sel_val("off")
         self.m0pwr.add_sel_val("on")
-        
+
         self.m0hom = ValueSelection("M0HOM", "[true/false] motor homing status", write_to_fits=True)
         self.m0hom.add_sel_val("false")
         self.m0hom.add_sel_val("true")
-        
+
         self.m0pos = ValueInteger("M0POS", "[int] motor position", write_to_fits=True)
         self.m0spd = ValueInteger("M0SPD", "[int] motor max speed", write_to_fits=True)
         self.m0acc = ValueInteger("M0ACC", "[int] motor acceleration", write_to_fits=True)
-        
+
         self.m0pos.set_writable()
         self.m0spd.set_writable()
         self.m0acc.set_writable()
-        
+
         # Motor 1 values (filter wheel)
         self.m1pwr = ValueSelection("M1PWR", "[true/false] motor power status", write_to_fits=True)
         self.m1pwr.set_writable()
         self.m1pwr.add_sel_val("off")
         self.m1pwr.add_sel_val("on")
-        
+
         self.m1hom = ValueSelection("M1HOM", "[true/false] motor homing status", write_to_fits=True)
         self.m1hom.add_sel_val("false")
         self.m1hom.add_sel_val("true")
-        
+
         self.m1pos = ValueInteger("M1POS", "[int] motor position", write_to_fits=True)
         self.m1spd = ValueInteger("M1SPD", "[int] motor max speed", write_to_fits=True)
         self.m1acc = ValueInteger("M1ACC", "[int] motor acceleration", write_to_fits=True)
-        
+
         self.m1pos.set_writable()
         self.m1spd.set_writable()
         self.m1acc.set_writable()
-        
+
         # Set default values similar to the C++ implementation
         self.f0pos.value = 2000
         self.f1pos.value = 54500
@@ -119,10 +119,10 @@ class Alta(Filterd):
         self.f5pos.value = 292000  # grism
         self.f6pos.value = 300000  # unused
         self.f7pos.value = 300000  # limit
-        
+
         self.m0hom.value = 0
         self.m1hom.value = 0
-        
+
         # Register all values with the device
         self.register_value(self.focpos)
         self.register_value(self.neon)
@@ -148,7 +148,7 @@ class Alta(Filterd):
     def start(self):
         """Start the device."""
         super().start()
-        
+
         # Try to initialize the device if we have a serial port
         if self.device_file:
             try:
@@ -159,7 +159,7 @@ class Alta(Filterd):
                 logging.error(f"Error initializing device: {e}")
                 self.set_state(self.STATE_IDLE | self.ERROR_HW, "Initialization error")
                 return
-                
+
         # Set device ready after initialization
         self.set_ready("Alta filter wheel ready")
 
@@ -169,14 +169,14 @@ class Alta(Filterd):
         if self.serial_conn:
             self.serial_conn.close()
             self.serial_conn = None
-            
+
         super().stop()
 
     def _init_serial(self):
         """Initialize serial connection."""
         if not self.device_file:
             raise ValueError("No device file specified")
-            
+
         logging.debug(f"Opening serial connection to {self.device_file}")
         self.serial_conn = serial.Serial(
             port=self.device_file,
@@ -186,11 +186,11 @@ class Alta(Filterd):
             stopbits=serial.STOPBITS_ONE,
             timeout=5
         )
-        
+
         # Clear any buffered data
         self.serial_conn.reset_input_buffer()
         self.serial_conn.reset_output_buffer()
-        
+
         # Wait for device to initialize
         time.sleep(1)
 
@@ -198,11 +198,11 @@ class Alta(Filterd):
         """Send a command to the device."""
         if not self.serial_conn:
             raise RuntimeError("No serial connection established")
-            
+
         # Ensure command ends with newline
         if not cmd.endswith('\n'):
             cmd += '\n'
-            
+
         logging.debug(f"Sending command: {cmd.strip()}")
         self.serial_conn.write(cmd.encode())
         return True
@@ -211,11 +211,11 @@ class Alta(Filterd):
         """Read a response line from the device."""
         if not self.serial_conn:
             raise RuntimeError("No serial connection established")
-            
+
         # Store original timeout
         original_timeout = self.serial_conn.timeout
         self.serial_conn.timeout = timeout
-        
+
         try:
             response = self.serial_conn.readline().decode().strip()
             logging.debug(f"Received response: {response}")
@@ -228,17 +228,17 @@ class Alta(Filterd):
         """Check if we have the correct device."""
         self._send_command("ID")
         response = self._read_response()
-        
+
         if response != "RPI_PICO_SPECTRAL_AVCR":
             raise RuntimeError(f"Invalid device ID: {response}")
-            
+
         logging.info(f"Connected to device: {response}")
         return True
 
     def _update_status(self):
         """Update device status by querying the hardware."""
         self._send_command("STATUS")
-        
+
         # Read motor 0 status
         response = self._read_response()
         motor_info = response.split()
@@ -247,7 +247,7 @@ class Alta(Filterd):
             self.m0pos.value = int(motor_info[3])
             self.m0spd.value = int(float(motor_info[4]))
             self.m0acc.value = int(float(motor_info[5])) if len(motor_info) > 5 else 0
-            
+
         # Read motor 1 status
         response = self._read_response()
         motor_info = response.split()
@@ -256,19 +256,19 @@ class Alta(Filterd):
             self.m1pos.value = int(motor_info[3])
             self.m1spd.value = int(float(motor_info[4]))
             self.m1acc.value = int(float(motor_info[5])) if len(motor_info) > 5 else 0
-            
+
         # Read motor 2 status (if present)
         response = self._read_response()
-        
+
         # Read shutter status
         response = self._read_response()
-        
+
         # Read neon status
         response = self._read_response()
         neon_info = response.split()
         if len(neon_info) >= 2 and neon_info[0] == "R":
             self.neon.value = int(neon_info[1])
-            
+
         return True
 
     def get_filter_num(self):
@@ -278,17 +278,17 @@ class Alta(Filterd):
     def set_filter_num(self, new_filter):
         """
         Set filter number (position).
-        
+
         Args:
             new_filter: New filter position
-            
+
         Returns:
             0 on success, -1 on error
         """
         # Check filter number validity
         if new_filter < 0 or new_filter >= 8:
             return -1
-            
+
         # Get the target position for this filter
         target_positions = [
             self.f0pos.value,
@@ -300,26 +300,26 @@ class Alta(Filterd):
             self.f6pos.value,
             self.f7pos.value
         ]
-        
+
         target_position = target_positions[new_filter]
         logging.info(f"Moving filter to position {new_filter}, motor position {target_position}")
-        
+
         try:
             # Send the position command to motor 1
             cmd = f"M 1 ABS {target_position}"
             self._send_command(cmd)
             response = self._read_response()
-            
+
             if "OK" not in response:
                 logging.error(f"Error setting filter position: {response}")
                 return -1
-                
+
             # Update internal filter number
             self.filter_num = new_filter
-            
+
             # Call parent method to handle state changes
             return super().set_filter_num(new_filter)
-            
+
         except Exception as e:
             logging.error(f"Error setting filter: {e}")
             return -1
@@ -327,7 +327,7 @@ class Alta(Filterd):
     def home_filter(self):
         """
         Home the filter wheel by moving to filter 1.
-        
+
         Returns:
             0 on success, -1 on error
         """
@@ -339,18 +339,18 @@ class Alta(Filterd):
             self._update_status()
         except Exception as e:
             logging.error(f"Error updating status: {e}")
-            
+
         return super().info()
 
     def on_value_changed_from_client(self, value, old_value, new_value):
         """
         Handle value changes from client.
-        
+
         This is called when a client changes a value via the network.
         """
         # Handle special cases for different values
         value_name = value.name
-        
+
         if value_name == "NEON":
             self._handle_neon_change(new_value)
         elif value_name == "FOCPOS":
@@ -376,7 +376,7 @@ class Alta(Filterd):
             filter_idx = int(value_name[1])
             if filter_idx == self.filter_num:
                 self._handle_current_filter_position_change(new_value)
-            
+
         # Call parent handler
         super().on_value_changed_from_client(value, old_value, new_value)
 
@@ -391,11 +391,11 @@ class Alta(Filterd):
                 self._send_command("S ON")
                 self._send_command("S OUT")
                 self._send_command("R ON")
-                
+
             # Read responses
             for _ in range(3):
                 self._read_response()
-                
+
         except Exception as e:
             logging.error(f"Error changing neon state: {e}")
 
@@ -432,14 +432,14 @@ class Alta(Filterd):
             if new_value == 1:  # ON
                 self._send_command("M 0 ON")
                 self._read_response()
-                
+
                 # Wait for motor to initialize
                 time.sleep(0.1)
-                
+
                 # Home the motor
                 self._send_command("M 0 HOM")
                 response = self._read_response()
-                
+
                 if "OK" in response:
                     self.m0hom.value = 1
                 else:
@@ -457,14 +457,14 @@ class Alta(Filterd):
             if new_value == 1:  # ON
                 self._send_command("M 1 ON")
                 self._read_response()
-                
+
                 # Wait for motor to initialize
                 time.sleep(0.1)
-                
+
                 # Home the motor
                 self._send_command("M 1 HOM")
                 response = self._read_response()
-                
+
                 if "OK" in response:
                     self.m1hom.value = 1
                 else:
@@ -525,15 +525,15 @@ class Alta(Filterd):
 if __name__ == "__main__":
     # Create application
     app = App(description='Alta Filter Wheel Driver')
-    
+
     # Register device-specific options
     app.register_device_options(Alta)
-    
+
     # Parse command line arguments
     args = app.parse_args()
-    
+
     # Create and configure device
     device = app.create_device(Alta)
-    
+
     # Run application main loop
     app.run()

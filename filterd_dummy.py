@@ -12,14 +12,14 @@ from app import App
 class DummyFilter(Filterd):
     """Dummy filter wheel implementation for testing.
     This simulates a filter wheel with configurable filters and movement time."""
-    
+
     @classmethod
     def register_options(cls, parser):
         """Register DummyFilter-specific command line options."""
         super().register_options(parser)
         parser.add_argument('-s', '--sleep', type=float, default=1.0,
                           help='Filter movement time in seconds')
-    
+
     @classmethod
     def process_args(cls, device, args):
         """Process arguments for this specific device."""
@@ -29,21 +29,21 @@ class DummyFilter(Filterd):
 
     def __init__(self, device_name="W0", port=0):
         """Initialize the dummy filter wheel."""
-        
+
         super().__init__(device_name, port)
 
         # Current filter position
         self.filter_num = 0
-        
+
         # Simulated time to change filters
         self.filter_sleep = ValueDouble("filter_sleep", "Time to change filter [s]")
         self.filter_sleep.set_writable()
         self.filter_sleep.value = 3.0
-        
+
         # Centrald connection parameters
         self.centrald_host = "localhost"
         self.centrald_port = 617
-        
+
         # Add filter names string for dynamic configuration
         self.filter_names = ValueString("filter_names", "filter names")
         self.filter_names.value="Clear:Red:Green:Blue:Ha:SII:OIII"
@@ -62,30 +62,30 @@ class DummyFilter(Filterd):
     def set_filter_num(self, new_filter):
         """
         Set the filter number with simulated movement time.
-        
+
         Args:
             new_filter: New filter position
-            
+
         Returns:
             0 on success, -1 on error
         """
         # Validate filter number
         if new_filter < 0 or new_filter >= self.filter.sel_size():
             return -1
-            
+
         # Simulate filter movement time
         time.sleep(self.filter_sleep.value)
-        
+
         # Update filter position
         self.filter_num = new_filter
-        
+
         # Call parent implementation to update clients
         return super().set_filter_num(new_filter)
 
     def __ex_home_filter(self):
         """
         Home the filter wheel by moving to position 0.
-        
+
         Returns:
             0 on success, -1 on error
         """
@@ -131,16 +131,16 @@ class DummyFilter(Filterd):
 if __name__ == "__main__":
     # Create application
     app = App(description='Dummy Filter Wheel Driver')
-    
+
     # Register device-specific options
     app.register_device_options(DummyFilter)
-    
+
     # Parse command line arguments
     args = app.parse_args()
-    
+
     # Create and configure device
     device = app.create_device(DummyFilter)
-    
+
     # Run application main loop
     app.run()
 
