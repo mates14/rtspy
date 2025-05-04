@@ -10,7 +10,7 @@ import errno
 import math
 import fcntl
 
-from constants import ConnectionState, DevTypes
+from constants import ConnectionState, DeviceType, DevTypes
 from connection import Connection, ConnectionManager, QueuedCommand
 from commands import CommandRegistry, ProtocolCommands, AuthCommands
 
@@ -24,16 +24,20 @@ class NetworkManager:
     - Authentication
     - Message dispatch
     - Value distribution
+    - Device-to-device communication
     """
+
+    # Class variable to track the singleton instance
+    _instance = None
 
     def __init__(self, device_name: str, device_type: int, port: int = 0):
         logging.debug(f"Starting NetworkManager {device_name} {device_type} {port}")
-        # Store singleton instance
-        NetworkManager._instance = self
-
         self.device_name = device_name
         self.device_type = device_type
         self.port = port
+
+        # Set singleton instance
+        NetworkManager._instance = self
 
         self.centrald_host = "localhost"
         self.centrald_port = 617
@@ -55,6 +59,7 @@ class NetworkManager:
 
         # Callbacks
         self.auth_callback = None
+        self.centrald_connected_callback = None
 
         # Device state
         self.device_state = 0x0  # just fine
@@ -62,21 +67,24 @@ class NetworkManager:
         self.last_status_message = None
         self.state_changed_callback = None
 
-        #command_queue = [] # regular commands
-
         # Command progress status
         self.state_start = float('nan')
         self.state_expected_end = float('nan')
 
         # Command handlers dictionary - unified for all commands
         self.command_registry = CommandRegistry()
-        #self.command_handlers = {}
 
         # Registry to track known clients and devices
         self.entities = {}  # Indexed by centrald_id -> {name, type, device_type etc.}
 
-        # Register standard protocol handlers
-        # self._register_protocol_handlers()
+        # Interest tracking
+        self.value_interests = {}  # "device_name.value_name" -> callback
+        self.state_interests = {}  # device_name -> callback
+        self.pending_interests = set()  # Set of device names we're interested in
+        self.connection_retry_interval = 30.0  # seconds between connection attempts
+        self.device_connection_attempts = {}  # device_name -> last_attempt_time
+
+        # Register standard command handlers
         self._register_command_handlers()
 
         # Create a self-pipe for waking up the select() call
@@ -88,12 +96,10 @@ class NetworkManager:
         """Register command handlers with the registry."""
         # Create handler groups
         protocol_handler = ProtocolCommands(self)
-#        device_handler = DeviceCommands(self)
         auth_handler = AuthCommands(self)
 
         # Register with registry
         self.command_registry.register_handler(protocol_handler)
-#        self.command_registry.register_handler(device_handler)
         self.command_registry.register_handler(auth_handler)
 
         # Log registered commands
@@ -126,8 +132,92 @@ class NetworkManager:
         )
         self.network_thread.start()
 
+        # Start interest manager thread
+        self.interest_thread = threading.Thread(
+            target=self._interest_manager_loop,
+            name="RTS2-Interest",
+            daemon=True
+        )
+        self.interest_thread.start()
 
         self.connect_to_centrald(self.centrald_host, self.centrald_port)
+
+    def _interest_manager_loop(self):
+        """
+        Thread that manages device-to-device connections based on interests.
+
+        This continuously checks for new devices in the centrald registry that
+        match our interest list, and establishes connections as needed when
+        there's no existing connection to the device.
+        """
+        logging.debug("Interest manager thread started")
+
+        while self.running:
+            try:
+                # Wait until we have a fully authenticated centrald connection
+                centrald_conn = self.connection_manager.get_associated_centrald_connection()
+                if not centrald_conn or centrald_conn.state != ConnectionState.AUTH_OK:
+                    time.sleep(1.0)
+                    continue
+
+                # Check for pending interests to process
+                current_time = time.time()
+
+                # Process each pending interest
+                for device_name in list(self.pending_interests):
+                    # Skip if we already have a connection to this device
+                    device_connected = False
+                    for conn in self.connection_manager.connections.values():
+                        if (conn.state in (ConnectionState.AUTH_OK, ConnectionState.AUTH_PENDING) and
+                            hasattr(conn, 'remote_device_name') and
+                            conn.remote_device_name == device_name):
+                            device_connected = True
+                            #logging.debug(f"Already connected/connecting to device {device_name}")
+                            break
+
+                    if device_connected:
+                        continue
+
+                    # Look for the device in the entity registry
+                    device_found = False
+                    device_info = None
+
+                    for entity_id, entity in self.entities.items():
+                        if (entity.get('name') == device_name and
+                            entity.get('entity_type') == 'DEVICE'):
+                            device_found = True
+                            device_info = entity
+                            break
+
+                    if device_found and device_info:
+                        # Check if we've attempted to connect recently
+                        last_attempt = self.device_connection_attempts.get(device_name, 0)
+                        if current_time - last_attempt < self.connection_retry_interval:
+                            continue
+
+                        # Try to connect to the device
+                        host = device_info.get('host')
+                        port = device_info.get('port')
+
+                        if host and port and centrald_conn.auth_key is not None:
+                            logging.info(f"Establishing connection to device {device_name} at {host}:{port}")
+                            self.device_connection_attempts[device_name] = current_time
+
+                            # Connect to the device
+                            self._connect_to_device(host, port, device_name)
+                        else:
+                            # Either missing host/port or auth key not yet available
+                            if centrald_conn.auth_key is None:
+                                logging.debug(f"Waiting for auth key to connect to {device_name}")
+                            else:
+                                logging.warning(f"Missing host/port for device {device_name}")
+
+                # Sleep a bit to avoid tight loop
+                time.sleep(1.0)
+
+            except Exception as e:
+                logging.error(f"Error in interest manager: {e}", exc_info=True)
+                time.sleep(5.0)  # Longer sleep on error
 
     def stop(self):
         """Stop the network manager."""
@@ -148,9 +238,12 @@ class NetworkManager:
             self.server_socket.close()
             self.server_socket = None
 
-        # Wait for thread to terminate
+        # Wait for threads to terminate
         if self.network_thread and self.network_thread.is_alive():
             self.network_thread.join(timeout=2.0)
+
+        if self.interest_thread and self.interest_thread.is_alive():
+            self.interest_thread.join(timeout=2.0)
 
         logging.debug("NetworkManager stopped")
 
@@ -174,7 +267,6 @@ class NetworkManager:
 
             # Create new connection object
             conn = Connection(conn_id, client_sock, client_addr, conn_type='client')
-            self.update_connection_name(conn)
 
             # Register callbacks
             conn.register_command_callback(self._on_command_received)
@@ -242,7 +334,6 @@ class NetworkManager:
                     select_timeout = 1.0
                 else:
                     select_timeout = 0.000001
-
 
                 # Wait for network events
                 if not readable and not writable:
@@ -339,13 +430,28 @@ class NetworkManager:
         conn.update_state(ConnectionState.CONNECTED, "Connection established")
 
         # For centrald connections, send registration
-        if conn.type == 'centrald' and not conn.registration_sent:
+        if conn.type == 'centrald' and not getattr(conn, 'registration_sent', False):
             conn.registration_sent = True
             conn.send_command(
                 f"register 0 {self.device_name} {self.device_type} localhost {self.port}",
                 lambda c, success, code, msg: self._handle_registration_result(c, success, code, msg)
             )
             conn.update_state(ConnectionState.AUTH_PENDING, "Registration command sent to centrald")
+
+        # For device connections, send device authentication
+        elif conn.type == 'device' and not getattr(conn, 'registration_sent', False):
+            # For device-to-device connections, we need to authenticate using our auth key
+            centrald_conn = self.connection_manager.get_associated_centrald_connection()
+            if centrald_conn and hasattr(centrald_conn, 'auth_key') and centrald_conn.auth_key:
+                conn.registration_sent = True
+
+                # Send auth command with our device ID and auth key from centrald
+                auth_cmd = f"auth {centrald_conn.device_id} {centrald_conn.centrald_num} {centrald_conn.auth_key}"
+                conn.send_command(auth_cmd)
+                conn.update_state(ConnectionState.AUTH_PENDING, "Authentication sent to device")
+            else:
+                logging.error("Cannot authenticate to device: missing centrald connection or auth key")
+                conn.close()
 
     def _process_message(self, msg):
         """Process a queued message."""
@@ -376,15 +482,17 @@ class NetworkManager:
 
         logging.debug(f"ICMD {conn.name}: '{cmd}', Params: '{params}'")
 
+        # Special handling for this_device command - identifies device connections
+        if cmd == "this_device":
+            self._handle_this_device(conn, params)
+            # Continue with normal command processing
+
         # Check if this is a fire-and-forget command that can bypass current processing
         is_immediate_command = self.command_registry.can_handle(cmd) and not self.command_registry.needs_response(cmd)
 
         # If it's not an immediate command and another command is in progress, queue it
         if not is_immediate_command and conn.command_in_progress:
             logging.debug(f"Command {cmd} queued - another command is in progress")
-            # Add to the connection's command queue
-#            if not hasattr(conn, 'command_queue'):
-#                conn.command_queue = []
             conn.command_queue.put(QueuedCommand(f"{cmd} {params}"))
             return
 
@@ -419,20 +527,51 @@ class NetworkManager:
             conn.command_in_progress = False
 
         # Check for queued commands if this command has completed
-        if not conn.command_in_progress and hasattr(conn, 'command_queue') and conn.command_queue:
-            # Check the type of object in the queue before unpacking
-            # should get standardised - all should be the same!
-            next_cmd_item = conn.command_queue.get(0)
+        if not conn.command_in_progress and not conn.command_queue.empty():
+            # Get next command from queue
+            next_cmd_item = conn.command_queue.get()
 
-            # Check if it's a tuple (from old queue) or a QueuedCommand object
-#            if isinstance(next_cmd_item, tuple):
-#                next_cmd, next_params = next_cmd_item
-#            else:
-                # It's a QueuedCommand object
+            # Extract command and parameters
             next_cmd = next_cmd_item.command.split(maxsplit=1)[0]
             next_params = next_cmd_item.command.split(maxsplit=1)[1] if " " in next_cmd_item.command else ""
 
             self._process_next_command(conn, next_cmd, next_params)
+
+    def _handle_this_device(self, conn, params):
+        """
+        Handle this_device info command that identifies a device connection.
+
+        Args:
+            conn: Connection object
+            params: Parameters containing device_name and device_type
+        """
+        parts = params.split()
+        if len(parts) < 2:
+            return
+
+        device_name = parts[0]
+        device_type = int(parts[1])
+
+        # Update connection info
+        conn.remote_device_name = device_name
+        conn.remote_device_type = device_type
+
+        # Mark this as a device connection
+        conn.type = 'device'
+        conn.is_device_connection = True
+
+        # Update descriptive name
+#        conn.update_name()
+
+        logging.debug(f"Identified device connection: {device_name}, type: {device_type}")
+
+        # Check if we have registered interest in this device
+        if device_name in self.pending_interests:
+            logging.info(f"Connected to device of interest: {device_name}")
+
+            # If connection is authenticated, request info
+            if conn.state == ConnectionState.AUTH_OK:
+                conn.send_command("info")
 
     def _process_next_command(self, conn, cmd, params):
         """Process the next command from the queue."""
@@ -474,6 +613,78 @@ class NetworkManager:
             logging.error(f"Exception in connect_to_centrald: {e}")
             return None
 
+    def _connect_to_device(self, host, port, device_name=None):
+        """
+        Connect to another RTS2 device.
+
+        Args:
+            host: Hostname or IP address of the device
+            port: TCP port number
+            device_name: Optional name of the target device for tracking
+
+        Returns:
+            Connection ID on success, None on error
+        """
+        try:
+            # Check if we have a valid centrald connection
+            centrald_conn = self.connection_manager.get_associated_centrald_connection()
+            if not centrald_conn or centrald_conn.state != ConnectionState.AUTH_OK:
+                logging.error("Cannot connect to device: no authenticated centrald connection")
+                return None
+
+            # Get our device ID and auth key from the centrald connection
+            device_id = getattr(centrald_conn, 'device_id', 0)
+            centrald_num = getattr(centrald_conn, 'centrald_num', 0)
+            auth_key = getattr(centrald_conn, 'auth_key', None)
+
+            if device_id <= 0:
+                logging.error("Cannot connect to device: missing device ID from centrald")
+                return None
+
+            if auth_key is None:
+                logging.error("Cannot connect to device: missing auth key from centrald")
+                return None
+
+            # Create socket
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setblocking(False)
+
+            # Start non-blocking connect
+            err = sock.connect_ex((host, port))
+            if err != errno.EINPROGRESS and err != 0:
+                logging.error(f"Error connecting to device: {os.strerror(err)}")
+                return None
+
+            # Create new connection object
+            conn_id = str(uuid.uuid4())
+            conn = Connection(conn_id, sock, (host, port), conn_type='device')
+
+            # Store target device name if provided
+            if device_name:
+                conn.remote_device_name = device_name
+
+            # Store auth information for later use
+            conn.centrald_id = device_id
+            conn.auth_key = auth_key
+            conn.centrald_num = centrald_num
+
+            # Register callbacks
+            conn.register_command_callback(self._on_command_received)
+            conn.register_closed_callback(self._on_connection_closed)
+
+            # Update state to connecting
+            conn.update_state(ConnectionState.CONNECTING, "Connecting to device")
+
+            # Add to connection manager
+            self.connection_manager.add_connection(conn)
+
+            logging.debug(f"Connecting to device at {host}:{port}")
+            return conn_id
+
+        except Exception as e:
+            logging.error(f"Exception in _connect_to_device: {e}")
+            return None
+
     def _send_meta_info(self, conn):
         """Send metadata information about all values."""
         with self._lock:
@@ -494,6 +705,16 @@ class NetworkManager:
 
                 # Also send current value
                 self._send_value(conn, value)
+
+    def _handle_registration_result(self, conn, success, code, msg):
+        """Handle result from registration command."""
+        if success:
+            logging.debug(f"Registration successful: {msg}")
+            # Registration successful, now need to wait for registered_as message
+            # The centrald_connected_callback will be called after getting registered_as
+        else:
+            logging.error(f"Registration failed: {msg}")
+            conn.update_state(ConnectionState.BROKEN, f"{msg}")
 
     def _send_value(self, conn, value):
         """Send a value to a connection."""
@@ -578,13 +799,6 @@ class NetworkManager:
 
         # Broadcast to all connections
         self.connection_manager.broadcast_message(bop_msg)
-
-        # Call state changed callback if registered
-        # NOPE! if we are interested in other's BOP state
-        # we need to do to commands.py and solve it there
-        # we may safely assume that the device knows its bop state
-        #if old_state != state and self.state_changed_callback:
-        #    self.state_changed_callback(old_state, state, message)
 
     def set_progress_state(self, state, start, end, message=None):
         """Set device state with progress information."""
@@ -769,13 +983,40 @@ class NetworkManager:
             conn.name = f"{conn.type}-{conn.id[:8]}"
 
     def register_interest_in_value(self, device_name, value_name, callback):
-        """Register interest in updates for a specific value from a device."""
+        """
+        Register interest in updates for a specific value from a device.
+
+        This method will automatically establish a connection to the device
+        if needed and maintain the connection.
+
+        Args:
+            device_name: Name of the device to monitor
+            value_name: Name of the value to monitor
+            callback: Function to call when value updates are received
+        """
         if not hasattr(self, 'value_interests'):
             self.value_interests = {}
 
         key = f"{device_name}.{value_name}"
         self.value_interests[key] = callback
         logging.debug(f"Registered interest in {key}")
+
+        # Add to pending interests for connection management
+        self.pending_interests.add(device_name)
+
+        # Check if we already have a connection to this device
+        device_connected = False
+        for conn in self.connection_manager.connections.values():
+            if (conn.state == ConnectionState.AUTH_OK and
+                hasattr(conn, 'remote_device_name') and
+                conn.remote_device_name == device_name):
+                device_connected = True
+                logging.debug(f"Already have a connection to {device_name}, requesting info")
+                conn.send_command("info")
+                break
+
+        if not device_connected:
+            logging.info(f"No connection to {device_name} yet - waiting for centrald updates")
 
     def register_state_interest(self, device_name, state_callback):
         """
@@ -791,6 +1032,22 @@ class NetworkManager:
         self.state_interests[device_name] = state_callback
         logging.debug(f"Registered interest in state updates from {device_name}")
 
+        # Add to pending interests to ensure connection is established
+        self.pending_interests.add(device_name)
+
+        # Check if we already have a connection to this device
+        device_connected = False
+        for conn in self.connection_manager.connections.values():
+            if (conn.state == ConnectionState.AUTH_OK and
+                hasattr(conn, 'remote_device_name') and
+                conn.remote_device_name == device_name):
+                device_connected = True
+                logging.debug(f"Already have a connection to {device_name}, requesting status info")
+                conn.send_command("device_status")
+                break
+
+        if not device_connected:
+            logging.info(f"No connection to {device_name} yet - waiting for centrald updates")
 
     def handle_value_change_request(self, conn, value_name, value_data):
         """

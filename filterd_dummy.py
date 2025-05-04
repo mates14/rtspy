@@ -82,16 +82,6 @@ class DummyFilter(Filterd):
         # Call parent implementation to update clients
         return super().set_filter_num(new_filter)
 
-    def __ex_home_filter(self):
-        """
-        Home the filter wheel by moving to position 0.
-
-        Returns:
-            0 on success, -1 on error
-        """
-        logging.info("Homing filter wheel")
-        return self.set_filter_num_mask(0)
-
     def home_filter(self):
         """
         Home the filter wheel by moving to position 0.

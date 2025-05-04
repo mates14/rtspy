@@ -81,11 +81,11 @@ class Connection:
         self.pending_command = None
         self.pending_command_time = None
         self.pending_command_callback = None
+        self.registration_sent = False
 
         # Type-specific properties
         if conn_type == 'centrald':
             self.is_centrald = True
-            self.registration_sent = False
         else:
             self.is_centrald = False
 

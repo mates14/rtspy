@@ -262,13 +262,14 @@ class ProtocolCommands:
         value_data = parts[1] if len(parts) > 1 else ""
 
         # Check if any component has registered interest in this value
-        device_name = self.network_manager._get_connection_entity_desc(conn)
-        key = f"{device_name}.{value_name}"
+        if hasattr(conn,'remote_device_name'):
+            key = f"{conn.remote_device_name}.{value_name}"
+        #    logging.debug(f"Received update on {key}")
 
-        if hasattr(self.network_manager, 'value_interests') and key in self.network_manager.value_interests:
-            # Call the registered callback with the value
-            self.network_manager.value_interests[key](value_data)
-            logging.debug(f"Dispatched value update for {key}")
+            if hasattr(self.network_manager, 'value_interests') and key in self.network_manager.value_interests:
+                # Call the registered callback with the value
+                self.network_manager.value_interests[key](value_data)
+        #        logging.debug(f"Dispatched value update for {key}")
 
         # Value commands don't expect response
         conn.command_in_progress = False
@@ -638,6 +639,10 @@ class AuthCommands:
             # Mark as connected but not yet authorized
             conn.update_state(ConnectionState.AUTH_OK, f"Registered as {device_id}")
 
+            # Notify about centrald connection
+            if hasattr(self.network_manager, 'centrald_connected_callback') and callable(self.network_manager.centrald_connected_callback):
+                self.network_manager.centrald_connected_callback(conn.id)
+
             # Request authorization key
             self.network_manager.send_command(
                 conn.id,
@@ -655,26 +660,28 @@ class AuthCommands:
         logging.debug(f"Processing key response: {line}")
         parts = line.split()
 
-        if len(parts) >= 3 and parts[0] == "authorization_key":
-            device_name = parts[1]
-            auth_key = int(parts[2])
+        if len(parts) >= 2: # and parts[0] == "authorization_key":
+            device_name = parts[0]
+            auth_key = int(parts[1])
 
             # Store the key
             conn.auth_key = auth_key
+            logging.debug(f"Our device ({conn.device_id}) key ({auth_key}) stored")
 
             # Get our centrald ID
             device_id = conn.device_id
 
-            if device_id > 0:
-                logging.debug(f"Sending authorize command with ID {device_id} and key {auth_key}")
-                # Send authorization request
-                self.send_command(
-                    conn.id,
-                    f"authorize {device_id} {auth_key}",
-                    self._handle_authorize_response
-                )
-            else:
-                logging.error("Could not determine centrald ID for authorization")
+# no need to authenticate the just-received key
+#            if device_id > 0:
+#                logging.debug(f"Sending authorize command with ID {device_id} and key {auth_key}")
+#                # Send authorization request
+#                self.send_command(
+#                    conn.id,
+#                    f"authorize {conn.device_id} {auth_key}",
+#                    self._handle_authorize_response
+#                )
+#            else:
+#                logging.error("Could not determine centrald ID for authorization")
 
         conn.command_in_progress = False
         return True
