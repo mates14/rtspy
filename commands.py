@@ -440,9 +440,11 @@ class ProtocolCommands:
 
         # Update connection info
         conn.remote_device_name = device_name
+        conn.name = device_name
         conn.remote_device_type = device_type
 
-        logging.debug(f"Connected to device: {device_name}, type: {device_type}")
+        self.network_manager.update_connection_name(conn)
+        logging.debug(f"{conn.name}: this_device {device_name}, type: {device_type}")
 
         conn.command_in_progress = False
         return True

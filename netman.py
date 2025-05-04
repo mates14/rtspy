@@ -760,11 +760,11 @@ class NetworkManager:
         if conn.type == 'centrald':
             conn.name = "centrald"
             return
-        if conn.device_id > 0:
-            conn.name = self._get_entity_description(conn.device_id)
-        elif conn.remote_device_name:
+        if conn.remote_device_name:
+            conn.name = f"{conn.remote_device_name}"
+        elif conn.device_id > 0:
             device_type = DevTypes.get(conn.remote_device_type, "unknown")
-            conn.name = f"{device_type}-{conn.remote_device_name}"
+            conn.name = self._get_entity_description(conn.device_id)
         else:
             conn.name = f"{conn.type}-{conn.id[:8]}"
 
