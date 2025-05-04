@@ -6,12 +6,14 @@ A Python implementation of the RTS2 (Remote Telescope System 2nd Version) device
 
 RTS2 (Remote Telescope System 2nd Version) is an open-source observatory control system designed for robotic observatories. This Python implementation provides:
 
-- Complete RTS2 network protocol support
+- RTS2 device driver (daemon) network protocol support
 - Device abstraction and inheritance framework
 - Value system with proper Python typing
 - Command handling with automatic distribution
 - Filter wheel device implementations
 - Example device drivers
+
+Note that this implementation currently focuses on the device driver functionality only. It doesn't yet implement client functionality or the ability to connect to other devices as a client. The implementation is intended to be protocol-compatible with the original RTS2 system to allow it to work within an existing RTS2 installation.
 
 ## Installation
 
@@ -52,7 +54,6 @@ Currently, the project includes implementations for the following devices:
 - **Filterd**: Base filter wheel implementation
 - **DummyFilter**: Simulated filter wheel for testing
 - **Alta**: Alta filter wheel driver for spectrographs
-- **ThorlabsFilterWheel**: Driver for Thorlabs FW102C and compatible filter wheels
 - **TemperatureSensor**: Simple temperature sensor example device
 
 ## Creating a New Device Driver
@@ -109,6 +110,8 @@ The system uses Python's standard logging module with a custom formatter to matc
 ```
 
 Where the single letter represents the log level (D for DEBUG, I for INFO, etc.)
+
+Note that the original RTS2 network logging system (which sends logs over the network protocol for monitoring by other components like the RTS2 Monitor) is not yet implemented. Currently, logs are only written to the console/standard output.
 
 ## Contributing
 
