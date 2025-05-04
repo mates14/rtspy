@@ -10,7 +10,7 @@ import errno
 import math
 import fcntl
 
-from constants import ConnectionState
+from constants import ConnectionState, DevTypes
 from connection import Connection, ConnectionManager, QueuedCommand
 from commands import CommandRegistry, ProtocolCommands, AuthCommands
 
@@ -28,6 +28,9 @@ class NetworkManager:
 
     def __init__(self, device_name: str, device_type: int, port: int = 0):
         logging.debug(f"Starting NetworkManager {device_name} {device_type} {port}")
+        # Store singleton instance
+        NetworkManager._instance = self
+
         self.device_name = device_name
         self.device_type = device_type
         self.port = port
@@ -171,6 +174,7 @@ class NetworkManager:
 
             # Create new connection object
             conn = Connection(conn_id, client_sock, client_addr, conn_type='client')
+            self.update_connection_name(conn)
 
             # Register callbacks
             conn.register_command_callback(self._on_command_received)
@@ -370,7 +374,7 @@ class NetworkManager:
         cmd = parts[0] if parts else ""
         params = parts[1] if len(parts) > 1 else ""
 
-        logging.debug(f"Processing command from {conn.name}: '{cmd}', Params: '{params}'")
+        logging.debug(f"ICMD {conn.name}: '{cmd}', Params: '{params}'")
 
         # Check if this is a fire-and-forget command that can bypass current processing
         is_immediate_command = self.command_registry.can_handle(cmd) and not self.command_registry.needs_response(cmd)
@@ -746,10 +750,23 @@ class NetworkManager:
         if centrald_id in self.entities:
             entity = self.entities[centrald_id]
             if entity['entity_type'] == 'CENTRALD':
-                return f"centrald {entity.get('host', 'unknown')}:{entity.get('port', 'unknown')}"
+                return "centrald"
             else:
-                return f"{entity.get('type', 'notype')} {entity.get('name','noname')}"
-        return f"unknown entity: (id: {centrald_id})"
+                return f"{entity.get('type', 'notype')}{centrald_id}"
+        return f"entity-{centrald_id}"
+
+    def update_connection_name(self, conn):
+        """Update a connection's descriptive name based on entity information."""
+        if conn.type == 'centrald':
+            conn.name = "centrald"
+            return
+        if conn.device_id > 0:
+            conn.name = self._get_entity_description(conn.device_id)
+        elif conn.remote_device_name:
+            device_type = DevTypes.get(conn.remote_device_type, "unknown")
+            conn.name = f"{device_type}-{conn.remote_device_name}"
+        else:
+            conn.name = f"{conn.type}-{conn.id[:8]}"
 
     def register_interest_in_value(self, device_name, value_name, callback):
         """Register interest in updates for a specific value from a device."""

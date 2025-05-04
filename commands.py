@@ -396,7 +396,6 @@ class ProtocolCommands:
                 'entity_type': 'DEVICE'
             }
 
-            conn.update_descriptive_name()
             logging.debug(f"Registered device: {device_name} (ID: {centrald_id}, type: {device_type})")
 
         except Exception as e:
@@ -424,7 +423,6 @@ class ProtocolCommands:
             'entity_type': 'CLIENT'
         }
 
-        conn.update_descriptive_name()
         logging.debug(f"Registered client: ID {centrald_id}: {clitype} {login}")
 
         conn.command_in_progress = False
@@ -528,8 +526,6 @@ class AuthCommands:
         device_id = int(auth_parts[0])
         centrald_num = int(auth_parts[1])
         key = int(auth_parts[2])
-
-        conn.update_descriptive_name()
 
         # Store client info
         conn.device_id = device_id
@@ -636,8 +632,6 @@ class AuthCommands:
                 'host': conn.addr[0],
                 'port': conn.addr[1]
             }
-
-            conn.update_descriptive_name()
 
             # Mark as connected but not yet authorized
             conn.update_state(ConnectionState.AUTH_OK, f"Registered as {device_id}")

@@ -6,7 +6,6 @@ import queue
 from enum import IntEnum
 from typing import Dict, Any, Callable, Optional, Union, Tuple, List
 
-# Import the ConnectionState enum from constants
 from constants import ConnectionState
 
 class QueuedCommand:
@@ -132,6 +131,12 @@ class Connection:
         old_state = self.state
         self.state = new_state
 
+        # Update descriptive name if info might have changed
+        from netman import NetworkManager
+        net_manager = NetworkManager._instance if hasattr(NetworkManager, '_instance') else None
+        if net_manager:
+            net_manager.update_connection_name(self)
+
         # Log the state change
         logging.debug(f"Connection {self.name} state change: {old_state} -> {new_state} {reason}")
 
@@ -156,7 +161,7 @@ class Connection:
             data = data.encode('utf-8')
 
         # Log the outgoing message
-        logging.debug(f"SEND [{self.description}]: {data!r}")
+        logging.debug(f"SEND {self.name}: {data!r}")
 
         # Add to write buffer
         self.write_buffer += data
@@ -234,7 +239,7 @@ class Connection:
                 continue
 
             # Log the received line
-            logging.debug(f"RECV [{self.description}]: {line!r}")
+            logging.debug(f"RECV {self.name}: {line!r}")
 
             # Return result to pending command if this is a response line
             if line[0] in ['+', '-']:
@@ -546,37 +551,10 @@ class Connection:
         """
         self.closed_callback = callback
 
-    def update_descriptive_name(self):
-        """Update the connection's name to be more descriptive based on available information."""
-        # Basic connection type description
-        if self.type == 'centrald':
-            if self.addr and self.addr[0]:
-                self.name = f"centrald@{self.addr[0]}"
-            else:
-                self.name = "centrald"
-        elif self.type == 'client':
-            # Use device_id if available
-            #if self.device_id > 0:
-            #    self.name = f"client-{self.device_id}"
-
-            # Check for entity info in NetworkManager
-            from netman import NetworkManager
-            net_manager = NetworkManager._instance if hasattr(NetworkManager, '_instance') else None
-
-            if net_manager and self.device_id in net_manager.entities:
-                entity = net_manager.entities[self.device_id]
-                if 'type' in entity:
-                    client_type = entity.get('type', 'unknown')
-                    self.name = f"{client_type}-{self.device_id}"
-
-        # If remote device name is known (for device-to-device connections)
-        if self.remote_device_name:
-            from constants import DevTypes
-            if self.remote_device_type is not None:
-                device_type = DevTypes.get(self.remote_device_type, "unknown")
-                self.name = f"{device_type}-{self.remote_device_name}"
-            else:
-                self.name = f"device-{self.remote_device_name}"
+    def set_name(self, name):
+        """Set a descriptive name for this connection."""
+        self.name = name
+        logging.debug(f"Updated connection name to: {name}")
 
     def __repr__(self) -> str:
         """String representation of the connection."""
