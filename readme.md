@@ -12,8 +12,10 @@ RTS2 (Remote Telescope System 2nd Version) is an open-source observatory control
 - Command handling with automatic distribution
 - Filter wheel device implementations
 - Example device drivers
+- Device-to-device communication with automatic connection management
+- Value and state change callback system for inter-device communication
 
-Note that this implementation currently focuses on the device driver functionality only. It doesn't yet implement client functionality or the ability to connect to other devices as a client. The implementation is intended to be protocol-compatible with the original RTS2 system to allow it to work within an existing RTS2 installation.
+Note that the development currently focuses on the device driver functionality. The client role is not implemented (although the device-to-device communication is similar). The code is being tested against the original RTS2 system to make sure it can work within an existing RTS2 installation.
 
 ## Installation
 
@@ -53,8 +55,57 @@ Currently, the project includes implementations for the following devices:
 
 - **Filterd**: Base filter wheel implementation
 - **DummyFilter**: Simulated filter wheel for testing
-- **Alta**: Alta filter wheel driver for spectrographs
 - **TemperatureSensor**: Simple temperature sensor example device
+- **WatcherDevice**: Example device for monitoring other devices' states and values
+
+### Value Interest Registration
+
+Devices can register interest in values from other devices and receive callbacks when those values change:
+
+```python
+# Register interest in a value from another device
+self.network.register_interest_in_value(
+    device_name="centrald",
+    value_name="sun_alt",
+    callback=self._on_sun_altitude_update
+)
+
+# Callback function
+def _on_sun_altitude_update(self, value_data):
+    # Process the updated value
+    new_altitude = float(value_data)
+    logging.info(f"Sun altitude changed to {new_altitude} degrees")
+```
+
+### State Interest Registration
+
+Devices can also monitor the state changes of other devices:
+
+```python
+# Register interest in state changes of another device
+self.network.register_state_interest(
+    device_name="CCD1",
+    state_callback=self._on_ccd_state_changed
+)
+
+# Callback function
+def _on_ccd_state_changed(self, device_name, state, bop_state, message):
+    # React to the state change
+    if bop_state & self.BOP_EXPOSURE:
+        logging.info(f"Device {device_name} is now exposing")
+    else:
+        logging.info(f"Device {device_name} is no longer exposing")
+```
+
+### Automatic Connection Management
+
+The system automatically establishes and maintains connections to devices of interest:
+
+- When a device registers interest in another device's values or state, the connection is established automatically
+- If the connection is lost, the system will attempt to reconnect at regular intervals
+- All connection authentication and protocol handling is managed internally
+
+This makes it easy to build distributed systems where devices can depend on each other without complex connection management code.
 
 ## Creating a New Device Driver
 
@@ -100,6 +151,8 @@ if __name__ == "__main__":
 - **Protocol Compatibility**: Fully compatible with existing RTS2 centrald and clients
 - **Extensibility**: Easy extension points for new device types
 - **Automatic Value Distribution**: Values are automatically distributed to all connected clients
+- **Device Coordination**: Built-in support for device-to-device communication with callbacks
+- **Automatic Connection Management**: Devices can register interest and connections are handled automatically
 
 ## Logging
 
