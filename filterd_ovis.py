@@ -20,17 +20,17 @@ from app import App
 
 class SerialCommand:
     """Represents a command to be sent to the serial device."""
-    
+
     # Command types
     TYPE_NORESPONSE = 0  # Command without response
     TYPE_MOVEMENT = 1    # Movement command completed via status polling
     TYPE_HOMING = 2      # Homing command with longer timeout
-    
-    def __init__(self, command: str, callback: Optional[Callable] = None, 
+
+    def __init__(self, command: str, callback: Optional[Callable] = None,
                  timeout: float = 5.0, cmd_type: int = TYPE_NORESPONSE):
         """
         Initialize a command.
-        
+
         Args:
             command: Command string to send to device
             callback: Optional callback to call with result
@@ -53,39 +53,39 @@ class SerialCommand:
         self.completed = False
         self.event = threading.Event()
         self.cmd_type = cmd_type
-    
+
     def complete(self, response: str) -> None:
         """Mark command as completed with response."""
         self.response = response
         self.completed = True
-        
+
         # Notify any waiters
         self.event.set()
-        
+
         # Call callback if defined
         if self.callback:
             try:
                 self.callback(self.command, response)
             except Exception as e:
                 logging.error(f"Error in command callback: {e}")
-    
+
     def wait(self, timeout: Optional[float] = None) -> str:
         """
         Wait for command completion.
-        
+
         Args:
             timeout: Timeout in seconds (or None to use command timeout)
-            
+
         Returns:
             Command response or None on timeout
         """
         if timeout is None:
             timeout = self.timeout
-            
+
         if self.event.wait(timeout):
             return self.response
         return None
-    
+
     def is_timed_out(self) -> bool:
         """Check if command has timed out."""
         return not self.completed and (time.time() - self.timestamp) > self.timeout
@@ -93,11 +93,11 @@ class SerialCommand:
 
 class SerialCommunicator:
     """Handles communication with a serial device."""
-    
+
     def __init__(self, device_file: str, baudrate: int = 9600):
         """
         Initialize the serial communicator.
-        
+
         Args:
             device_file: Serial device path
             baudrate: Serial baudrate
@@ -105,42 +105,42 @@ class SerialCommunicator:
         self.device_file = device_file
         self.baudrate = baudrate
         self.serial_conn = None
-        
+
         # Threading and synchronization
         self.running = False
         self.thread = None
         self.command_queue = queue.Queue()
         self.lock = threading.RLock()
-        
+
         # Status tracking
         self.last_status_time = 0
         self.status_interval = 0.25  # seconds
         self.last_error_time = 0
         self.error_backoff = 10.0 # seconds
-        
+
         # Command currently being processed
         self.current_command = None
         self.homing = False
-        
+
         # Wake-up pipe for notifications
         self.wake_r, self.wake_w = os.pipe()
-        
+
         # Status callback
         self.status_callback = None
 
         # Flag to check if connected
         self.connected = False
-        
+
     def start(self) -> bool:
         """
         Start the serial communicator thread.
-        
+
         Returns:
             True if successfully started, False otherwise
         """
         if self.thread and self.thread.is_alive():
             return True
-            
+
         self.running = True
         self.thread = threading.Thread(
             target=self._communication_loop,
@@ -149,42 +149,42 @@ class SerialCommunicator:
         )
         self.thread.start()
         return True
-        
+
     def stop(self) -> None:
         """Stop the serial communicator."""
         self.running = False
-        
+
         # Wake up the thread
         try:
             os.write(self.wake_w, b'x')
         except:
             pass
-            
+
         # Wait for thread to terminate
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=2.0)
-            
+
         # Close serial connection
         self._close_connection()
-        
+
         # Close pipes
         try:
             os.close(self.wake_r)
             os.close(self.wake_w)
         except:
             pass
-            
+
     def _connect(self) -> bool:
         """
         Connect to the serial device.
-        
+
         Returns:
             True if connected successfully, False otherwise
         """
         if not self.device_file:
             logging.error("No device file specified")
             return False
-            
+
         try:
             logging.info(f"Opening serial connection to {self.device_file}")
             self.serial_conn = serial.Serial(
@@ -195,29 +195,29 @@ class SerialCommunicator:
                 stopbits=serial.STOPBITS_ONE,
                 timeout=1.0  # Short timeout for non-blocking reads
             )
-            
+
             # Clear any buffered data
             self.serial_conn.reset_input_buffer()
             self.serial_conn.reset_output_buffer()
-            
+
             # Wait for device to initialize
             time.sleep(0.5)
-            
+
             # Check if device is responsive
             if not self._check_device_id():
                 logging.error("Device not responsive or incorrect device type")
                 self._close_connection()
                 return False
-                
+
             logging.info("Serial connection established successfully")
             self.connected = True
             return True
-            
+
         except Exception as e:
             logging.error(f"Error connecting to serial device: {e}")
             self._close_connection()
             return False
-            
+
     def _close_connection(self) -> None:
         """Close the serial connection."""
         if self.serial_conn:
@@ -227,11 +227,11 @@ class SerialCommunicator:
                 pass
             self.serial_conn = None
         self.connected = False
-            
+
     def _check_device_id(self) -> bool:
         """
         Check if we're connected to the correct device.
-        
+
         Returns:
             True if correct device, False otherwise
         """
@@ -239,22 +239,22 @@ class SerialCommunicator:
         response = self._send_command_internal("ID")
         if not response:
             return False
-            
+
         # Check if it's the correct device
         if response != "RPI_PICO_SPECTRAL_AVCR":
             logging.error(f"Invalid device ID: {response}")
             return False
-            
+
         logging.info(f"Connected to device: {response}")
         return True
-            
+
     def _communication_loop(self) -> None:
         """Main communication loop for serial thread."""
         logging.info("Serial communication thread starting")
-        
+
         connect_retry_time = 0
         connect_retry_interval = 5.0  # seconds
-        
+
         while self.running:
             try:
                 # Check if we need to connect
@@ -266,11 +266,11 @@ class SerialCommunicator:
                     else:
                         time.sleep(0.1)
                         continue
-                
+
                 # Determine wait time until next status check
                 current_time = time.time()
                 time_until_status = max(0, self.last_status_time + self.status_interval - current_time)
-                
+
                 # Determine if we need to process a command or wait
                 if not self.command_queue.empty():
                     # Process next command
@@ -284,63 +284,63 @@ class SerialCommunicator:
                     try:
                         # Use shorter of the two timeouts
                         timeout = min(time_until_status, 0.1)
-                        
+
                         # Wait with timeout for wakeup notification
                         r_ready, _, _ = select.select([self.wake_r], [], [], timeout)
-                        
+
                         if self.wake_r in r_ready:
                             # Clear wakeup byte
                             os.read(self.wake_r, 1024)
                     except Exception as e:
                         # Don't log select errors, just use a sleep instead
                         time.sleep(0.1)
-                        
+
             except Exception as e:
                 logging.error(f"Error in serial communication loop: {e}")
                 # Brief sleep to avoid tight loop on error
                 time.sleep(0.5)
-                
+
         logging.info("Serial communication thread stopping")
-        
+
     def _process_next_command(self) -> None:
         """Process the next command in the queue."""
         if not self.serial_conn:
             return
-            
+
         try:
             # Get next command
             command = self.command_queue.get_nowait()
             self.current_command = command
-            
+
             # Check if timed out while in queue
             if command.is_timed_out():
                 logging.warning(f"Command timed out in queue: {command.command}")
                 command.complete("ERROR: Timed out in queue")
                 self.current_command = None
                 return
-                
+
             # Send command
             cmd = command.command
             logging.info(f"Sending command: {cmd} (type {command.cmd_type})")
             self.serial_conn.write((cmd + '\n').encode())
             self.serial_conn.flush()  # Ensure command is sent immediately
-            
+
             # Handle based on command type
             if command.cmd_type == SerialCommand.TYPE_NORESPONSE:
                 # No response expected, complete immediately with "OK"
                 time.sleep(0.1)  # Brief wait to allow command to be processed
                 command.complete("OK")
                 self.current_command = None
-                
+
             elif command.cmd_type == SerialCommand.TYPE_MOVEMENT:
                 # Don't clear current_command - it's needed for status updates
                 pass
-                
+
             else:
                 # Normal command - read response
                 try:
                     response = self.serial_conn.readline().decode().strip()
-                    
+
                     if not response:
                         logging.warning(f"No response received for command_: {cmd}")
                         command.complete("ERROR: No response")
@@ -350,9 +350,9 @@ class SerialCommunicator:
                 except Exception as e:
                     logging.error(f"Error reading response: {e}")
                     command.complete(f"ERROR: {str(e)}")
-                
+
                 self.current_command = None
-                
+
         except queue.Empty:
             pass
         except Exception as e:
@@ -360,64 +360,64 @@ class SerialCommunicator:
             if self.current_command:
                 self.current_command.complete(f"ERROR: {str(e)}")
                 self.current_command = None
-        
+
     def _send_command_internal(self, cmd: str, wait_for_ok=False) -> Optional[str]:
         """
         Send a command to the device and return the response.
-        
+
         Args:
             cmd: Command string to send
-            wait_for_ok: If True, wait until device responds with OK 
-            
+            wait_for_ok: If True, wait until device responds with OK
+
         Returns:
             Response string or None on error
         """
         if not self.serial_conn:
             return None
-            
+
         # Ensure command ends with newline
         if not cmd.endswith('\n'):
             cmd += '\n'
-            
+
         try:
             # Send command
         #    logging.info(f"Sending command: {cmd.strip()}")
             self.serial_conn.write(cmd.encode())
             self.serial_conn.flush()  # Ensure command is sent immediately
-           
+
             # For commands that need to wait for OK (like HOM)
             if wait_for_ok or "HOM" in cmd:
                 # Set a longer timeout for homing
                 original_timeout = self.serial_conn.timeout
                 self.serial_conn.timeout = 30.0  # 30 seconds for homing
-                
+
                 # Read until we get OK or timeout
                 response = self.serial_conn.readline().decode().strip()
-                
+
                 # Restore original timeout
                 self.serial_conn.timeout = original_timeout
-                
+
                 if not response:
                     logging.warning(f"No response received for command: {cmd.strip()}")
                     return None
-                
+
                 logging.info(f"Received response for homing: {response}")
                 return response
-            
+
             # For other commands that expect responses
             if cmd.strip() in ["STATUS", "ID"]:
                 response = self.serial_conn.readline().decode().strip()
-                
+
                 if not response:
                     logging.warning(f"No response received for command: {cmd.strip()}")
                     return None
-                    
+
                 #logging.info(f"Received response: {response}")
                 return response
             else:
                 # Most motor commands don't need responses
                 return "OK"
-            
+
         except Exception as e:
             logging.error(f"Error sending command: {e}")
             self.connected = False
@@ -427,17 +427,17 @@ class SerialCommunicator:
         """Update device status."""
         if not self.serial_conn or self.homing:
             return
-            
+
         try:
             # Send status command
             motor_statuses = []
-            
+
             # Send STATUS command
             response = self._send_command_internal("STATUS")
             if not response:
                 self.connected = False
                 return
-                
+
             # Parse motor 0 status (first line)
             motor_info = response.split()
             if len(motor_info) >= 5 and motor_info[0] == "M" and motor_info[1] == "0":
@@ -451,7 +451,7 @@ class SerialCommunicator:
                     'speed': int(float(motor_info[4])),
                     'acceleration': int(float(motor_info[5]))
                 })
-                
+
             # Read motor 1 status (second line)
             response = self.serial_conn.readline().decode().strip()
             motor_info = response.split()
@@ -467,77 +467,77 @@ class SerialCommunicator:
                     'acceleration': int(float(motor_info[5]))
                 })
             #logging.info(f"Motor statuses: {motor_statuses}")
-                
+
             # Read motor 2 status if present (third line)
             response = self.serial_conn.readline().decode().strip()
-            
+
             # Read shutter status (fourth line)
             response = self.serial_conn.readline().decode().strip()
-            
+
             # Read neon status (fifth line)
             response = self.serial_conn.readline().decode().strip()
             neon_info = response.split()
             neon_status = None
             if len(neon_info) >= 2 and neon_info[0] == "R":
                 neon_status = int(neon_info[1])
-                
+
             # Check if we have a movement command in progress
             if self.current_command and self.current_command.cmd_type == SerialCommand.TYPE_MOVEMENT:
                 # Find motor 1 status
                 motor1_status = next((m for m in motor_statuses if m['motor'] == 1), None)
-                
+
                 # Check if motor 1 is stopped (movement complete)
                 if motor1_status and not motor1_status['is_moving']:
                     logging.info(f"Motor 1 movement complete at position {motor1_status['position']}")
                     # Complete the command
                     self.current_command.complete(f"OK {motor1_status['position']}")
                     self.current_command = None
-                
+
             # Call status callback if registered
             if self.status_callback:
                 self.status_callback(motor_statuses, neon_status)
-                
+
         except Exception as e:
             logging.error(f"Error updating status: {e}")
             self.connected = False
-            
-    def send_command(self, cmd: str, callback: Optional[Callable] = None, 
-                     timeout: float = 5.0, wait: bool = False, 
+
+    def send_command(self, cmd: str, callback: Optional[Callable] = None,
+                     timeout: float = 5.0, wait: bool = False,
                      cmd_type: int = SerialCommand.TYPE_NORESPONSE) -> Optional[str]:
         """
         Send a command to the device.
-        
+
         Args:
             cmd: Command string to send
             callback: Optional callback for when command completes
             timeout: Command timeout in seconds
             wait: If True, wait for completion and return response
             cmd_type: Command type (NORMAL, NORESPONSE, MOVEMENT)
-            
+
         Returns:
             Response string if wait=True, else None
         """
         # Create command object
         command = SerialCommand(cmd, callback, timeout, cmd_type)
-        
+
         # Add to queue
         self.command_queue.put(command)
-        
+
         # Wake up thread to process command
         try:
             os.write(self.wake_w, b'x')
         except:
             pass
-            
+
         # Wait for response if requested
         if wait:
             return command.wait(timeout)
         return None
-        
+
     def set_status_callback(self, callback: Callable) -> None:
         """Set the status callback function."""
         self.status_callback = callback
-        
+
     def is_connected(self) -> bool:
         """Check if connected to device."""
         return self.serial_conn is not None and self.connected
@@ -650,7 +650,7 @@ class Alta(Filterd):
 
         self.m0hom.value = 0
         self.m1hom.value = 0
-        
+
         # Default speeds and accelerations
         self.m0spd.value = 100000
         self.m0acc.value = 100000
@@ -674,7 +674,7 @@ class Alta(Filterd):
                     logging.error("Failed to start serial communicator")
                     self.set_state(self.STATE_IDLE | self.ERROR_HW, "Failed to start serial communication")
                     return
-                
+
                 # Initialize the device (async)
                 self._initialize_device()
             except Exception as e:
@@ -700,7 +700,7 @@ class Alta(Filterd):
                 self.serial_comm.send_command("M 1 OFF")
             except Exception as e:
                 logging.error(f"Error turning off motors: {e}")
-        
+
         # Stop serial communicator
         if self.serial_comm:
             self.serial_comm.stop()
@@ -712,7 +712,7 @@ class Alta(Filterd):
         """Initialize the device."""
         if not self.serial_comm:
             return
-            
+
         # Make sure we're connected
         n=0
         while not self.serial_comm.is_connected():
@@ -723,34 +723,34 @@ class Alta(Filterd):
                 logging.error("Device connection timeout after 30 seconds")
                 self.set_state(self.STATE_IDLE | self.NOT_READY, "Waiting for device connection ...")
                 return
-            
+
         # Set motor speeds and accelerations
         self.serial_comm.send_command(f"M 0 SPD {self.m0spd.value}")
         self.serial_comm.send_command(f"M 0 ACC {self.m0acc.value}")
         self.serial_comm.send_command(f"M 1 SPD {self.m1spd.value}")
         self.serial_comm.send_command(f"M 1 ACC {self.m1acc.value}")
-        
+
         # Turn on motor 1 (filter wheel) and then home it in sequence
         logging.info("Powering on filter wheel motor...")
         self.serial_comm.send_command("M 1 ON", self._handle_motor_on_response)
-    
+
     def _handle_motor_on_response(self, cmd, response):
         """Handle response from turning motor on."""
         logging.info("Motor 1 powered on successfully")
 
         # Now home the motor with explicit wait for completion
         logging.info("Homing filter wheel motor...")
-        
+
         # Set device state to show we're homing
         self.set_state(
             self._state | self.FILTERD_MOVE,
             "Homing filter wheel",
             self.BOP_EXPOSURE
         )
-        
+
         # Send command directly and wait for OK
         result = self.serial_comm._send_command_internal("M 1 HOM", wait_for_ok=True)
-        
+
         if result and "OK" in result:
             logging.info("Motor 1 homed successfully")
             self.m1hom.value = 1
@@ -760,12 +760,12 @@ class Alta(Filterd):
         else:
             logging.error(f"Error homing motor 1: {result}")
             self.set_state(self.STATE_IDLE | self.ERROR_HW, "Error homing motor")
-        
+
     def _handle_status_update(self, motor_statuses, neon_status):
         # Process each motor status
         for motor in motor_statuses:
             motor_num = motor['motor']
-            
+
             if motor_num == 0:  # Focuser motor
                 # These Value objects handle their own thread safety
                 if 'position' in motor:
@@ -774,47 +774,47 @@ class Alta(Filterd):
                     self.m0spd.value = motor['speed']
                 if 'acceleration' in motor:
                     self.m0acc.value = motor['acceleration']
-                
+
             elif motor_num == 1:  # Filter wheel motor
                 # Capture needed values
                 old_position = None
                 new_position = None
                 old_moving = None
                 new_moving = None
-                
+
                 # Update shared state under lock
                 with self.motor_status_lock:
                     old_position = self.motor_position
                     if 'position' in motor:
                         new_position = motor['position']
                         self.motor_position = new_position
-                    
+
                     old_moving = self.is_motor_moving
                     if 'is_moving' in motor:
                         new_moving = bool(motor['is_moving'])
                         self.is_motor_moving = new_moving
-                
+
                 # Updates to Value objects (thread-safe)
                 if new_position is not None:
                     self.m1pos.value = new_position
-                
+
                 if 'speed' in motor:
                     self.m1spd.value = motor['speed']
                 if 'acceleration' in motor:
                     self.m1acc.value = motor['acceleration']
-                
+
                 # Check for movement completion
                 movement_completed = False
                 with self.motor_status_lock:
-                    if (self.filter_moving and 
-                        new_moving is not None and 
+                    if (self.filter_moving and
+                        new_moving is not None and
                         old_moving and not new_moving):
                         movement_completed = True
-                
+
                 # Handle movement completion outside lock
                 if movement_completed:
                     self._handle_filter_movement_complete()
-        
+
         # Update neon status (thread-safe)
         if neon_status is not None and self.neon.value != neon_status:
             self.neon.value = neon_status
@@ -826,26 +826,26 @@ class Alta(Filterd):
             self.filter_moving = False
             current_pos = self.motor_position
             self.target_position = None
-            
+
         # Find which filter position is closest to the current motor position
-        target_positions = [ self.f0pos.value, self.f1pos.value, 
+        target_positions = [ self.f0pos.value, self.f1pos.value,
             self.f2pos.value, self.f3pos.value, self.f4pos.value,
             self.f5pos.value, self.f6pos.value, self.f7pos.value ]
-            
+
         closest_filter = 0
         closest_distance = abs(current_pos - target_positions[0])
-            
+
         for i in range(1, len(target_positions)):
             distance = abs(current_pos - target_positions[i])
             if distance < closest_distance:
                 closest_distance = distance
                 closest_filter = i
-                    
+
         # Update filter position
         with self.motor_status_lock:
             self.filter_num = closest_filter
             self.filter.value = closest_filter
-        
+
         # Update device state - done outside the lock
         self.set_state(self._state & ~(self.FILTERD_MOVE), "Filter wheel idle", 0)
 
@@ -911,7 +911,7 @@ class Alta(Filterd):
 
             # Send the position command to motor 1
             cmd = f"M 1 ABS {target_position}"
-            self.serial_comm.send_command(cmd, 
+            self.serial_comm.send_command(cmd,
                 self._handle_filter_move_response,
                 cmd_type=SerialCommand.TYPE_MOVEMENT,
                 timeout=30.0)  # Longer timeout for movement
@@ -940,7 +940,7 @@ class Alta(Filterd):
         if not self.serial_comm or not self.serial_comm.is_connected():
             logging.error("Cannot home filter: Serial communicator not connected")
             return -1
-            
+
         if not self.motor_initialized:
             logging.error("Cannot home filter: Motor not initialized")
             return -1
@@ -950,18 +950,18 @@ class Alta(Filterd):
         # Set device state to show filter is moving
         self.set_state(
             self._state | self.FILTERD_MOVE,
-            "Homing filter wheel", 
+            "Homing filter wheel",
             self.BOP_EXPOSURE
         )
 
         with self.motor_status_lock:
             self.filter_moving = True
-      
+
         try:
             self.homing = True
             # Send command directly and wait for OK - use same approach as in _handle_motor_on_response
             result = self.serial_comm._send_command_internal("M 1 HOM", wait_for_ok=True)
-            
+
             if result and "OK" in result:
                 logging.info("Filter wheel homed successfully")
                 self.m1hom.value = 1
@@ -989,7 +989,7 @@ class Alta(Filterd):
         if not self.serial_comm or not self.serial_comm.is_connected():
             logging.error("Cannot home filter: Serial communicator not connected")
             return -1
-            
+
         # Check if motor is initialized
         if not self.motor_initialized:
             logging.error("Cannot home filter: Motor not initialized")
@@ -1005,18 +1005,18 @@ class Alta(Filterd):
             # Start filter movement
             with self.motor_status_lock:
                 self.filter_moving = True
-                
+
             # Send home command with longer timeout
             self.serial_comm.send_command(
-                "M 1 HOM", 
-                self._handle_home_response, 
+                "M 1 HOM",
+                self._handle_home_response,
                 cmd_type=SerialCommand.TYPE_HOMING,
                 timeout=20.0  # 20 seconds timeout for homing
             )
-            
+
             # Update filter position - will be completed by status updates
             return 0
-            
+
         except Exception as e:
             logging.error(f"Error homing filter wheel: {e}")
             self.filter_moving = False
@@ -1077,7 +1077,7 @@ class Alta(Filterd):
         """Handle neon lamp setting change."""
         if not self.serial_comm:
             return
-            
+
         if new_value == 0:  # OFF
             self.serial_comm.send_command("S ON")
             self.serial_comm.send_command("S IN")
@@ -1092,7 +1092,7 @@ class Alta(Filterd):
         """Handle focus position change."""
         if not self.serial_comm:
             return
-            
+
         cmd = f"F 0 ABS {new_value}"
         self.serial_comm.send_command(cmd)
         logging.info(f"Focus position set to {new_value}")
@@ -1101,7 +1101,7 @@ class Alta(Filterd):
         """Handle motor 0 position change."""
         if not self.serial_comm:
             return
-            
+
         cmd = f"M 0 ABS {new_value}"
         self.serial_comm.send_command(cmd)
         logging.info(f"Motor 0 position set to {new_value}")
@@ -1110,7 +1110,7 @@ class Alta(Filterd):
         """Handle motor 1 position change."""
         if not self.serial_comm:
             return
-            
+
         cmd = f"M 1 ABS {new_value}"
         self.serial_comm.send_command(cmd)
         logging.info(f"Motor 1 position set to {new_value}")
@@ -1119,7 +1119,7 @@ class Alta(Filterd):
         """Handle motor 0 speed change."""
         if not self.serial_comm:
             return
-            
+
         cmd = f"M 0 SPD {new_value}"
         self.serial_comm.send_command(cmd)
         logging.info(f"Motor 0 speed set to {new_value}")
@@ -1128,7 +1128,7 @@ class Alta(Filterd):
         """Handle motor 1 speed change."""
         if not self.serial_comm:
             return
-            
+
         cmd = f"M 1 SPD {new_value}"
         self.serial_comm.send_command(cmd)
         logging.info(f"Motor 1 speed set to {new_value}")
@@ -1137,7 +1137,7 @@ class Alta(Filterd):
         """Handle motor 0 acceleration change."""
         if not self.serial_comm:
             return
-            
+
         cmd = f"M 0 ACC {new_value}"
         self.serial_comm.send_command(cmd)
         logging.info(f"Motor 0 acceleration set to {new_value}")
@@ -1146,7 +1146,7 @@ class Alta(Filterd):
         """Handle motor 1 acceleration change."""
         if not self.serial_comm:
             return
-            
+
         cmd = f"M 1 ACC {new_value}"
         self.serial_comm.send_command(cmd)
         logging.info(f"Motor 1 acceleration set to {new_value}")
@@ -1155,11 +1155,11 @@ class Alta(Filterd):
         """Handle change to current filter position."""
         if not self.serial_comm:
             return
-            
+
         cmd = f"M 1 ABS {new_value}"
         self.serial_comm.send_command(cmd)
         logging.info(f"Current filter position adjusted to {new_value}")
-        
+
     def should_queue_value(self, value):
         """Check if a value change should be queued."""
         # Queue value changes when filter is moving
