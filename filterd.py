@@ -3,7 +3,6 @@
 import time
 import logging
 import threading
-from typing import Dict, List, Any, Callable, Optional, Tuple
 
 from value import (
     ValueSelection, ValueInteger, ValueBool, ValueString, ValueTime
@@ -162,38 +161,6 @@ class Filterd(Device):
         """
         # This will be called when a client changes the filter
         return self.set_filter_num_mask(new_value)
-
-    def __ex_set_filter_num_mask(self, new_filter):
-        """Set filter with appropriate state masking."""
-        # Set device state to show filter is moving
-        self.set_state(
-            self._state | self.FILTERD_MOVE,
-            "filter move started",
-            self.BOP_EXPOSURE
-        )
-
-        # Log movement
-        logging.info(f"moving filter from #{self.filter.value} ({self.filter.get_sel_name()}) "
-                     f"to #{new_filter} ({self.filter.get_sel_name(new_filter)})")
-
-        # Actually move the filter
-        ret = self.set_filter_num(new_filter)
-
-        if ret == 0:
-            logging.info(f"filter moved to #{new_filter} ({self.filter.get_sel_name()})")
-            # just make sure that the value is actually updated (command case)
-            self.filter._value = new_filter
-            self.network.distribute_value_immediate(self.filter)
-
-            # Movement successful: clear moving state
-            self.filter.reset_need_send()
-            self.set_state( self._state & ~(self.FILTERD_MOVE), "Filter wheel idle", 0)
-        else:
-            if ret == -1:
-                self.set_state( self._state | self.ERROR_HW, "filter movement failed", 0)
-                return ret
-
-        return ret
 
     def set_filter_num_mask(self, new_filter):
         """Set filter with appropriate state masking."""
