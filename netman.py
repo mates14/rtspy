@@ -522,9 +522,9 @@ class NetworkManager:
                         # Error in handler
                         self._send_error_response(conn, str(result))
         else:
-            # Unknown command - log and ignore
+            # Unknown command - log and send error response
             logging.warning(f"Unknown command from {conn.name}: '{line}' - ignoring")
-            conn.command_in_progress = False
+            self._send_error_response(conn, f"{cmd}", code=-1)  # Use -1 as error code, which will format as -001
 
         # Check for queued commands if this command has completed
         if not conn.command_in_progress and not conn.command_queue.empty():
