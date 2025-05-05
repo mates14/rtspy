@@ -342,6 +342,7 @@ class Ovis(Filterd):
             self.set_filter_num(0)
 
             # Mark device as ready
+            self.set_state(self.FILTERD_IDLE, "Filter wheel idle", 0)
             self.set_ready("Filter wheel initialized and ready")
 
         except Exception as e:

@@ -21,9 +21,9 @@ class Filterd(Device):
     """
 
     # Device-specific status/state bits
-    FILTERD_MASK = 0x00000300
-    FILTERD_IDLE = 0x00000000
-    FILTERD_MOVE = 0x00000100
+    FILTERD_MASK = 0x002
+    FILTERD_IDLE = 0x000
+    FILTERD_MOVE = 0x002
 
     @classmethod
     def register_options(cls, parser):
