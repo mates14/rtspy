@@ -5,8 +5,6 @@ import logging
 import threading
 import serial
 
-from typing import Dict, List, Any, Callable, Optional, Tuple, Union
-
 from value import (
     ValueSelection, ValueInteger, ValueBool, ValueString, ValueTime
 )
@@ -323,7 +321,8 @@ class Ovis(Filterd):
             logging.info("Homing filter wheel")
 
             # Sequence 2: Home the motor
-            self.set_state(self._state | self.FILTERD_MOVE, "Homing filter wheel", self.BOP_EXPOSURE)
+            self.set_state(self._state | self.FILTERD_MOVE, "Homing filter wheel",
+                            self.BOP_EXPOSURE)
 
             # Send home command with long timeout
             response = self.serial_comm.send_command("M 1 HOM", True, 30.0)
