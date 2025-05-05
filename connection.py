@@ -163,8 +163,8 @@ class Connection:
         # Log the outgoing message
         logging.debug(f"SEND {self.name}: {data!r}")
 
-        # Add to write buffer
-        self.write_buffer += data
+        # Create a new buffer instead of appending to existing one to avoid the buffer resize issue
+        self.write_buffer = bytearray(self.write_buffer) + data
 
         # Update activity timestamp
         self.last_activity = time.time()
