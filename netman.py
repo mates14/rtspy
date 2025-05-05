@@ -532,8 +532,9 @@ class NetworkManager:
             next_cmd_item = conn.command_queue.get()
 
             # Extract command and parameters
-            next_cmd = next_cmd_item.command.split(maxsplit=1)[0]
-            next_params = next_cmd_item.command.split(maxsplit=1)[1] if " " in next_cmd_item.command else ""
+            parts = next_cmd_item.command.split(maxsplit=1)
+            next_cmd = parts[0]
+            next_params = parts[1] if len(parts) > 1 else ""
 
             self._process_next_command(conn, next_cmd, next_params)
 
@@ -710,6 +711,9 @@ class NetworkManager:
         """Handle result from registration command."""
         if success:
             logging.debug(f"Registration successful: {msg}")
+            if conn.type == 'centrald':
+                conn.remote_device_name = 'centrald'
+                logging.debug(f"Set remote_device_name to 'centrald' for centrald connection")
             # Registration successful, now need to wait for registered_as message
             # The centrald_connected_callback will be called after getting registered_as
         else:
@@ -886,15 +890,6 @@ class NetworkManager:
         conn.command_in_progress = False
         conn.send(f"{code} {message}\n")
 
-    def _handle_registration_result(self, conn, success, code, msg):
-        """Handle result from registration command."""
-        if success:
-            logging.debug(f"Registration successful: {msg}")
-            # Registration successful, now need to wait for registered_as message
-        else:
-            logging.error(f"Registration failed: {msg}")
-            conn.update_state(ConnectionState.BROKEN, f"{msg}")
-
     def _handle_broadcast_value(self, value):
         """Broadcast a value to all authenticated connections."""
         # Get all authenticated connections
@@ -1042,8 +1037,19 @@ class NetworkManager:
                 hasattr(conn, 'remote_device_name') and
                 conn.remote_device_name == device_name):
                 device_connected = True
-                logging.debug(f"Already have a connection to {device_name}, requesting status info")
-                conn.send_command("device_status")
+                logging.debug(f"Already have a connection to {device_name}, sending cached state")
+
+                # Immediately dispatch the current state if we have it
+                if conn.device_state != 0 or conn.bop_state != 0:
+                    # Create a message if none exists
+                    status_msg = self.last_status_message if hasattr(self, 'last_status_message') else ""
+
+                    # Call the callback with the cached state
+                    state_callback(device_name, conn.device_state, conn.bop_state, status_msg)
+                    logging.debug(f"Dispatched cached state for {device_name}: {conn.device_state:x}, {conn.bop_state:x}")
+
+                # Also request info just in case there are other values to update
+                conn.send_command("info")
                 break
 
         if not device_connected:

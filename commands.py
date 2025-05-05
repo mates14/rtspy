@@ -170,86 +170,82 @@ class ProtocolCommands:
             return self.handlers[command](conn, params)
         return False
 
-    def handle_status(self, conn, params):
-        """Handle STATUS command (S protocol command)."""
-        # Check if this is a progress status message
-        parts = params.split(maxsplit=1)
+    def handle_status_or_bop(self, conn, params, is_bop=False):
+        """
+        Handle STATUS (S) or BOP (B) commands with unified processing.
+
+        Args:
+            conn: Connection object
+            params: Parameters string
+            is_bop: True if this is a BOP command, False for STATUS
+        """
+        parts = params.split(maxsplit=3 if is_bop else 2)
+
+        logging.debug(f"S/B handler ({'B' if is_bop else 'S'}) {params}")
 
         if not parts:
             return False
 
+        # Extract common values
         status_value = int(parts[0])
-
-        # Extract message if present
         status_msg = ""
-        if len(parts) > 1:
-            # Check for quoted message
-            msg_part = parts[1].strip()
+
+        message_idx = 1
+        # For BOP commands, also extract BOP state
+        if is_bop:
+            if len(parts) < 2:
+                logging.warning(f"Invalid BOP format: {params}")
+                imessage_idxi = 2
+                return False
+
+            bop_state = int(parts[1])
+
+            # Extract message if present (parts[2+])
+            if len(parts) > 2:
+                msg_start = params.find('"')
+                if msg_start != -1:
+                    msg_end = params.rfind('"')
+                    if msg_end > msg_start:
+                        status_msg = params[msg_start+1:msg_end]
+
+            # Store BOP state in connection
+            conn.bop_state = bop_state
+
+        # Simple status command - extract message if present
+        if len(parts) > message_idx:
+            msg_part = parts[message_idx].strip()
             if msg_part.startswith('"') and msg_part.endswith('"'):
                 status_msg = msg_part[1:-1]  # Remove quotes
             else:
                 status_msg = msg_part
 
-        # Update connection state
+        # Update device state in connection
         conn.device_state = status_value
 
-        # Notify about status change if needed
+        # Notify about state change if needed
         if self.network_manager.state_changed_callback:
             old_state = getattr(self.network_manager, 'device_state', 0)
             self.network_manager.state_changed_callback(old_state, status_value, status_msg)
 
         # Check if any component has registered interest in this device's state
-        device_name = self.network_manager._get_connection_entity_desc(conn)
+        device_name = conn.remote_device_name if hasattr(conn, 'remote_device_name') else self.network_manager._get_connection_entity_desc(conn)
         if hasattr(self.network_manager, 'state_interests') and device_name in self.network_manager.state_interests:
-            # Call the registered callback
+            # Call the registered callback with appropriate parameters
             self.network_manager.state_interests[device_name](
                 device_name, status_value, conn.bop_state, status_msg)
-            logging.debug(f"Dispatched state update for {device_name}")
+            logging.debug(f"Dispatched {'BOP' if is_bop else 'state'} update for {device_name}")
 
         # Status commands don't expect responses
         conn.command_in_progress = False
         return True
 
-    # Similarly update ProtocolCommands.handle_bop method
+    def handle_status(self, conn, params):
+        """Handle STATUS command (S protocol command)."""
+        return self.handle_status_or_bop(conn, params, is_bop=False)
+
     def handle_bop(self, conn, params):
         """Handle BOP (Block Operation) state command."""
-        parts = params.split()
-        if len(parts) >= 2:
-            try:
-                device_state = int(parts[0])
-                bop_state = int(parts[1])
-
-                # Extract message if present
-                status_msg = ""
-                if len(parts) > 2:
-                    msg_start = params.find('"')
-                    if msg_start != -1:
-                        msg_end = params.rfind('"')
-                        if msg_end > msg_start:
-                            status_msg = params[msg_start+1:msg_end]
-
-                # Store BOP state in connection
-                conn.device_state = device_state
-                conn.bop_state = bop_state
-
-                # Notify if needed
-                if hasattr(self.network_manager, 'bop_state_changed_callback') and callable(self.network_manager.bop_state_changed_callback):
-                    self.network_manager.bop_state_changed_callback(device_state, bop_state)
-
-                # Check if any component has registered interest in this device's state
-                device_name = self.network_manager._get_connection_entity_desc(conn)
-                if hasattr(self.network_manager, 'state_interests') and device_name in self.network_manager.state_interests:
-                    # Call the registered callback
-                    self.network_manager.state_interests[device_name](
-                        device_name, device_state, bop_state, status_msg)
-                    logging.debug(f"Dispatched BOP state update for {device_name}")
-
-            except ValueError:
-                logging.warning(f"Invalid BOP state format: {params}")
-
-        # BOP commands don't expect response
-        conn.command_in_progress = False
-        return True
+        return self.handle_status_or_bop(conn, params, is_bop=True)
 
     def handle_value(self, conn, params):
         """Handle 'V' (value) command."""
