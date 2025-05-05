@@ -164,7 +164,10 @@ class Device:
             description: Optional text description of the state change
             new_bop: Optional BOP state to set (if None, BOP state remains unchanged)
         """
-        logging.debug(f"Device.set_state({new_state:x}, '{description}', {new_bop if new_bop is not None else 'None'})")
+        if new_bop is not None:
+            logging.info(f"Device.set_state(0x{new_state:x}, 0x{new_bop:x}, '{description}')")
+        else:
+            logging.info(f"Device.set_state(0x{new_state:x}, -, '{description}')")
 
         # Store old states for notifications
         old_state = self._state
