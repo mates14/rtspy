@@ -73,11 +73,13 @@ class DummyFilter(Filterd):
         if new_filter < 0 or new_filter >= self.filter.sel_size():
             return -1
 
-        # Simulate filter movement time
-        time.sleep(self.filter_sleep.value)
-
-        # Update filter position
-        self.filter_num = new_filter
+        def move_filter():
+            # Simulate filter movement time
+            time.sleep(self.filter_sleep.value)
+            # Update filter position
+            self.filter_num = new_filter
+            self.movement_completed()
+        threading.Thread(target=move_filter, daemon=True).start()
 
         # Call parent implementation to update clients
         return super().set_filter_num(new_filter)

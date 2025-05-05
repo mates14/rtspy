@@ -277,8 +277,9 @@ class SerialCommunicator:
                     self._process_next_command()
                 elif time_until_status <= 0:
                     # Update status
-                    self._update_status()
-                    self.last_status_time = time.time()
+                    if not self.homing:
+                        self._update_status()
+                        self.last_status_time = time.time()
                 else:
                     # Wait for either wakeup or status interval
                     try:
@@ -394,6 +395,14 @@ class SerialCommunicator:
                 # Read until we get OK or timeout
                 response = self.serial_conn.readline().decode().strip()
 
+                if response == "O":
+                    logging.info("Got partial 'O', assuming it's 'OK'")
+                    # Wait for the rest of the response to arrive
+                    time.sleep(0.01)  # Wait 10ms for buffer to fill (2B * 10b / 9600bps = 2ms)
+                    # Clear any remaining response (the "K\n")
+                    self.serial_conn.reset_input_buffer()
+                    response = "OK"
+
                 # Restore original timeout
                 self.serial_conn.timeout = original_timeout
 
@@ -425,7 +434,7 @@ class SerialCommunicator:
 
     def _update_status(self) -> None:
         """Update device status."""
-        if not self.serial_conn or self.homing:
+        if not self.serial_conn:
             return
 
         try:
@@ -543,16 +552,16 @@ class SerialCommunicator:
         return self.serial_conn is not None and self.connected
 
 
-class Alta(Filterd):
+class Ovis(Filterd):
     """
-    Alta filter wheel driver for spectrograph.
+    OVIS (Otevrena Veda Imaging Spectrograph) filter wheel driver
 
-    This is a Python implementation of the Alta filter wheel driver from RTS2.
+    This is a Python implementation of the Ovis filter wheel driver from RTS2.
     """
 
     @classmethod
     def register_options(cls, parser):
-        """Register Alta-specific command line options."""
+        """Register Ovis-specific command line options."""
         super().register_options(parser)
         parser.add_argument('-f', '--device-file',
                           help='Serial port with the module (usually /dev/ttyUSB for Arduino USB serial connection)')
@@ -565,7 +574,7 @@ class Alta(Filterd):
             device.device_file = args.device_file
 
     def __init__(self, device_name="W0", port=0):
-        """Initialize the Alta filter wheel device."""
+        """Initialize the Ovis filter wheel device."""
         super().__init__(device_name, port)
 
         # Serial connection
@@ -688,7 +697,7 @@ class Alta(Filterd):
 
         # Set device ready after initialization
         # Note: The actual ready state will be set after motor initialization completes
-        logging.info("Alta filter wheel starting, waiting for motor initialization")
+        logging.info("Ovis filter wheel starting, waiting for motor initialization")
 
     def stop(self):
         """Stop the device."""
@@ -732,14 +741,12 @@ class Alta(Filterd):
 
         # Turn on motor 1 (filter wheel) and then home it in sequence
         logging.info("Powering on filter wheel motor...")
-        self.serial_comm.send_command("M 1 ON", self._handle_motor_on_response)
+        self.serial_comm.send_command("M 1 ON")
 
-    def _handle_motor_on_response(self, cmd, response):
-        """Handle response from turning motor on."""
-        logging.info("Motor 1 powered on successfully")
-
+#    def _handle_motor_on_response(self, cmd, response):
+        #"""Handle response from turning motor on."""
         # Now home the motor with explicit wait for completion
-        logging.info("Homing filter wheel motor...")
+        logging.info("Motor 1 powered on, homing ...")
 
         # Set device state to show we're homing
         self.set_state(
@@ -847,6 +854,7 @@ class Alta(Filterd):
             self.filter.value = closest_filter
 
         # Update device state - done outside the lock
+        self.movement_completed()
         self.set_state(self._state & ~(self.FILTERD_MOVE), "Filter wheel idle", 0)
 
     def get_filter_num(self):
@@ -923,7 +931,7 @@ class Alta(Filterd):
             logging.error(f"Error setting filter: {e}")
             self.filter_moving = False
             # Clear the moving state on error
-            self.set_state(self._state & ~self.FILTERD_MOVE, "Filter movement failed", 0)
+            self.set_state(self._state & ~self.FILTERD_MOVE, "", 0)
             return -1
 
     def _handle_filter_move_response(self, cmd, response):
@@ -933,7 +941,7 @@ class Alta(Filterd):
         else:
             logging.error(f"Filter move command failed: {response}")
             self.filter_moving = False
-            self.set_state(self._state & ~(self.FILTERD_MOVE), "Filter movement failed", 0)
+        self.set_state(self._state & ~(self.FILTERD_MOVE), "", 0)
 
     def home_filter(self):
         """Home the filter wheel."""
@@ -948,11 +956,7 @@ class Alta(Filterd):
         logging.info("Homing filter wheel")
 
         # Set device state to show filter is moving
-        self.set_state(
-            self._state | self.FILTERD_MOVE,
-            "Homing filter wheel",
-            self.BOP_EXPOSURE
-        )
+        self.set_state(self._state | self.FILTERD_MOVE, "Homing filter wheel", self.BOP_EXPOSURE)
 
         with self.motor_status_lock:
             self.filter_moving = True
@@ -974,8 +978,11 @@ class Alta(Filterd):
                     self.filter_moving = False
 
                 self.set_state(self._state & ~(self.FILTERD_MOVE), "Homing failed", 0)
-                return -1
+                return -2 # -1 is not implemented
+        except Exception as e:
+            logging.error(f"Error homing filter wheel: {e}")
         finally:
+            self.set_state(self._state & ~(self.FILTERD_MOVE), "Homing ended", 0)
             self.homing = False
 
     def __ex_home_filter(self):
@@ -1160,28 +1167,20 @@ class Alta(Filterd):
         self.serial_comm.send_command(cmd)
         logging.info(f"Current filter position adjusted to {new_value}")
 
-    def should_queue_value(self, value):
-        """Check if a value change should be queued."""
-        # Queue value changes when filter is moving
-        if (self._state & self.FILTERD_MASK) == self.FILTERD_MOVE:
-            return True
-        return False
-
-
 if __name__ == "__main__":
     # For standalone imports
 
     # Create application
-    app = App(description='Alta Filter Wheel Driver')
+    app = App(description='OVIS Filter Wheel Driver')
 
     # Register device-specific options
-    app.register_device_options(Alta)
+    app.register_device_options(Ovis)
 
     # Parse command line arguments
     args = app.parse_args()
 
     # Create and configure device
-    device = app.create_device(Alta)
+    device = app.create_device(Ovis)
 
     # Run application main loop
     app.run()

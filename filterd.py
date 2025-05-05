@@ -58,6 +58,9 @@ class Filterd(Device):
         self.associated_ccd = None
         self.ccd_exposing = False
 
+        self.pending_filter_connection = None
+        self.movement_in_progress = False
+
     def _register_device_commands(self):
         """Register device command handlers with the network."""
         # Create and register the device command handler from parent
@@ -160,7 +163,7 @@ class Filterd(Device):
         # This will be called when a client changes the filter
         return self.set_filter_num_mask(new_value)
 
-    def set_filter_num_mask(self, new_filter):
+    def __ex_set_filter_num_mask(self, new_filter):
         """Set filter with appropriate state masking."""
         # Set device state to show filter is moving
         self.set_state(
@@ -187,10 +190,63 @@ class Filterd(Device):
             self.set_state( self._state & ~(self.FILTERD_MOVE), "Filter wheel idle", 0)
         else:
             if ret == -1:
-                self.set_state( self._state | self.HW_ERROR, "filter movement failed", 0)
+                self.set_state( self._state | self.ERROR_HW, "filter movement failed", 0)
                 return ret
 
         return ret
+
+    def set_filter_num_mask(self, new_filter):
+        """Set filter with appropriate state masking."""
+        # Set device state to show filter is moving
+        self.set_state(
+            self._state | self.FILTERD_MOVE,
+            "filter move started",
+            self.BOP_EXPOSURE
+        )
+
+        # Log movement
+        logging.info(f"moving filter from #{self.filter.value} ({self.filter.get_sel_name()}) "
+                    f"to #{new_filter} ({self.filter.get_sel_name(new_filter)})")
+
+        # Mark that movement is in progress
+        self.movement_in_progress = True
+
+        # Actually move the filter
+        ret = self.set_filter_num(new_filter)
+
+        if ret == 0:
+            # Record the target filter (will be used for completion)
+            self.target_filter = new_filter
+            # Do NOT update state or values yet - wait for movement completion
+            # Return success to caller
+            return ret
+        else:
+            # Error occurred
+            self.movement_in_progress = False
+            if ret == -1:
+                self.set_state(self._state | self.ERROR_HW, "filter movement failed", 0)
+            return ret
+
+    def movement_completed(self):
+        """Called when filter movement has completed."""
+        if not self.movement_in_progress:
+            return
+
+        # Update the filter value
+        if hasattr(self, 'target_filter'):
+            self.filter.value = self.target_filter
+            del self.target_filter
+
+        # Clear the movement flag
+        self.movement_in_progress = False
+
+        # Reset device state
+        self.set_state(self._state & ~(self.FILTERD_MOVE), "Filter wheel idle", 0)
+
+        # Send response to pending command if present
+        if self.pending_filter_connection:
+            self.network._send_ok_response(self.pending_filter_connection)
+            self.pending_filter_connection = None
 
     def home_filter(self):
         """
@@ -347,33 +403,30 @@ class FilterCommands:
             # Check if filter number is valid
             if filter_num < 0 or filter_num >= self.filter_device.filter.sel_size():
                 self.filter_device.network._send_error_response(
-                    conn, f"Invalid filter number: {filter_num}. Valid range: 0-{self.filter_device.filter.sel_size()-1}")
+                    conn, f"Invalid filter number: {filter_num}")
                 return False
 
-            #ret = 0
-            #self.filter_device.filter.value = filter_num
-            # Set the filter - this will handle all the proper state changes
-            ret = self.filter_device.set_filter_num_mask(filter_num)
-            #self.filter_device.network.values['filter']._value = filter_num
+            # Set filter - don't complete the command until movement is done
+            # Store the connection to respond to when movement completes
+            self.filter_device.pending_command_conn = conn
 
-            if ret == 0:
-                # Success
-                self.filter_device.network._send_ok_response(conn)
-                return True
-            else:
-                # Error
+            # Start the filter movement
+            ret = self.filter_device.set_filter_num_mask(filter_num)
+
+            if ret != 0:
+                # Error - send error response immediately
                 self.filter_device.network._send_error_response(
                     conn, f"Error setting filter to position {filter_num}")
                 return False
+
+            # No response sent yet - it will be sent when movement completes
+            return True
 
         except ValueError:
             self.filter_device.network._send_error_response(
                 conn, f"Invalid filter number: {params}")
             return False
-        except Exception as e:
-            logging.error(f"Error handling filter command: {e}")
-            self.filter_device.network._send_error_response(conn, f"Error: {str(e)}")
-            return False
+
 
     def handle_home(self, conn, params):
         """Handle 'home' command to home the filter wheel."""
