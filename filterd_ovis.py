@@ -1,39 +1,81 @@
-#!/usr/bin/python3
-""" 
+!/usr/bin/python3
+"""
 RTS2-Python OVIS Filter Wheel Driver
 
-Driver for the OVIS (Otevřená Věda Imaging Spectrograph) low budget spectrograph
-Copyright (C) 2023-2025 Martin Jelínek
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
-You should have received a copy of the GNU General Public License
-along with this program. If not, see https://www.gnu.org/licenses/.
+Driver for the OVIS (Otevřená Věda Imaging Spectrograph) low budget
+spectrograph Copyright (C) 2023-2025 Martin Jelínek
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE.  See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program.  If not, see <https://www.gnu.org/licenses/>.
+
+Project Background:
+------------------
+
+"Otevřená Věda" (literally "Open Science") is a program of the Academy of
+Sciences of the Czech Republic that offers high-school students opportunities
+to participate in research at the institutes of the Academy. The program runs
+for one year, with up to three students collaborating on a single project.
+
+This spectrograph was developed across two consecutive years of the Otevřená
+Věda program:
+
+1. First year (2022-2023): Students Adam Denko, Jan Sova, and Veronika Modrá
+    designed and built the imaging spectrograph, winning second place in the
+    national conference with their project.
+
+2. Second year (2023-2024): Students Adam Denko, Jan Sova, and Veronika Modrá
+    continued with the development in a follow-up project "Observing with an
+    imaging spectrograph".
+
+The spectrograph initially used an Arduino with a simple bridge control. In
+2024, Patrik Novák from FEL-CTU (Czech Technical University) designed and built
+the Raspberry Pi Pico-based driver board used in the current implementation.
+
+Martin Jelínek from the Astronomical Institute of the Academy of Sciences,
+along with Jan Strobl, mentored these projects and implemented this Python RTS2
+driver to enable the spectrograph's integration with the RTS2 observatory
+control system.
 
 OVIS Driver Implementation:
 ---------------------------
+
 This driver controls the OVIS (Otevřená Věda Imaging Spectrograph) hardware
 through a Raspberry Pi Pico-based controller board. The controller provides
-stepper motor drivers (type commonly used for 3D printers) for positioning
-the filter wheel and other moving components.
+stepper motor drivers (type commonly used for 3D printers) for positioning the
+filter wheel and other moving components.
 
 Hardware capabilities:
-- 3 motor control channels (though only 2 are populated with controllers)
+
+- 3 motor control channels (though only 2 are populated with TMC2209 stepper
+  motor drivers)
+- TMC2209 drivers commonly used in 3D printers, featuring StallGuard capability
 - Neon calibration lamp control (on/off)
 - Relay control for introducing the neon lamp into the optical path
 
-The driver communicates with the controller via serial port, implementing
-the protocol defined at: https://github.com/Pato-99/spectral_firmware_rp
-The primary functionality is to manage the filter wheel positions, with
-the ability to move to absolute positions, home the motors, and track
-current position. It also exposes controls for the calibration lamp.
-"""
+The driver communicates with the controller via serial port, implementing the
+protocol defined at: https://github.com/Pato-99/spectral_firmware_rp
 
+Current implementation:
+
+- Motor 1: Primary filter wheel control with position mapping
+- Motor 0: Focusing movement (currently disabled, planned for implementation
+  with a future Focusd template class)
+- Neon lamp and optical path relay controls fully implemented
+
+The primary functionality is to manage the filter wheel positions, with the
+ability to move to absolute positions, home the motors, and track current
+position. It also exposes controls for the calibration lamp.
+
+"""
 
 import time
 import logging
