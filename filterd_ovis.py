@@ -28,11 +28,11 @@ for one year, with up to three students collaborating on a single project.
 This spectrograph was developed across two consecutive years of the Otevřená
 Věda program:
 
-1. First year (2022-2023): Students Adam Denko, Jan Sova, and Veronika Modrá
+1. First year (2023): Students Adam Denko, Jan Sova, and Veronika Modrá
     designed and built the imaging spectrograph, winning second place in the
     national conference with their project.
 
-2. Second year (2023-2024): Students Adam Denko, Jan Sova, and Veronika Modrá
+2. Second year (2024): Students Adam Denko, Filip Bobal, and Barbora Nohová
     continued with the development in a follow-up project "Observing with an
     imaging spectrograph".
 
