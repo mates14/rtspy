@@ -1,4 +1,39 @@
 #!/usr/bin/python3
+""" 
+RTS2-Python OVIS Filter Wheel Driver
+
+Driver for the OVIS (Otevřená Věda Imaging Spectrograph) low budget spectrograph
+Copyright (C) 2023-2025 Martin Jelínek
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU General Public License for more details.
+You should have received a copy of the GNU General Public License
+along with this program. If not, see https://www.gnu.org/licenses/.
+
+OVIS Driver Implementation:
+---------------------------
+This driver controls the OVIS (Otevřená Věda Imaging Spectrograph) hardware
+through a Raspberry Pi Pico-based controller board. The controller provides
+stepper motor drivers (type commonly used for 3D printers) for positioning
+the filter wheel and other moving components.
+
+Hardware capabilities:
+- 3 motor control channels (though only 2 are populated with controllers)
+- Neon calibration lamp control (on/off)
+- Relay control for introducing the neon lamp into the optical path
+
+The driver communicates with the controller via serial port, implementing
+the protocol defined at: https://github.com/Pato-99/spectral_firmware_rp
+The primary functionality is to manage the filter wheel positions, with
+the ability to move to absolute positions, home the motors, and track
+current position. It also exposes controls for the calibration lamp.
+"""
+
 
 import time
 import logging
