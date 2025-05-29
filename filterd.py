@@ -115,7 +115,8 @@ class Filterd(Device):
 
     def on_state_changed(self, old_state, new_state, message):
         """Handle device state changes."""
-        logging.debug(f"Filter state changed from {old_state:x} to {new_state:x}: {message}")
+        # bug: unless I know what device changed status, this is useless
+        logging.debug(f"State of device <dev> changed from {old_state:x} to {new_state:x}: {message}")
 
         # Check for day/night transition
         # bullshit, this is in centrald state, not here and that would be done really differently
