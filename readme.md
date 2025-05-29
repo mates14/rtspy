@@ -53,7 +53,8 @@ The system is built around several core components:
 
 Currently, the project includes implementations for the following devices:
 
-- **Filterd**: Base filter wheel implementation
+- **Filterd**: Base class for filter wheels
+- **Ovis**: OVIS filter wheel (Otevrena Veda Imaging Spectrograph, OV2023-2024, Adam Denko, Jan Sova, Veronika Modrá, Filip Bobal, Barbora Nohová)
 - **DummyFilter**: Simulated filter wheel for testing
 - **TemperatureSensor**: Simple temperature sensor example device
 - **WatcherDevice**: Example device for monitoring other devices' states and values

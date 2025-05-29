@@ -39,11 +39,9 @@ class WatcherDevice(Device):
         
         # Create a value to store the watched variable's value
         self.watched_value = ValueDouble("watched_value", "Value being watched")
-        self.register_value(self.watched_value)
         
         # Store the device state
         self.watched_device_state = ValueString("watched_device_state", "State of watched device")
-        self.register_value(self.watched_device_state)
         
         # Set initial state
         self.set_state(self.STATE_IDLE, "Initializing device")

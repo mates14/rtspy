@@ -46,18 +46,15 @@ class CustomFilterWheel(Filterd):
         # Add hardware connection parameters
         self.connection_string = ValueString("connection", "hardware connection string")
         self.connection_string.set_writable()
-        self.register_value(self.connection_string)
 
         # Movement timeout value
         self.movement_timeout = ValueDouble("move_timeout", "movement timeout [s]")
         self.movement_timeout.set_writable()
         self.movement_timeout.value = 10.0
-        self.register_value(self.movement_timeout)
 
         # Initialize with some default filters
         self.filter_names = ValueString("filter_names", "filter names")
         self.filter_names.value = "Clear:Red:Green:Blue"
-        self.register_value(self.filter_names)
 
         self.set_filters(self.filter_names.value)
 
