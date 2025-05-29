@@ -108,7 +108,7 @@ class Value(Generic[T]):
     """Base class for all values with network awareness and queuing built-in."""
 
     def __init__(self, name: str, description: str = "", write_to_fits: bool = True,
-                 flags: int = 0, value_type: ValueType = None):
+                 flags: int = 0, value_type: ValueType = None, writable: bool = False):
         self.name = name
         self.description = description
         self._value = None
@@ -118,12 +118,18 @@ class Value(Generic[T]):
             self.rts2_type |= ValueFlags.FITS
         self.rts2_type |= flags
 
+        if writable:
+            self.rts2_type |= ValueFlags.WRITABLE
+
         # Add callback system
         self._callbacks = Callback()
 
         # Register with device for network and queuing
         from device import Device
         device = Device.get_instance()  # Singleton device
+
+        # immediately register the value for network distribution
+        # (we may assume there is no point in having a Value not in the network)
         if device:
             device.register_value(self)
 

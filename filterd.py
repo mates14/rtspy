@@ -44,7 +44,6 @@ class Filterd(Device):
         # Create filter selection value
         self.filter = ValueSelection("filter", "used filter")
         self.filter.set_writable()
-        self.register_value(self.filter)
 
         # Default filter (automatically set at script end)
         self.default_filter = None
@@ -78,14 +77,12 @@ class Filterd(Device):
             self.default_filter.set_writable()
             self.default_filter.rts2_type |= 0x0080_0000  # AUTOSAVE
             self.arg_default_filter = arg
-            self.register_value(self.default_filter)
             return 0
         elif option == 'daytime-filter':
             self.daytime_filter = ValueSelection("day_filter", "daytime filter")
             self.daytime_filter.set_writable()
             self.daytime_filter.rts2_type |= 0x0080_0000  # AUTOSAVE
             self.arg_daytime_filter = arg
-            self.register_value(self.daytime_filter)
             return 0
         return -1  # Option not recognized
 
