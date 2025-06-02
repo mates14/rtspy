@@ -293,7 +293,7 @@ class SerialCommunicator:
         return self.connected
 
 
-class Ovis(Filterd, DeviceConfig):
+class Ovis(Filterd):
     """OVIS (Otevrena Veda Imaging Spectrograph) filter wheel driver."""
 
     def setup_config(self, config):

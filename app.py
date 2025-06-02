@@ -44,17 +44,20 @@ class App:
 
     def register_device_options(self, device_class: Type[Device]):
         """
-        Register device options using the device class.
+        Register device options using the DeviceConfig system.
 
         The device class handles both standard RTS2 options and device-specific options.
 
         Args:
-            device_class: Device class that implements register_options
+            device_class: Device class that uses DeviceConfig
         """
-        if hasattr(device_class, 'register_options') and callable(device_class.register_options):
-            device_class.register_options(self.parser)
-        else:
-            raise RuntimeError(f"Device class {device_class.__name__} does not implement register_options()")
+        # Check if device class uses DeviceConfig
+        from config import DeviceConfig
+        if not issubclass(device_class, DeviceConfig):
+            raise RuntimeError(f"Device class {device_class.__name__} must inherit from DeviceConfig")
+
+        # Use the DeviceConfig system to register options
+        device_class.register_options(self.parser)
 
     def parse_args(self):
         """Parse command line arguments."""
@@ -94,6 +97,11 @@ class App:
         Returns:
             Configured device instance
         """
+        # Check if device class uses DeviceConfig
+        from config import DeviceConfig
+        if not issubclass(device_class, DeviceConfig):
+            raise RuntimeError(f"Device class {device_class.__name__} must inherit from DeviceConfig")
+
         # Extract basic device parameters from args and kwargs
         # Note: These might be overridden by the configuration system
         device_name = kwargs.get('device_name') or getattr(self.args, 'device', None)
@@ -102,12 +110,8 @@ class App:
         # Create device instance with basic parameters
         self.device = device_class(device_name=device_name, port=port)
 
-        # Apply configuration from all sources (command line, config files, env vars, etc.)
-        # This is where the magic happens - the DeviceConfigMixin processes everything
-        if hasattr(device_class, 'process_args') and callable(device_class.process_args):
-            device_class.process_args(self.device, self.args)
-        else:
-            raise RuntimeError(f"Device class {device_class.__name__} does not implement process_args()")
+        # Apply configuration from all sources using DeviceConfig system
+        device_class.process_args(self.device, self.args)
 
         # At this point, logging configuration has been applied by the device config system
         # so we need to reconfigure logging with the proper RTS2 formatter
@@ -134,8 +138,8 @@ class App:
 
         # Determine log file from device configuration if available
         log_file = None
-        if self.device and hasattr(self.device, '_final_config'):
-            logging_config = self.device._final_config.get('logging', {})
+        if self.device and hasattr(self.device, '_resolved_config'):
+            logging_config = self.device._resolved_config.get('logging', {})
             log_file = logging_config.get('file')
 
         # Create appropriate handler

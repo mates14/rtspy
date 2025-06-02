@@ -3,31 +3,28 @@
 import time
 import logging
 import threading
-from typing import Optional
+from typing import Optional, Any, Dict
 
 from value import ValueDouble, ValueString
 from device import Device
+from config import DeviceConfig
 from constants import DeviceType
 from app import App
 
-class WatcherDevice(Device):
+class WatcherDevice(Device, DeviceConfig):
     """Simple device that watches state and values of another device."""
 
-    @classmethod
-    def register_options(cls, parser):
+    def setup_config(self, config):
         """Register WatcherDevice-specific options."""
-        parser.add_argument('--watch-value', default="centrald.sun_alt",
+        config.add_argument('--watch-value', default="centrald.sun_alt",
                           help='Name of a value to be watched (format: device_name.value_name)')
-        parser.add_argument('--watch-device', default="centrald",
+        config.add_argument('--watch-device', default="centrald",
                           help='Name of a device to watch state changes')
 
-    @classmethod
-    def process_args(cls, device, args):
+    def apply_config(self, config: Dict[str, Any]):
         """Process arguments for this device."""
-        if args.watch_value:
-            device.watch_value = args.watch_value
-        if args.watch_device:
-            device.watch_device = args.watch_device
+        self.watch_value = args.watch_value
+        self.watch_device = args.watch_device
 
     def __init__(self, device_name="WATCH", port=0):
         """Initialize the watcher device."""
@@ -124,13 +121,6 @@ class WatcherDevice(Device):
         self.set_ready("Watcher ready")
 
 if __name__ == "__main__":
-    # Configure logging
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format='%(asctime)s %(levelname)s: %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    
     # Create application
     app = App(description='RTS2 Device Watcher')
 

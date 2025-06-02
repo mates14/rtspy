@@ -29,15 +29,16 @@ class Filterd(Device, DeviceConfig):
     @classmethod
     def setup_config(self, config):
         """Register Filterd-specific command line options."""
-        super().setup_config(config)
-        config.add_argument('-F', '--filters',
-                          help='Filter names (colon-separated)')
+        # super().setup_config(config)
+        config.add_argument('-F', '--filters', help='Filter names (colon-separated)')
+        config.add_argument('--default-filter', help='Default filter', default=0)
+        config.add_argument('--daytime-filter', help='Daytime filter', default=0)
 
     def apply_config(self, config: Dict[str, Any]):
         """Process arguments for this specific device."""
         super().apply_config(config)
-        if args.filters:
-            self.set_filters(args.filters)
+        self.set_filters(config.get('filters', 'J:K:L'))
+        print(config)
 
     def __init__(self, device_name="W0", port=0):
         """Initialize the filter wheel device."""

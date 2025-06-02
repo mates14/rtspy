@@ -7,7 +7,6 @@ from typing import Optional,Dict,Any
 
 from value import ValueString, ValueDouble
 from filterd import Filterd
-from config import DeviceConfig
 from app import App
 
 class DummyFilter(Filterd):
@@ -39,12 +38,6 @@ class DummyFilter(Filterd):
         # Centrald connection parameters
         self.centrald_host = "localhost"
         self.centrald_port = 617
-
-        # Add filter names string for dynamic configuration
-        self.filter_names = ValueString("filter_names", "filter names")
-        self.filter_names.value="Clear:Red:Green:Blue:Ha:SII:OIII"
-
-        self.set_filters(self.filter_names.value)
 
     def on_filter_sleep_changed(self, old_value, new_value):
         return True
