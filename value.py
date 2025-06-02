@@ -348,7 +348,7 @@ class ValueString(Value[str]):
 
     def __init__(self, name: str, description: str = "", write_to_fits: bool = True,
                  flags: int = 0, default: str = "", writable: bool = False):
-        super().__init__(name, description, write_to_fits, flags, ValueType.STRING)
+        super().__init__(name, description, write_to_fits, flags, ValueType.STRING, writable=writable)
         self._value = default
 
     def _convert_value(self, value: Any) -> str:
@@ -365,7 +365,7 @@ class ValueDouble(Value[float]):
 
     def __init__(self, name: str, description: str = "", write_to_fits: bool = True,
                  flags: int = 0, default: Optional[float] = None, writable: bool = False):
-        super().__init__(name, description, write_to_fits, flags, ValueType.DOUBLE)
+        super().__init__(name, description, write_to_fits, flags, ValueType.DOUBLE, writable=writable)
         self._value = float('nan') if default is None else float(default)
 
     def _convert_value(self, value: Any) -> float:
@@ -387,7 +387,7 @@ class ValueTime(ValueDouble):
     """Time value with proper RTS2 typing."""
     def __init__(self, name, description, write_to_fits=False, flags=0, default=None, writable: bool = False):
         # Use TIME type (0x3) instead of DOUBLE type (0x4)
-        super().__init__(name, description, write_to_fits, flags, default=default)
+        super().__init__(name, description, write_to_fits, flags, default=default, writable=writable)
         self.rts2_type = ValueType['TIME']
 
 class ValueInteger(Value[int]):
@@ -395,7 +395,7 @@ class ValueInteger(Value[int]):
 
     def __init__(self, name: str, description: str = "", write_to_fits: bool = True,
                  flags: int = 0, default: Optional[int] = None, writable: bool = False):
-        super().__init__(name, description, write_to_fits, flags, ValueType.INTEGER)
+        super().__init__(name, description, write_to_fits, flags, ValueType.INTEGER, writable=writable)
 
         if flags & ValueFlags.NOTNULL and default is None:
             raise ValueError("NOTNULL flag requires a default value")
@@ -419,7 +419,7 @@ class ValueBool(Value[bool]):
 
     def __init__(self, name: str, description: str = "", write_to_fits: bool = True,
                  flags: int = 0, default: Optional[bool] = None, writable: bool = False):
-        super().__init__(name, description, write_to_fits, flags, ValueType.BOOL)
+        super().__init__(name, description, write_to_fits, flags, ValueType.BOOL, writable=writable)
         self._value = default
 
     def _convert_value(self, value: Any) -> Optional[bool]:
@@ -480,7 +480,7 @@ class ValueCoordinate(Value[Coordinates]):
     def __init__(self, name: str, description: str = "", write_to_fits: bool = True,
                  flags: int = 0, value_type: ValueType = None,
                  default_x: float = None, default_y: float = None, writable: bool = False):
-        super().__init__(name, description, write_to_fits, flags, value_type)
+        super().__init__(name, description, write_to_fits, flags, value_type, writable=writable)
 
         if default_x is not None and default_y is not None:
             self._value = Coordinates(default_x, default_y)
@@ -555,7 +555,7 @@ class ValueRaDec(ValueCoordinate):
     def __init__(self, name: str, description: str = "", write_to_fits: bool = True,
                  flags: int = 0, default_ra: float = None, default_dec: float = None, writable: bool = False):
         super().__init__(name, description, write_to_fits, flags, ValueType.RADEC,
-                         default_ra, default_dec)
+                         default_ra, default_dec, writable=writable)
 
     @property
     def ra(self) -> Optional[float]:
@@ -593,7 +593,7 @@ class ValueAltAz(ValueCoordinate):
     def __init__(self, name: str, description: str = "", write_to_fits: bool = True,
                  flags: int = 0, default_alt: float = None, default_az: float = None, writable: bool = False):
         super().__init__(name, description, write_to_fits, flags, ValueType.ALTAZ,
-                         default_alt, default_az)
+                         default_alt, default_az, writable=writable)
 
     @property
     def alt(self) -> Optional[float]:
@@ -653,7 +653,7 @@ class ValueStat(ValueDouble):
 
     def __init__(self, name: str, description: str = "", write_to_fits: bool = True,
                  flags: int = 0, default: Optional[float] = None, writable: bool = False):
-        super().__init__(name, description, write_to_fits, flags | ValueType.STAT, default)
+        super().__init__(name, description, write_to_fits, flags | ValueType.STAT, default, writable=writable)
         self._stats = Statistics()
 
     @property
@@ -709,7 +709,7 @@ class ValueSelection(Value[int]):
 
     def __init__(self, name: str, description: str = "", write_to_fits: bool = True,
                  flags: int = 0, default: Optional[int] = None, writable: bool = False):
-        super().__init__(name, description, write_to_fits, flags, ValueType.SELECTION)
+        super().__init__(name, description, write_to_fits, flags, ValueType.SELECTION, writable=writable)
         self._value = default if default is not None else 0
         self._selection_values = []  # List of string values
 
