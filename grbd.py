@@ -272,20 +272,20 @@ class GrbDaemon(Device, SimpleDeviceConfig):
         self.last_heartbeat = ValueTime("last_heartbeat", "Last GCN heartbeat/activity")
 
         # === PACKET STATISTICS ===
-        self.packets_received = ValueInteger("packets_received", "Total GCN packets received")
-        self.packets_today = ValueInteger("packets_today", "GCN packets received today")
-        self.grbs_processed = ValueInteger("grbs_processed", "Total GRBs processed")
-        self.grbs_today = ValueInteger("grbs_today", "GRBs processed today")
+        self.packets_received = ValueInteger("packets_received", "Total GCN packets received", initial=0)
+        self.packets_today = ValueInteger("packets_today", "GCN packets received today", initial=0)
+        self.grbs_processed = ValueInteger("grbs_processed", "Total GRBs processed", initial=0)
+        self.grbs_today = ValueInteger("grbs_today", "GRBs processed today", initial=0)
         self.last_packet = ValueTime("last_packet", "Time of last GCN packet")
         self.packet_rate = ValueDouble("packet_rate", "Recent packet rate [packets/hour]")
 
         # === MISSION-SPECIFIC COUNTERS ===
-        self.fermi_alerts = ValueInteger("fermi_alerts", "Fermi GBM alerts processed")
-        self.swift_alerts = ValueInteger("swift_alerts", "Swift BAT alerts processed")
-        self.maxi_alerts = ValueInteger("maxi_alerts", "MAXI alerts processed")
-        self.icecube_alerts = ValueInteger("icecube_alerts", "IceCube alerts processed")
-        self.svom_alerts = ValueInteger("svom_alerts", "SVOM alerts processed")
-        self.other_alerts = ValueInteger("other_alerts", "Other mission alerts")
+        self.fermi_alerts = ValueInteger("fermi_alerts", "Fermi GBM alerts processed", initial=0)
+        self.swift_alerts = ValueInteger("swift_alerts", "Swift BAT alerts processed", initial=0)
+        self.maxi_alerts = ValueInteger("maxi_alerts", "MAXI alerts processed", initial=0)
+        self.icecube_alerts = ValueInteger("icecube_alerts", "IceCube alerts processed", initial=0)
+        self.svom_alerts = ValueInteger("svom_alerts", "SVOM alerts processed", initial=0)
+        self.other_alerts = ValueInteger("other_alerts", "Other mission alerts", initial=0)
 
         # === LAST GRB INFORMATION ===
         self.last_target = ValueString("last_target", "Name of last GRB target")
@@ -298,9 +298,9 @@ class GrbDaemon(Device, SimpleDeviceConfig):
 
         # === RECENT ACTIVITY ===
         self.recent_grbs = ValueString("recent_grbs", "Recent GRB triggers (last 5)")
-        self.targets_created_today = ValueInteger("targets_created_today", "New targets created today")
-        self.targets_updated_today = ValueInteger("targets_updated_today", "Existing targets updated today")
-        self.observations_triggered = ValueInteger("observations_triggered", "Observations triggered today")
+        self.targets_created_today = ValueInteger("targets_created_today", "New targets created today", initial=0)
+        self.targets_updated_today = ValueInteger("targets_updated_today", "Existing targets updated today", initial=0)
+        self.observations_triggered = ValueInteger("observations_triggered", "Observations triggered today", initial=0)
 
         # === LAST ALERTS BY MISSION ===
         self.last_fermi_time = ValueTime("last_fermi", "Time of last Fermi alert")
@@ -320,8 +320,8 @@ class GrbDaemon(Device, SimpleDeviceConfig):
         self.last_icecube_coords = ValueRaDec("last_icecube_coords", "Last IceCube position")
 
         # === ERROR TRACKING ===
-        self.parse_errors = ValueInteger("parse_errors", "GCN message parse errors")
-        self.database_errors = ValueInteger("database_errors", "Database operation errors")
+        self.parse_errors = ValueInteger("parse_errors", "GCN message parse errors", initial=0)
+        self.database_errors = ValueInteger("database_errors", "Database operation errors", initial=0)
         self.last_error = ValueString("last_error", "Last error message")
         self.last_error_time = ValueTime("last_error_time", "Time of last error")
 
@@ -333,7 +333,7 @@ class GrbDaemon(Device, SimpleDeviceConfig):
         # === OPERATIONAL STATUS ===
         self.status_message = ValueString("status", "Current daemon status")
         self.uptime_hours = ValueDouble("uptime_hours", "Daemon uptime in hours")
-        self.topics_subscribed = ValueInteger("topics_subscribed", "Number of GCN topics subscribed")
+        self.topics_subscribed = ValueInteger("topics_subscribed", "Number of GCN topics subscribed", initial=0)
 
         # Initialize daily counters
         self._reset_daily_counters()
