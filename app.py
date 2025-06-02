@@ -2,10 +2,9 @@ import argparse
 import logging
 import time
 from typing import Dict, List, Optional, Type, Any
+from datetime import datetime, timezone
 
 from device import Device
-
-from datetime import datetime, timezone
 
 # Custom formatter class to handle the specific format you want
 class RTS2LogFormatter(logging.Formatter):
@@ -35,7 +34,7 @@ class RTS2LogFormatter(logging.Formatter):
         return formatted_msg
 
 class App:
-    """Base application class for RTS2 device drivers."""
+    """Lightweight application launcher for RTS2 device drivers."""
 
     def __init__(self, description: str = "RTS2 Device"):
         """Initialize the application framework."""
@@ -43,49 +42,113 @@ class App:
         self.args = None
         self.device = None
 
-        # Register standard options
-        self._register_standard_options()
-
-    def _register_standard_options(self):
-        """Register standard command line options common to all devices."""
-        self.parser.add_argument('-d', '--device', default=None,
-                            help='Device name (default based on device type)')
-        self.parser.add_argument('-P', '--port', type=int, default=0,
-                            help='TCP/IP port for RTS2 communication')
-        self.parser.add_argument('-c', '--centrald', default='localhost',
-                            help='Centrald hostname')
-        self.parser.add_argument('-p', '--centrald-port', type=int, default=617,
-                            help='Centrald port')
-        self.parser.add_argument('-v', '--verbose', action='store_true',
-                            help='Enable verbose logging')
-
     def register_device_options(self, device_class: Type[Device]):
         """
-        Register device-specific options.
+        Register device options using the device class.
 
-        This method should be called by device classes to add their
-        specific command line parameters.
+        The device class handles both standard RTS2 options and device-specific options.
+
+        Args:
+            device_class: Device class that implements register_options
         """
-        # This is a hook for device classes to add their options
         if hasattr(device_class, 'register_options') and callable(device_class.register_options):
             device_class.register_options(self.parser)
+        else:
+            raise RuntimeError(f"Device class {device_class.__name__} does not implement register_options()")
 
     def parse_args(self):
         """Parse command line arguments."""
         self.args = self.parser.parse_args()
 
-        # Configure logging based on verbosity
-        log_level = logging.DEBUG if self.args.verbose else logging.INFO
+        # Basic logging setup will be refined later by device configuration processing
+        # We only do minimal setup here to avoid interference with device config
+        self._setup_basic_logging()
 
-        # Create custom formatter
+        return self.args
+
+    def _setup_basic_logging(self):
+        """
+        Set up basic logging before device configuration processing.
+
+        This provides minimal logging capability until the device's configuration
+        system takes over and applies the full logging configuration.
+        """
+        # Very basic setup - device config will override this
+        if hasattr(self.args, 'verbose') and self.args.verbose:
+            level = logging.DEBUG
+        elif hasattr(self.args, 'debug') and self.args.debug:
+            level = logging.DEBUG
+        else:
+            level = logging.INFO
+
+        logging.basicConfig(level=level, format='%(levelname)s: %(message)s')
+
+    def create_device(self, device_class: Type[Device], **kwargs):
+        """
+        Create device instance and apply configuration.
+
+        Args:
+            device_class: Device class to instantiate
+            **kwargs: Additional parameters for device constructor
+
+        Returns:
+            Configured device instance
+        """
+        # Extract basic device parameters from args and kwargs
+        # Note: These might be overridden by the configuration system
+        device_name = kwargs.get('device_name') or getattr(self.args, 'device', None)
+        port = kwargs.get('port') or getattr(self.args, 'port', 0)
+
+        # Create device instance with basic parameters
+        self.device = device_class(device_name=device_name, port=port)
+
+        # Apply configuration from all sources (command line, config files, env vars, etc.)
+        # This is where the magic happens - the DeviceConfigMixin processes everything
+        if hasattr(device_class, 'process_args') and callable(device_class.process_args):
+            device_class.process_args(self.device, self.args)
+        else:
+            raise RuntimeError(f"Device class {device_class.__name__} does not implement process_args()")
+
+        # At this point, logging configuration has been applied by the device config system
+        # so we need to reconfigure logging with the proper RTS2 formatter
+        self._setup_rts2_logging()
+
+        # Start device network and device itself
+        self.device.network.start()
+        self.device.start()
+
+        return self.device
+
+    def _setup_rts2_logging(self):
+        """
+        Set up RTS2-style logging after device configuration is processed.
+
+        The device configuration system has already set the log level,
+        now we apply the RTS2 formatter.
+        """
+        # Create RTS2 formatter
         formatter = RTS2LogFormatter()
 
-        # Configure root logger
-        handler = logging.StreamHandler()
+        # Get current log level (set by device configuration)
+        current_level = logging.getLogger().level
+
+        # Determine log file from device configuration if available
+        log_file = None
+        if self.device and hasattr(self.device, '_final_config'):
+            logging_config = self.device._final_config.get('logging', {})
+            log_file = logging_config.get('file')
+
+        # Create appropriate handler
+        if log_file:
+            handler = logging.FileHandler(log_file)
+        else:
+            handler = logging.StreamHandler()
+
         handler.setFormatter(formatter)
 
+        # Configure root logger
         root_logger = logging.getLogger()
-        root_logger.setLevel(log_level)
+        root_logger.setLevel(current_level)
 
         # Remove any existing handlers to avoid duplicate logs
         for hdlr in root_logger.handlers[:]:
@@ -93,41 +156,7 @@ class App:
 
         root_logger.addHandler(handler)
 
-        return self.args
-
-    def create_device(self, device_class: Type[Device], **kwargs):
-        """
-        Create device instance with parsed arguments.
-
-        Args:
-            device_class: Device class to instantiate
-            **kwargs: Additional parameters to pass to the device constructor
-
-        Returns:
-            Device instance
-        """
-        # Get device name - use passed value, args value, or let the device decide
-        device_name = kwargs.get('device_name', self.args.device)
-        port = kwargs.get('port', self.args.port)
-
-        # Create device instance
-        self.device = device_class(
-                device_name=device_name,
-                port=port
-                )
-
-        # Apply standard args to device.network
-        self.device.network.centrald_host = self.args.centrald
-        self.device.network.centrald_port = self.args.centrald_port
-
-        # Process device-specific arguments
-        if hasattr(device_class, 'process_args') and callable(device_class.process_args):
-            device_class.process_args(self.device, self.args)
-
-        self.device.network.start()
-        self.device.start()
-
-        return self.device
+        logging.info(f"RTS2 logging configured (level: {logging.getLevelName(current_level)})")
 
     def run(self):
         """Run the application main loop."""
@@ -135,10 +164,7 @@ class App:
             raise RuntimeError("Device not created - call create_device() first")
 
         try:
-            # Start the device
-#            self.device.start()
-
-            # Keep main thread alive
+            # Main application loop
             while True:
                 time.sleep(10)
 

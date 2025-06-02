@@ -13,13 +13,15 @@ from dataclasses import dataclass
 
 from value import ValueTime
 from netman import NetworkManager
+from config import SimpleDeviceConfig
 
-class Device:
+
+class Device(SimpleDeviceConfig):
     """
-    Base class for RTS2 devices with integrated NetworkManager.
+    Base class for RTS2 devices with integrated NetworkManager and simple configuration.
 
     This provides a single integrated interface for hardware drivers
-    to interact with the RTS2 network without caring about the details.
+    to interact with the RTS2 network and handle configuration from multiple sources.
     """
 
     _instance = None  # Singleton instance
@@ -71,6 +73,9 @@ class Device:
 
     def __init__(self, device_name, device_type, port=0):
         """Initialize the device."""
+        # Initialize the configuration system first
+        super().__init__()
+
         # Set singleton instance
         if Device._instance is not None:
             logging.warning("Creating multiple Device instances is not recommended")
@@ -78,6 +83,9 @@ class Device:
 
         self.device_name = device_name
         self.device_type = device_type
+
+        # Initialize simulation mode (can be overridden by configuration)
+        self.simulation_mode = False
 
         # Create network manager
         self.network = NetworkManager(device_name, device_type)
@@ -90,8 +98,8 @@ class Device:
         # Value queuing system
         self.queued_values = {}
 
-        # Initialize in NOT_READY state
-        self._state = self.STATE_IDLE # | self.NOT_READY
+        # Initialize in IDLE state
+        self._state = self.STATE_IDLE
         self._bop_state = 0
 
         # Track expected progress times
@@ -102,7 +110,7 @@ class Device:
         self.weather_timeout = 0
         self.weather_reason = None
 
-         # Register device command handlers - this should happen after network initialization
+        # Register device command handlers - this should happen after network initialization
         self._register_device_commands()
 
         # Create mandatory system values
@@ -111,6 +119,48 @@ class Device:
         self.infotime.value = time.time()
         self.uptime.value = time.time()
 
+    def apply_config(self, config: Dict[str, Any]):
+        """
+        Apply resolved configuration to device.
+
+        This method applies standard device configuration and calls
+        the device-specific apply_device_config method.
+
+        Args:
+            config: Final resolved configuration dictionary
+        """
+        # Apply device name
+        if config.get('device'):
+            self.device_name = config['device']
+            if hasattr(self, 'network'):
+                self.network.device_name = config['device']
+
+        # Apply simulation mode
+        if config.get('simulation'):
+            self.simulation_mode = True
+            logging.info("Device running in SIMULATION mode")
+
+        # Apply disabled state
+        if config.get('disable_device'):
+            self._state |= self.NOT_READY
+            logging.info("Device started in disabled state")
+
+        # Apply network configuration
+        if hasattr(self, 'network'):
+            if config.get('centrald'):
+                self.network.centrald_host = config['centrald']
+            if config.get('centrald_port'):
+                self.network.centrald_port = config['centrald_port']
+            if config.get('port'):
+                self.network.port = config['port']
+            if config.get('connection_timeout'):
+                self.network.connection_timeout = config['connection_timeout']
+
+        # Apply logging configuration
+        if config.get('verbose'):
+            logging.getLogger().setLevel(logging.INFO)
+        if config.get('debug'):
+            logging.getLogger().setLevel(logging.DEBUG)
 
     def _register_device_commands(self):
         """Register device command handlers with the network."""
@@ -120,15 +170,15 @@ class Device:
 
     def start(self):
         """Start the device network services."""
-        # not here, will be started in App
-        # self.network.start()
-
         # Set initial state
-        logging.info(f"Device {self.device_name} started")
+        logging.info(f"Device {self.device_name} started (type: {self.device_type})")
+        if self.simulation_mode:
+            logging.info("Device running in SIMULATION mode")
         self.set_state(self.STATE_IDLE, "Initializing")
 
     def stop(self):
         """Stop the device."""
+        logging.info(f"Stopping device {self.device_name}")
         self.network.stop()
 
     def _on_centrald_connected(self, conn_id):
@@ -138,7 +188,7 @@ class Device:
 
         # Send state after connection
         # This should match the C++ behavior
-        self.set_state(self._state) # , "Connected to centrald")
+        self.set_state(self._state)
 
         # Set BOP state
         self.set_full_bop_state(self._bop_state)
