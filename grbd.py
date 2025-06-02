@@ -20,8 +20,10 @@ import re
 import os
 import math
 from typing import Dict, List, Optional, Any, Callable
-from datetime import datetime, timezone
+from datetime import datetime
 from dataclasses import dataclass, field
+from constants import ConnectionState, DeviceType
+from voevent import VoEventParser
 import psycopg2
 
 try:
@@ -83,6 +85,7 @@ class GcnKafkaConsumer:
                     'gcn.classic.voevent.FERMI_GBM_ALERT',
                     'gcn.classic.voevent.FERMI_GBM_FIN_POS',
                     'gcn.classic.voevent.FERMI_GBM_FLT_POS',
+                    'gcn.classic.voevent.FERMI_GBM_POS_TEST',
                     'gcn.classic.voevent.FERMI_GBM_GND_POS',
                     'gcn.classic.voevent.FERMI_GBM_SUBTHRESH',
                     'gcn.classic.voevent.MAXI_UNKNOWN',
@@ -212,9 +215,10 @@ class GrbDaemon(Device, SimpleDeviceConfig):
         """
 
         # GCN connection options
+        #config.add_argument('--gcn-client-id', help='GCN Kafka client ID', required=True)
+        #config.add_argument('--gcn-client-secret', help='GCN Kafka client secret', required=True)
         config.add_argument('--gcn-client-id', help='GCN Kafka client ID', default='ibkn5j8ocfhhdftq6feedfmdv')
         config.add_argument('--gcn-client-secret', help='GCN Kafka client secret', default='rh3v8p9sqq9o0q8goqufdl2449eq7fl37hf74096c5km9l6cjm')
-        config.add_argument('--gcn-domain', default='gcn.nasa.gov', choices=['gcn.nasa.gov', 'test.gcn.nasa.gov', 'dev.gcn.nasa.gov'], help='GCN Kafka domain')
 
         # GRB processing options
         config.add_argument('--disable-grbs', action='store_true', help='Disable GRB observations (monitoring only)')
@@ -232,18 +236,12 @@ class GrbDaemon(Device, SimpleDeviceConfig):
         """Initialize GRB daemon."""
         super().__init__(device_name, DeviceType.GRB, port)
 
-        # Configuration parameters (will be set by process_args)
-        self.gcn_client_id = None
-        self.gcn_client_secret = None
-        self.gcn_domain = "gcn.nasa.gov"
-        self.disable_grbs = False
-        self.create_disabled = False
-        self.queue_name = None
-        self.add_exec = None
-        self.exec_followups = False
-        self.record_not_visible = True
-        self.record_only_visible_tonight = False
-        self.min_grb_altitude = 0.0
+        # Add thread safety for statistics
+        self._stats_lock = threading.Lock()
+        self._processing_times = []
+        self._packet_times = []
+        self._recent_grb_list = []
+        self._last_daily_reset = time.time()
 
         # GCN Kafka consumer
         self.gcn_consumer = None
@@ -254,8 +252,6 @@ class GrbDaemon(Device, SimpleDeviceConfig):
         self.next_target_id = 1
 
         # Statistics
-        self.packets_received = 0
-        self.grbs_processed = 0
         self.last_packet_time = 0.0
 
         # Create RTS2 values for monitoring
@@ -269,81 +265,318 @@ class GrbDaemon(Device, SimpleDeviceConfig):
         super().apply_config(config)
 
         # Apply GCN configuration
-        self.gcn_client_id = config.get('gcn_client_id')
-        self.gcn_client_secret = config.get('gcn_client_secret')
+        self.gcn_client_id.value = config.get('gcn_client_id', '')
+        self.gcn_client_secret = config.get('gcn_client_secret', '')
 
         # Apply GRB configuration
-        self.gcn_domain = config.get('gcn_domain', 'gcn.nasa.gov')
-        self.disable_grbs = config.get('disable_grbs', False)
-        self.create_disabled = config.get('create_disabled', False)
-        self.queue_name = config.get('queue_to')
-        self.add_exec = config.get('add_exec')
-        self.exec_followups = config.get('exec_followups', False)
-        self.record_not_visible = config.get('not_visible', True)
-        self.record_only_visible_tonight = config.get('only_visible_tonight', False)
-        self.min_grb_altitude = config.get('min_grb_altitude', 0.0)
+        self.grb_enabled.value = not config.get('disable_grbs', False)
+        self.create_disabled.value = config.get('create_disabled', False)
+        self.queue_name.value = config.get('queue_to','grb')
+        # self.add_exec.value = config.get('add_exec')
+        # self.exec_followups.value = config.get('exec_followups', False)
+        self.record_not_visible.value = config.get('not_visible', True)
+#        self.record_only_visible_tonight.value = config.get('only_visible_tonight', False)
+        self.min_altitude.value = config.get('min_altitude', 0.0)
 
     def _create_values(self):
-        """Create RTS2 values for monitoring and control."""
+        """Create RTS2 values for comprehensive monitoring and control."""
 
-        # Control values (automatically registered)
-        self.grb_enabled = ValueBool("enabled", "GRB reception enabled", default=not self.disable_grbs, writable=True)
-        self.create_disabled_val = ValueBool("create_disabled", "Create GRBs disabled for auto-observation", default=self.create_disabled, writable=True)
-        self.record_not_visible_val = ValueBool("not_visible", "Record GRBs not visible from location", default=self.record_not_visible, writable=True)
-        self.only_visible_tonight_val = ValueBool("only_visible_tonight", "Record only GRBs visible tonight", default=self.record_only_visible_tonight, writable=True)
-        self.min_altitude_val = ValueDouble("min_grb_altitude", "Minimum GRB altitude for visibility", default=self.min_grb_altitude, writable=True)
+        # === CONTROL VALUES ===
+        self.grb_enabled = ValueBool("enabled", "GRB reception enabled", writable=True)
+        self.create_disabled = ValueBool("create_disabled", "Create GRBs disabled for auto-observation", writable=True)
+        self.record_not_visible = ValueBool("not_visible", "Record GRBs not visible from location", writable=True)
+        self.only_visible_tonight = ValueBool("only_visible_tonight", "Record only GRBs visible tonight", writable=True)
+        self.min_altitude = ValueDouble("min_altitude", "Minimum GRB altitude for visibility", writable=True)
+        self.queue_name = ValueString("queue_name", "Queue for triggers", writable=True)
 
-        # Status values (automatically registered)
+        # === CONNECTION STATUS ===
+        self.gcn_connected = ValueBool("gcn_connected", "GCN Kafka connection status")
+        self.gcn_client_id = ValueString("gcn_client_id", "GCN client ID")
+        self.connection_time = ValueTime("connection_time", "Time of last GCN connection")
+        self.last_heartbeat = ValueTime("last_heartbeat", "Last GCN heartbeat/activity")
+
+        # === PACKET STATISTICS ===
+        self.packets_received = ValueInteger("packets_received", "Total GCN packets received")
+        self.packets_today = ValueInteger("packets_today", "GCN packets received today")
+        self.grbs_processed = ValueInteger("grbs_processed", "Total GRBs processed")
+        self.grbs_today = ValueInteger("grbs_today", "GRBs processed today")
         self.last_packet = ValueTime("last_packet", "Time of last GCN packet")
-        self.packets_received_val = ValueInteger("packets_received", "Total GCN packets received")
-        self.grbs_processed_val = ValueInteger("grbs_processed", "Total GRBs processed")
+        self.packet_rate = ValueDouble("packet_rate", "Recent packet rate [packets/hour]")
 
-        # Last GRB information
+        # === MISSION-SPECIFIC COUNTERS ===
+        self.fermi_alerts = ValueInteger("fermi_alerts", "Fermi GBM alerts processed")
+        self.swift_alerts = ValueInteger("swift_alerts", "Swift BAT alerts processed")
+        self.maxi_alerts = ValueInteger("maxi_alerts", "MAXI alerts processed")
+        self.icecube_alerts = ValueInteger("icecube_alerts", "IceCube alerts processed")
+        self.svom_alerts = ValueInteger("svom_alerts", "SVOM alerts processed")
+        self.other_alerts = ValueInteger("other_alerts", "Other mission alerts")
+
+        # === LAST GRB INFORMATION ===
         self.last_target = ValueString("last_target", "Name of last GRB target")
         self.last_target_id = ValueInteger("last_target_id", "ID of last GRB target")
-        self.last_target_time = ValueTime("last_target_time", "Time of last target")
+        self.last_target_time = ValueTime("last_target_time", "Time of last target creation")
         self.last_target_type = ValueInteger("last_target_type", "Type of last target")
         self.last_target_radec = ValueRaDec("last_target_radec", "Coordinates (J2000) of last GRB")
         self.last_target_errorbox = ValueDouble("last_target_errorbox", "Error box of last target (degrees)")
+        self.last_mission = ValueString("last_mission", "Mission of last GRB")
 
-        # Spacecraft pointing information
-        self.last_swift_time = ValueTime("last_swift", "Time of last Swift position")
-        self.last_swift_radec = ValueRaDec("last_swift_position", "Swift current position")
-        self.last_svom_time = ValueTime("last_svom", "Time of last INTEGRAL position")
-        self.last_svom_radec = ValueRaDec("last_svom_position", "INTEGRAL current position")
+        # === RECENT ACTIVITY ===
+        self.recent_grbs = ValueString("recent_grbs", "Recent GRB triggers (last 5)")
+        self.targets_created_today = ValueInteger("targets_created_today", "New targets created today")
+        self.targets_updated_today = ValueInteger("targets_updated_today", "Existing targets updated today")
+        self.observations_triggered = ValueInteger("observations_triggered", "Observations triggered today")
+
+        # === LAST ALERTS BY MISSION ===
+        self.last_fermi_time = ValueTime("last_fermi", "Time of last Fermi alert")
+        self.last_fermi_trigger = ValueString("last_fermi_trigger", "Last Fermi trigger ID")
+        self.last_fermi_coords = ValueRaDec("last_fermi_coords", "Last Fermi position")
+
+        self.last_swift_time = ValueTime("last_swift", "Time of last Swift alert")
+        self.last_swift_trigger = ValueString("last_swift_trigger", "Last Swift trigger ID")
+        self.last_swift_coords = ValueRaDec("last_swift_coords", "Last Swift position")
+
+        self.last_maxi_time = ValueTime("last_maxi", "Time of last MAXI alert")
+        self.last_maxi_trigger = ValueString("last_maxi_trigger", "Last MAXI trigger ID")
+        self.last_maxi_coords = ValueRaDec("last_maxi_coords", "Last MAXI position")
+
+        self.last_icecube_time = ValueTime("last_icecube", "Time of last IceCube alert")
+        self.last_icecube_trigger = ValueString("last_icecube_trigger", "Last IceCube event ID")
+        self.last_icecube_coords = ValueRaDec("last_icecube_coords", "Last IceCube position")
+
+        # === ERROR TRACKING ===
+        self.parse_errors = ValueInteger("parse_errors", "GCN message parse errors")
+        self.database_errors = ValueInteger("database_errors", "Database operation errors")
+        self.last_error = ValueString("last_error", "Last error message")
+        self.last_error_time = ValueTime("last_error_time", "Time of last error")
+
+        # === PERFORMANCE METRICS ===
+        self.processing_time_avg = ValueDouble("processing_time_avg", "Average message processing time [ms]")
+        self.database_time_avg = ValueDouble("database_time_avg", "Average database operation time [ms]")
+        self.queue_size = ValueInteger("queue_size", "Current message queue size")
+
+        # === OPERATIONAL STATUS ===
+        self.status_message = ValueString("status", "Current daemon status")
+        self.uptime_hours = ValueDouble("uptime_hours", "Daemon uptime in hours")
+        self.topics_subscribed = ValueInteger("topics_subscribed", "Number of GCN topics subscribed")
+
+        # Initialize daily counters
+        self._reset_daily_counters()
+        self._mission_counters = {
+            'FERMI': 0, 'SWIFT': 0, 'MAXI': 0, 'ICECUBE': 0, 'SVOM': 0, 'OTHER': 0
+        }
+        self._recent_grb_list = []
+        self._processing_times = []
+        self._last_daily_reset = time.time()
+
+
+    def _reset_daily_counters(self):
+        """Reset daily counters at midnight or startup."""
+        self.packets_today.value = 0
+        self.grbs_today.value = 0
+        self.targets_created_today.value = 0
+        self.targets_updated_today.value = 0
+        self.observations_triggered.value = 0
+
+
+    def _update_mission_statistics(self, mission: str, grb_info: 'GrbTarget'):
+        """Update mission-specific statistics."""
+        current_time = time.time()
+
+        # Update mission counters
+        if mission == 'FERMI':
+            self.fermi_alerts.value += 1
+            self.last_fermi_time.value = current_time
+            self.last_fermi_trigger.value = grb_info.grb_id
+            if self._is_valid_coordinates(grb_info.ra, grb_info.dec):
+                self.last_fermi_coords.value = (grb_info.ra, grb_info.dec)
+
+        elif mission == 'SWIFT':
+            self.swift_alerts.value += 1
+            self.last_swift_time.value = current_time
+            self.last_swift_trigger.value = grb_info.grb_id
+            if self._is_valid_coordinates(grb_info.ra, grb_info.dec):
+                self.last_swift_coords.value = (grb_info.ra, grb_info.dec)
+
+        elif mission == 'MAXI':
+            self.maxi_alerts.value += 1
+            self.last_maxi_time.value = current_time
+            self.last_maxi_trigger.value = grb_info.grb_id
+            if self._is_valid_coordinates(grb_info.ra, grb_info.dec):
+                self.last_maxi_coords.value = (grb_info.ra, grb_info.dec)
+
+        elif mission == 'ICECUBE':
+            self.icecube_alerts.value += 1
+            self.last_icecube_time.value = current_time
+            self.last_icecube_trigger.value = grb_info.grb_id
+            if self._is_valid_coordinates(grb_info.ra, grb_info.dec):
+                self.last_icecube_coords.value = (grb_info.ra, grb_info.dec)
+
+        else:
+            self.other_alerts.value += 1
+
+    def _update_recent_grbs(self, grb_info: 'GrbTarget'):
+        """Update recent GRBs list with thread safety."""
+        grb_summary = f"{grb_info.grb_id}({grb_info.mission})"
+
+        with self._stats_lock:
+            self._recent_grb_list.append(grb_summary)
+
+            # Keep only last 5
+            if len(self._recent_grb_list) > 5:
+                self._recent_grb_list = self._recent_grb_list[-5:]
+
+            self.recent_grbs.value = ", ".join(self._recent_grb_list)
+
+    # FIXED: Enhanced error tracking with thread safety
+    def _track_processing_time(self, start_time: float):
+        """Track message processing performance with thread safety."""
+        processing_time_ms = (time.time() - start_time) * 1000
+
+        with self._stats_lock:
+            self._processing_times.append(processing_time_ms)
+
+            # Keep only last 100 measurements
+            if len(self._processing_times) > 100:
+                self._processing_times = self._processing_times[-100:]
+
+            # Update average
+            if self._processing_times:
+                self.processing_time_avg.value = sum(self._processing_times) / len(self._processing_times)
+
+    def _calculate_packet_rate(self):
+        """Calculate recent packet rate."""
+        current_time = time.time()
+
+        # Calculate packets per hour based on recent activity
+        if hasattr(self, '_packet_times'):
+            # Remove packets older than 1 hour
+            hour_ago = current_time - 3600
+            self._packet_times = [t for t in self._packet_times if t > hour_ago]
+            self.packet_rate.value = len(self._packet_times)
+        else:
+            self._packet_times = []
+
+
+    def _check_daily_reset(self):
+        """Check if we need to reset daily counters."""
+        current_time = time.time()
+        current_day = int(current_time / 86400)  # Days since epoch
+        last_day = int(self._last_daily_reset / 86400)
+
+        if current_day > last_day:
+            logging.info("Resetting daily counters for new day")
+            self._reset_daily_counters()
+            self._last_daily_reset = current_time
+
+
+    def _log_error(self, error_type: str, error_msg: str):
+        """Log and track errors."""
+        current_time = time.time()
+
+        if error_type == "parse":
+            self.parse_errors.value += 1
+        elif error_type == "database":
+            self.database_errors.value += 1
+
+        self.last_error.value = f"{error_type}: {error_msg}"
+        self.last_error_time.value = current_time
+
+        logging.error(f"GRB daemon {error_type} error: {error_msg}")
+
+
+    # Enhanced info() method
+    def info(self):
+        """Update device information with comprehensive status."""
+        super().info()
+
+        current_time = time.time()
+
+        # Check daily reset
+        self._check_daily_reset()
+
+        # Update connection status
+        if self.gcn_consumer:
+            self.gcn_connected.value = getattr(self.gcn_consumer, 'running', False)
+            if hasattr(self.gcn_consumer, 'last_message_time'):
+                self.last_heartbeat.value = self.gcn_consumer.last_message_time
+
+        if self.last_packet_time > 0:
+            self.last_packet.value = self.last_packet_time
+
+        # Update packet rate
+        self._calculate_packet_rate()
+
+        # Update uptime
+        if hasattr(self, 'start_time'):
+            uptime_seconds = current_time - self.start_time
+            self.uptime_hours.value = uptime_seconds / 3600.0
+
+        # Update current GRB information
+        if self.current_grb:
+            self.last_target.value = self.current_grb.grb_id
+            self.last_target_id.value = self.current_grb.target_id
+            self.last_target_time.value = self.current_grb.detection_time
+            self.last_target_type.value = self.current_grb.grb_type
+            self.last_mission.value = self.current_grb.mission
+
+            if self._is_valid_coordinates(self.current_grb.ra, self.current_grb.dec):
+                self.last_target_radec.value = (self.current_grb.ra, self.current_grb.dec)
+
+            if not math.isnan(self.current_grb.error_box):
+                self.last_target_errorbox.value = self.current_grb.error_box
+
+        # Update status message
+        if self.gcn_connected.value:
+            hours_since_packet = (current_time - self.last_packet_time) / 3600 if self.last_packet_time > 0 else 999
+            if hours_since_packet < 1:
+                status = "Active - receiving packets"
+            elif hours_since_packet < 6:
+                status = f"Quiet - {hours_since_packet:.1f}h since last packet"
+            else:
+                status = f"Stale - {hours_since_packet:.1f}h since last packet"
+        else:
+            status = "Disconnected from GCN"
+
+        self.status_message.value = status
 
     def start(self):
         """Start the GRB daemon."""
         super().start()
 
+        # Record start time for uptime calculation
+        self.start_time = time.time()
+
         # Validate configuration
-        if not self.gcn_client_id or not self.gcn_client_secret:
+        if not self.gcn_client_id.value or not self.gcn_client_secret:
             logging.error("GCN client ID and secret must be provided")
-            self.set_state(self.STATE_IDLE | self.ERROR_HW,
-                          "Missing GCN credentials")
+            self.set_state(self.STATE_IDLE | self.ERROR_HW, "Missing GCN credentials")
             return
 
-        logging.info(f"GRB daemon starting with GCN domain: {self.gcn_domain}")
-        logging.info(f"GCN Client ID: {self.gcn_client_id}")
-        if self.disable_grbs:
-            logging.info("GRB observations DISABLED - monitoring only")
+        logging.info(f"GCN Client ID: {self.gcn_client_id.value}")
 
         # Initialize GCN Kafka consumer
         self.gcn_consumer = GcnKafkaConsumer(
-            client_id=self.gcn_client_id,
+            client_id=self.gcn_client_id.value,
             client_secret=self.gcn_client_secret,
-            domain=self.gcn_domain
         )
         self.gcn_consumer.set_message_callback(self._on_gcn_message)
 
         # Start consumer
         if self.gcn_consumer.start():
-            logging.info(f"GRB daemon started, connected to GCN at {self.gcn_domain}")
+            logging.info("GRB daemon started, connected to GCN")
             self.set_ready("Connected to GCN Kafka")
+
+            # Update connection status
+            self.gcn_connected.value = True
+            self.connection_time.value = time.time()
         else:
             logging.error("Failed to start GCN consumer")
-            self.set_state(self.STATE_IDLE | self.ERROR_HW,
-                          "Failed to connect to GCN")
+            self.set_state(self.STATE_IDLE | self.ERROR_HW, "Failed to connect to GCN")
+
+        if hasattr(self, 'gcn_consumer') and self.gcn_consumer:
+            # Count subscribed topics
+            if hasattr(self.gcn_consumer, 'topics'):
+                self.topics_subscribed.value = len(self.gcn_consumer.topics)
 
     def stop(self):
         """Stop the GRB daemon."""
@@ -351,247 +584,312 @@ class GrbDaemon(Device, SimpleDeviceConfig):
             self.gcn_consumer.stop()
         super().stop()
 
-    def info(self):
-        """Update device information."""
-        super().info()
-
-        # Update packet statistics
-        self.packets_received_val.value = self.packets_received
-        self.grbs_processed_val.value = self.grbs_processed
-
-        if self.last_packet_time > 0:
-            self.last_packet.value = self.last_packet_time
-
-        # Update current GRB information if available
-        if self.current_grb:
-            self.last_target.value = self.current_grb.grb_id
-            self.last_target_id.value = self.current_grb.target_id
-            self.last_target_time.value = self.current_grb.detection_time
-            self.last_target_type.value = self.current_grb.grb_type
-
-            if not (math.isnan(self.current_grb.ra) or math.isnan(self.current_grb.dec)):
-                self.last_target_radec.value = (self.current_grb.ra, self.current_grb.dec)
-
-            if not math.isnan(self.current_grb.error_box):
-                self.last_target_errorbox.value = self.current_grb.error_box
-
+    # Enhanced message processing with statistics
     def _on_gcn_message(self, topic: str, message: str):
-        """
-        Handle incoming GCN message from Kafka.
+        """Enhanced message handler with comprehensive tracking."""
+        start_time = time.time()
 
-        Args:
-            topic: Kafka topic name
-            message: Message content as string
-        """
         try:
-            # Update statistics
-            self.packets_received += 1
-            self.last_packet_time = time.time()
+            # Thread-safe packet tracking
+            with self._stats_lock:
+                self.packets_received.value += 1
+                self.packets_today.value += 1
+                self.last_packet_time = time.time()
+
+                # Track packet times for rate calculation
+                self._packet_times.append(self.last_packet_time)
+                # Keep only last hour
+                hour_ago = self.last_packet_time - 3600
+                self._packet_times = [t for t in self._packet_times if t > hour_ago]
 
             logging.debug(f"Processing GCN message from {topic}")
 
-            # Parse message based on topic type
-            if 'POINTDIR' in topic:
-                self._process_pointing_message(topic, message)
-            elif any(grb_type in topic for grb_type in ['GRB', 'GBM', 'BAT', 'INTEGRAL', 'AGILE', 'MAXI']):
-                self._process_grb_message(topic, message)
-            elif 'LVC' in topic:
-                self._process_gravitational_wave_message(topic, message)
-            elif 'ICECUBE' in topic:
-                self._process_neutrino_message(topic, message)
+            # Update last heartbeat
+            self.last_heartbeat.value = self.last_packet_time
+
+            # Try to parse as GRB/transient, skip if not parseable
+            grb_info = self._parse_grb_notice(topic, message)
+
+            if grb_info:
+                # Got valid transient info - process it
+                self._process_grb_info(grb_info)
             else:
-                logging.debug(f"Unhandled topic type: {topic}")
+                # Not a transient alert - log and skip
+                logging.debug(f"Skipping non-transient message from {topic}")
+
+            # Track processing time
+            self._track_processing_time(start_time)
 
         except Exception as e:
+            self._log_error("parse", str(e))
             logging.error(f"Error processing GCN message from {topic}: {e}")
+            logging.exception("Detailed traceback:")
 
-    def _process_grb_message(self, topic: str, message: str):
-        """Process GRB coordinate messages."""
+    def _process_grb_info(self, grb_info: 'GrbTarget'):
+        """Process parsed GRB information - FIXED VERSION."""
         try:
-            # Parse GRB information from message
-            grb_info = self._parse_grb_notice(topic, message)
-            if not grb_info:
-                return
+            # Update mission statistics
+            self._update_mission_statistics(grb_info.mission, grb_info)
+            self._update_recent_grbs(grb_info)
 
-            logging.info(f"Received GRB alert: {grb_info.grb_id} "
-                        f"from {grb_info.mission} "
-                        f"RA/Dec={grb_info.ra:.3f},{grb_info.dec:.3f} "
-                        f"Error={grb_info.error_box:.3f} deg")
+            logging.info(f"Received transient alert: {grb_info.grb_id} "
+                        f"from {grb_info.mission}")
 
-            if not (math.isnan(grb_info.ra) or math.isnan(grb_info.dec)):
+            # Log coordinates if valid
+            if self._is_valid_coordinates(grb_info.ra, grb_info.dec):
                 logging.info(f"  Position: RA={grb_info.ra:.3f}, Dec={grb_info.dec:.3f}")
-            if not math.isnan(grb_info.error_box):
-                logging.info(f"  Error box: {grb_info.error_box:.3f} degrees")
+                if not math.isnan(grb_info.error_box):
+                    logging.info(f"  Error box: {grb_info.error_box:.3f} degrees")
+            else:
+                logging.info(f"  No valid coordinates (RA={grb_info.ra:.3f}, Dec={grb_info.dec:.3f})")
 
-            # Add to database and get target ID
+            # Add to database with proper error handling
+            db_start_time = time.time()
             target_id = self._add_grb_to_database(grb_info)
+            db_time_ms = (time.time() - db_start_time) * 1000
+            self.database_time_avg.value = db_time_ms
+
             if target_id:
                 grb_info.target_id = target_id
 
                 # Store GRB information
                 self.grb_targets[target_id] = grb_info
                 self.current_grb = grb_info
-                self.grbs_processed += 1
+
+                with self._stats_lock:
+                    self.grbs_processed.value += 1
+                    self.grbs_today.value += 1
+
+                # Only trigger observations for valid coordinates
+                if not self._is_valid_coordinates(grb_info.ra, grb_info.dec):
+                    logging.info(f"Skipping observation trigger for {grb_info.grb_id} - no valid coordinates")
+                    return
 
                 # Check visibility if filtering enabled
                 if not self._check_visibility_constraints(grb_info):
-                    logging.info(f"GRB {grb_info.grb_id} not visible, skipping observation")
+                    logging.info(f"Transient {grb_info.grb_id} not visible, skipping observation")
                     return
 
-                # Execute external command if configured
-                if self.add_exec:
-                    self._execute_external_command(grb_info)
-
-                # Trigger GRB observation if enabled
+                # Trigger observation if enabled
                 if self.grb_enabled.value and grb_info.is_grb:
                     self._trigger_grb_observation(target_id)
+                    with self._stats_lock:
+                        self.observations_triggered.value += 1
                 else:
-                    logging.info(f"GRB observation disabled or not a GRB: {grb_info.grb_id}")
+                    logging.info(f"Transient observation disabled: {grb_info.grb_id}")
+            else:
+                logging.info(f"Transient {grb_info.grb_id} not added to database")
 
         except Exception as e:
-            logging.error(f"Error processing GRB message: {e}")
+            self._log_error("grb_processing", str(e))
+            logging.error(f"Error processing transient: {e}")
+            logging.exception("Detailed error:")
 
     def _add_grb_to_database(self, grb: GrbTarget) -> Optional[int]:
         """
-        Add GRB target to RTS2 PostgreSQL database with proper deduplication.
+        Add GRB target to RTS2 PostgreSQL database with time-based deduplication.
 
-        Args:
-            grb: GRB target to add
-
-        Returns:
-            Target ID if successful, None otherwise
+        Logic:
+        1. Check for exact trigger ID match first
+        2. If not found, look for GRBs within 15-minute time window
+        3. If found, verify coordinates are consistent (rare multi-GRB check)
+        4. Otherwise create new target
         """
         try:
             # Connect to RTS2 PostgreSQL database
             conn = psycopg2.connect(
                 host="localhost",
                 database="stars",  # Default RTS2 database name
-                user="rts2",
-                password=""  # Assumes peer authentication or configured password
+                user="mates",
+                password="pasewcic25"  # Assumes peer authentication or configured password
             )
             cursor = conn.cursor()
 
             # Convert string grb_id to integer for database
-            try:
-                grb_id_int = int(grb.grb_id)
-            except ValueError:
-                # If grb_id is not numeric, hash it to get an integer
-                grb_id_int = abs(hash(grb.grb_id)) % 2147483647  # Keep within int range
+            grb_id_int = self._convert_grb_id_to_int(grb.grb_id)
 
             logging.debug(f"Processing GRB ID: {grb.grb_id} -> {grb_id_int}")
 
-            # Step 1: Check for existing GRB by exact identifiers first
+            # Step 1: Check for existing GRB by exact trigger ID
             cursor.execute("""
-                SELECT tar_id, grb_errorbox, grb_is_grb, grb_ra, grb_dec, grb_date
-                FROM grb
-                WHERE grb_id = %s AND grb_seqn = %s AND grb_type = %s
-            """, (grb_id_int, grb.sequence_num, grb.grb_type))
+                SELECT g.tar_id, g.grb_errorbox, g.grb_ra, g.grb_dec, t.tar_name
+                FROM grb g
+                JOIN targets t ON g.tar_id = t.tar_id
+                WHERE g.grb_id = %s
+                ORDER BY g.grb_last_update DESC
+                LIMIT 1
+            """, (grb_id_int,))
 
             existing_exact = cursor.fetchone()
 
-            # Step 2: Check for existing GRBs from different missions/types within time/position window
-            time_window = 900  # 15 min in seconds
-            existing_related = None
-
-            if not existing_exact and not math.isnan(grb.detection_time) and not math.isnan(grb.ra) and not math.isnan(grb.dec):
-                # Look for GRBs within time and position window
-                cursor.execute("""
-                    SELECT g.tar_id, g.grb_id, g.grb_type, g.grb_ra, g.grb_dec, g.grb_date, g.grb_errorbox,
-                           t.tar_name
-                    FROM grb g
-                    JOIN targets t ON g.tar_id = t.tar_id
-                    WHERE ABS(EXTRACT(EPOCH FROM g.grb_date) - %s) < %s
-                      AND g.grb_ra IS NOT NULL AND g.grb_dec IS NOT NULL
-                      AND g.grb_is_grb = true
-                """, (grb.detection_time, time_window))
-
-                candidates = cursor.fetchall()
-
-                for candidate in candidates:
-                    (cand_tar_id, cand_grb_id, cand_grb_type, cand_ra, cand_dec,
-                     cand_date, cand_errorbox, cand_name) = candidate
-
-                    # Calculate angular separation
-                    angular_sep = self._calculate_angular_separation(
-                        grb.ra, grb.dec, cand_ra, cand_dec
-                    )
-
-                    # Check if positions are consistent within error boxes
-                    max_error = max(
-                        grb.error_box if not math.isnan(grb.error_box) else 5.0,
-                        cand_errorbox if cand_errorbox and not math.isnan(cand_errorbox) else 5.0,
-                        0.5  # Minimum 0.5 degree tolerance
-                    )
-
-                    if angular_sep <= max_error:
-                        logging.info(f"Found related GRB: {cand_name} (ID: {cand_grb_id}, "
-                                   f"type: {cand_grb_type}) at {angular_sep:.3f}° separation")
-                        existing_related = candidate
-                        break
-
-            # Step 3: Process based on what we found
             if existing_exact:
-                # Update existing exact match if this has better accuracy
-                return self._update_existing_grb(cursor, conn, grb, grb_id_int, existing_exact)
+                logging.debug(f"Found existing trigger {grb.grb_id}: {existing_exact[4]}")
+                return self._update_existing_grb_target(cursor, conn, grb, grb_id_int, existing_exact)
 
-            elif existing_related:
-                # Link to existing related GRB if position/time match
-                return self._link_to_related_grb(cursor, conn, grb, grb_id_int, existing_related)
+            # Step 2: Look for GRBs within 15-minute time window
+            time_window = 900  # 15 minutes in seconds
 
-            else:
-                # Create completely new GRB target
-                return self._create_new_grb_target(cursor, conn, grb, grb_id_int)
+            logging.debug(f"No exact trigger match, searching for GRBs within 15 minutes of {grb.detection_time}")
+
+            cursor.execute("""
+                SELECT g.tar_id, g.grb_id, g.grb_ra, g.grb_dec, g.grb_errorbox,
+                       g.grb_date, t.tar_name, EXTRACT(EPOCH FROM g.grb_date) as epoch_time
+                FROM grb g
+                JOIN targets t ON g.tar_id = t.tar_id
+                WHERE ABS(EXTRACT(EPOCH FROM g.grb_date) - %s) < %s
+                  AND g.grb_is_grb = true
+                ORDER BY ABS(EXTRACT(EPOCH FROM g.grb_date) - %s)
+            """, (grb.detection_time, time_window, grb.detection_time))
+
+            time_candidates = cursor.fetchall()
+
+            if not time_candidates:
+                logging.debug("No GRBs found within 15-minute window")
+                return self._create_new_grb_if_valid(cursor, conn, grb, grb_id_int)
+
+            logging.debug(f"Found {len(time_candidates)} GRBs within 15-minute window")
+
+            # Step 3: Check if any candidates are position-compatible
+            # (This is the rare multi-GRB safety check)
+            for candidate in time_candidates:
+                (cand_tar_id, cand_grb_id, cand_ra, cand_dec, cand_errorbox,
+                 cand_date, cand_name, cand_epoch) = candidate
+
+                time_diff = abs(grb.detection_time - cand_epoch)
+                logging.debug(f"Candidate {cand_name} (trigger {cand_grb_id}): {time_diff:.1f}s apart")
+
+                # If both have valid coordinates, check compatibility
+                if (self._is_valid_coordinates(grb.ra, grb.dec) and
+                    self._is_valid_coordinates(cand_ra, cand_dec)):
+
+                    # Calculate position difference with proper error combination
+                    compatible = self._are_positions_compatible(
+                        grb.ra, grb.dec, grb.error_box,
+                        cand_ra, cand_dec, cand_errorbox
+                    )
+
+                    if compatible:
+                        logging.info(f"GRB {grb.grb_id} matches existing target {cand_name} "
+                                   f"(time: {time_diff:.1f}s, positions compatible)")
+                        return self._link_to_existing_target(cursor, conn, grb, grb_id_int, candidate)
+                    else:
+                        logging.warning(f"Potential multi-GRB situation! {grb.grb_id} within {time_diff:.1f}s "
+                                      f"of {cand_name} but positions incompatible. Creating separate target.")
+
+                elif not self._is_valid_coordinates(grb.ra, grb.dec):
+                    # New GRB has no valid coordinates, assume it's related to first time match
+                    logging.info(f"GRB {grb.grb_id} (no coordinates) matches {cand_name} by time ({time_diff:.1f}s)")
+                    return self._link_to_existing_target(cursor, conn, grb, grb_id_int, candidate)
+
+                elif not self._is_valid_coordinates(cand_ra, cand_dec):
+                    # Candidate has no valid coordinates, link if this one does
+                    if self._is_valid_coordinates(grb.ra, grb.dec):
+                        logging.info(f"GRB {grb.grb_id} provides coordinates for existing target {cand_name}")
+                        return self._link_to_existing_target(cursor, conn, grb, grb_id_int, candidate)
+
+            # Step 4: No compatible candidates found, create new target
+            logging.info(f"No compatible targets found within 15 minutes, creating new target for {grb.grb_id}")
+            return self._create_new_grb_if_valid(cursor, conn, grb, grb_id_int)
 
         except Exception as e:
             logging.error(f"Error adding GRB to database: {e}")
-            if 'conn' in locals():
+            logging.exception("Detailed error:")
+            if conn:
                 try:
                     conn.rollback()
-                    conn.close()
                 except:
                     pass
             return None
+        finally:
+            # FIXED: Always close connection
+            if conn:
+                try:
+                    conn.close()
+                except:
+                    pass
+
+    def _convert_grb_id_to_int(self, grb_id: str) -> int:
+        """FIXED: Safely convert GRB ID to integer."""
+        try:
+            return int(grb_id)
+        except (ValueError, TypeError):
+            # If grb_id is not numeric, create a stable hash
+            return abs(hash(grb_id)) % 2147483647
+
+    def _are_positions_compatible(self, ra1, dec1, err1, ra2, dec2, err2):
+        """
+        Check if two positions are compatible within their combined error boxes.
+
+        Uses proper error combination: total_error = sqrt(err1² + err2²)
+        But also handles RA/Dec errors separately if needed.
+        """
+        # Calculate angular separation
+        angular_sep = self._calculate_angular_separation(ra1, dec1, ra2, dec2)
+
+        # Combine errors (assume circular for simplicity)
+        # In practice, you might want to handle RA/Dec errors separately
+        error1 = err1 if not math.isnan(err1) else 10.0  # Default large error for GBM
+        error2 = err2 if not math.isnan(err2) else 10.0
+
+        # Combined error using RSS (Root Sum of Squares)
+        combined_error = math.sqrt(error1**2 + error2**2)
+
+        # Add some tolerance for systematic errors
+        tolerance = 1.0  # Additional 1 degree tolerance
+        total_allowed_error = combined_error + tolerance
+
+        compatible = angular_sep <= total_allowed_error
+
+        logging.debug(f"Position compatibility check:")
+        logging.debug(f"  Pos1: ({ra1:.3f}, {dec1:.3f}) ± {error1:.3f}°")
+        logging.debug(f"  Pos2: ({ra2:.3f}, {dec2:.3f}) ± {error2:.3f}°")
+        logging.debug(f"  Separation: {angular_sep:.3f}°")
+        logging.debug(f"  Combined error: {combined_error:.3f}° + {tolerance:.3f}° = {total_allowed_error:.3f}°")
+        logging.debug(f"  Compatible: {compatible}")
+
+        return compatible
 
 
-    def _update_existing_grb(self, cursor, conn, grb: GrbTarget, grb_id_int: int, existing):
-        """Update existing GRB with potentially better information."""
-        existing_tar_id, existing_error, existing_is_grb, existing_ra, existing_dec, existing_date = existing
+    def _update_existing_grb_target(self, cursor, conn, grb: GrbTarget, grb_id_int: int, existing):
+        """Update existing target for the same trigger ID."""
+        (existing_tar_id, existing_error, existing_ra, existing_dec, existing_name) = existing
 
-        # Check if we should update (better error box or missing coordinates)
-        should_update = (
-            existing_error is None or
-            math.isnan(existing_error) or
-            (not math.isnan(grb.error_box) and grb.error_box < existing_error) or
-            (existing_ra is None or existing_dec is None) or
-            (not math.isnan(grb.ra) and not math.isnan(grb.dec))
-        )
+        logging.info(f"Updating existing target {existing_name} (ID: {existing_tar_id}) for trigger {grb.grb_id}")
 
-        if should_update:
-            # Update target coordinates if we have them
-            if not math.isnan(grb.ra) and not math.isnan(grb.dec):
-                cursor.execute("""
-                    UPDATE targets
-                    SET tar_ra = %s, tar_dec = %s, tar_enabled = %s
-                    WHERE tar_id = %s
-                """, (grb.ra, grb.dec, not self.create_disabled_val.value, existing_tar_id))
+        # Determine if we should update the target position
+        should_update_position = False
+        update_reason = ""
 
-            # Update GRB information
+        if not self._is_valid_coordinates(existing_ra, existing_dec):
+            if self._is_valid_coordinates(grb.ra, grb.dec):
+                should_update_position = True
+                update_reason = "adding first valid coordinates"
+        elif self._is_valid_coordinates(grb.ra, grb.dec):
+            if (existing_error is None or math.isnan(existing_error) or
+                (not math.isnan(grb.error_box) and grb.error_box < existing_error)):
+                should_update_position = True
+                update_reason = f"better accuracy: {existing_error:.3f}° -> {grb.error_box:.3f}°"
+
+        # Update target position if warranted
+        if should_update_position:
             cursor.execute("""
-                UPDATE grb
-                SET grb_ra = %s, grb_dec = %s, grb_is_grb = %s,
-                    grb_last_update = to_timestamp(%s), grb_errorbox = %s
-                WHERE grb_id = %s AND grb_seqn = %s AND grb_type = %s
-            """, (grb.ra, grb.dec, grb.is_grb, time.time(), grb.error_box,
-                  grb_id_int, grb.sequence_num, grb.grb_type))
+                UPDATE targets
+                SET tar_ra = %s, tar_dec = %s
+                WHERE tar_id = %s
+            """, (grb.ra, grb.dec, existing_tar_id))
+            logging.info(f"  Updated target position: {update_reason}")
 
-            logging.info(f"Updated GRB target: ID={existing_tar_id}, {grb.grb_id}")
-            if not math.isnan(existing_error) and not math.isnan(grb.error_box):
-                logging.info(f"  Error improved: {existing_error:.3f}° -> {grb.error_box:.3f}°")
+        # Always insert new GRB record for this alert
+        cursor.execute("""
+            INSERT INTO grb (
+                tar_id, grb_id, grb_seqn, grb_type, grb_ra, grb_dec,
+                grb_is_grb, grb_date, grb_last_update, grb_errorbox
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, to_timestamp(%s), to_timestamp(%s), %s)
+        """, (existing_tar_id, grb_id_int, grb.sequence_num, grb.grb_type,
+              grb.ra, grb.dec, grb.is_grb, grb.detection_time,
+              time.time(), grb.error_box))
 
-        else:
-            logging.info(f"GRB {grb.grb_id} update ignored - no improvement")
-
-        # Always add raw packet data for archival
+        # Add raw packet data
         self._add_gcn_raw_packet(cursor, grb, grb_id_int)
 
         conn.commit()
@@ -599,42 +897,69 @@ class GrbDaemon(Device, SimpleDeviceConfig):
         return existing_tar_id
 
 
-    def _link_to_related_grb(self, cursor, conn, grb: GrbTarget, grb_id_int: int, related):
-        """Link new GRB detection to existing related target."""
-        (related_tar_id, related_grb_id, related_grb_type, related_ra, related_dec,
-         related_date, related_errorbox, related_name) = related
+    def _link_to_existing_target(self, cursor, conn, grb: GrbTarget, grb_id_int: int, candidate):
+        """Link new GRB alert to existing target based on time/position match."""
+        (cand_tar_id, cand_grb_id, cand_ra, cand_dec, cand_errorbox,
+         cand_date, cand_name, cand_epoch) = candidate
 
-        logging.info(f"Linking GRB {grb.grb_id} to existing target {related_name} (ID: {related_tar_id})")
+        time_diff = abs(grb.detection_time - cand_epoch)
+        logging.info(f"Linking GRB {grb.grb_id} to existing target {cand_name} "
+                   f"(time difference: {time_diff:.1f}s)")
 
-        # Insert new GRB record pointing to same target
+        # Determine if we should update the target position
+        should_update_position = False
+        update_reason = ""
+
+        if not self._is_valid_coordinates(cand_ra, cand_dec):
+            if self._is_valid_coordinates(grb.ra, grb.dec):
+                should_update_position = True
+                update_reason = "adding coordinates to target without position"
+        elif self._is_valid_coordinates(grb.ra, grb.dec):
+            if (cand_errorbox is None or math.isnan(cand_errorbox) or
+                (not math.isnan(grb.error_box) and grb.error_box < cand_errorbox)):
+                should_update_position = True
+                update_reason = f"better accuracy: {cand_errorbox:.3f}° -> {grb.error_box:.3f}°"
+
+        # Update target position if warranted
+        if should_update_position:
+            cursor.execute("""
+                UPDATE targets
+                SET tar_ra = %s, tar_dec = %s
+                WHERE tar_id = %s
+            """, (grb.ra, grb.dec, cand_tar_id))
+            logging.info(f"  Updated target position: {update_reason}")
+
+        # Insert new GRB record pointing to the existing target
         cursor.execute("""
             INSERT INTO grb (
                 tar_id, grb_id, grb_seqn, grb_type, grb_ra, grb_dec,
                 grb_is_grb, grb_date, grb_last_update, grb_errorbox
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, to_timestamp(%s), to_timestamp(%s), %s)
-        """, (related_tar_id, grb_id_int, grb.sequence_num, grb.grb_type,
+        """, (cand_tar_id, grb_id_int, grb.sequence_num, grb.grb_type,
               grb.ra, grb.dec, grb.is_grb, grb.detection_time,
               time.time(), grb.error_box))
-
-        # Update target if this detection has better accuracy
-        if (not math.isnan(grb.error_box) and
-            (related_errorbox is None or math.isnan(related_errorbox) or
-             grb.error_box < related_errorbox)):
-
-            cursor.execute("""
-                UPDATE targets
-                SET tar_ra = %s, tar_dec = %s
-                WHERE tar_id = %s
-            """, (grb.ra, grb.dec, related_tar_id))
-
-            logging.info(f"  Updated target position with better accuracy: {grb.error_box:.3f}°")
 
         # Add raw packet data
         self._add_gcn_raw_packet(cursor, grb, grb_id_int)
 
         conn.commit()
         conn.close()
-        return related_tar_id
+        return cand_tar_id
+
+
+    def _create_new_grb_if_valid(self, cursor, conn, grb: GrbTarget, grb_id_int: int):
+        """Create new GRB target only if coordinates are valid."""
+
+        # Skip creation if invalid coordinates
+        if not self._is_valid_coordinates(grb.ra, grb.dec):
+            logging.info(f"Skipping GRB {grb.grb_id} with invalid coordinates "
+                        f"(RA={grb.ra:.3f}, Dec={grb.dec:.3f}). "
+                        f"Likely initial trigger alert without position.")
+            conn.close()
+            return None
+
+        # Create new target
+        return self._create_new_grb_target(cursor, conn, grb, grb_id_int)
 
 
     def _create_new_grb_target(self, cursor, conn, grb: GrbTarget, grb_id_int: int):
@@ -656,7 +981,7 @@ class GrbDaemon(Device, SimpleDeviceConfig):
                   f"GCN #{grb.grb_id}, type {grb.grb_type}")
 
         # Determine if target should be enabled
-        tar_enabled = not self.create_disabled_val.value
+        tar_enabled = not self.create_disabled.value
 
         # Insert into targets table
         cursor.execute("""
@@ -686,6 +1011,40 @@ class GrbDaemon(Device, SimpleDeviceConfig):
         conn.close()
         return tar_id
 
+
+    def _is_valid_coordinates(self, ra, dec):
+        """Check if coordinates are valid (not NaN, None, not 0,0, within range)."""
+        if ra is None or dec is None:
+            return False
+        if math.isnan(ra) or math.isnan(dec):
+            return False
+        # Invalid/placeholder coordinates for initial triggers
+        if ra == 0.0 and dec == 0.0:
+            return False
+        if not (0 <= ra <= 360):
+            return False
+        if not (-90 <= dec <= 90):
+            return False
+        return True
+
+    def _parse_coordinates_safely(self, ra_str, dec_str):
+        """FIXED: Safe coordinate parsing with validation."""
+        try:
+            ra = float(ra_str)
+            dec = float(dec_str)
+
+            # Validate ranges
+            if not (0 <= ra <= 360):
+                logging.warning(f"Invalid RA: {ra}, setting to NaN")
+                ra = float('nan')
+            if not (-90 <= dec <= 90):
+                logging.warning(f"Invalid Dec: {dec}, setting to NaN")
+                dec = float('nan')
+
+            return ra, dec
+        except (ValueError, TypeError):
+            logging.warning(f"Could not parse coordinates: '{ra_str}', '{dec_str}'")
+            return float('nan'), float('nan')
 
     def _calculate_angular_separation(self, ra1, dec1, ra2, dec2):
         """
@@ -745,7 +1104,7 @@ class GrbDaemon(Device, SimpleDeviceConfig):
         Replicates the visibility logic from the original addGcnPoint function.
         """
         # If recording all GRBs regardless of visibility
-        if self.record_not_visible_val.value:
+        if self.record_not_visible.value:
             return True
 
         # Basic declination check (simplified - would need proper observatory coordinates)
@@ -761,8 +1120,14 @@ class GrbDaemon(Device, SimpleDeviceConfig):
             if observer_lat < 0 and grb.dec > (observer_lat + 90):
                 return False
 
+        # Check altitude constraint
+        if not math.isnan(grb.dec) and not math.isnan(self.min_altitude.value):
+            pass
+            # Simplified altitude check - would need proper observatory coordinates
+            # and current time for full calculation
+
         # Check "only visible tonight" constraint
-        if self.only_visible_tonight_val.value:
+        if self.only_visible_tonight.value:
             # This would require detailed rise/set calculations
             # For now, just do a simplified check
             current_time = time.time()
@@ -771,6 +1136,7 @@ class GrbDaemon(Device, SimpleDeviceConfig):
             pass
 
         return True
+
     def _process_gravitational_wave_message(self, topic: str, message: str):
         """Process LIGO-Virgo-KAGRA gravitational wave alerts."""
         # For now, just log - could be extended for electromagnetic counterpart searches
@@ -783,59 +1149,63 @@ class GrbDaemon(Device, SimpleDeviceConfig):
 
     def _parse_grb_notice(self, topic: str, message: str) -> Optional[GrbTarget]:
         """
-        Parse GRB notice from GCN VOEvent message.
+        Parse any transient notice from GCN - ROBUST VERSION.
 
         Returns:
-            GrbTarget object or None if parsing failed
+            GrbTarget for any transient (GRB, neutrino, whatever) 
+            or None if not a transient.
         """
         try:
-            # Create new GRB target with defaults
+            # Create new target with defaults
             grb = GrbTarget()
             grb.target_id = self.next_target_id
             self.next_target_id += 1
 
             # Determine mission and type from topic
-            grb_type_map = {
-                'FERMI_GBM_FLT_POS': 111,    # TYPE_FERMI_GBM_FLT_POS
-                'FERMI_GBM_GND_POS': 112,    # TYPE_FERMI_GBM_GND_POS
-                'FERMI_GBM_FIN_POS': 115,    # TYPE_FERMI_GBM_FIN_POS
-                'FERMI_GBM_ALERT': 110,      # TYPE_FERMI_GBM_ALERT
-                'SWIFT_BAT_GRB_POS_ACK': 61, # TYPE_SWIFT_BAT_GRB_POS_ACK_SRC
-                'SWIFT_BAT_QL_POS': 61,      # TYPE_SWIFT_BAT_QL_POS
-                'MAXI_UNKNOWN': 186,         # TYPE_MAXI_UNKNOWN
-                'ICECUBE_ASTROTRACK_GOLD': 173,   # TYPE_ICECUBE_ASTROTRACK_GOLD
-                'ICECUBE_ASTROTRACK_BRONZE': 174, # TYPE_ICECUBE_ASTROTRACK_BRONZE
-                'SVOM_GRM': 200,             # SVOM GRM alerts
-                'SVOM_ECLAIRS': 201,         # SVOM ECLAIRS alerts
-                'SVOM_MXT': 202,             # SVOM MXT alerts
-            }
-
-            # Extract mission and type from topic
-            for key, type_id in grb_type_map.items():
-                if key in topic.upper():
-                    grb.grb_type = type_id
-                    grb.mission = key.split('_')[0]
-                    break
+            if 'FERMI' in topic.upper():
+                grb.mission = 'FERMI'
+                grb.grb_type = 112
+            elif 'SWIFT' in topic.upper():
+                grb.mission = 'SWIFT'
+                grb.grb_type = 61
+            elif 'MAXI' in topic.upper():
+                grb.mission = 'MAXI'
+                grb.grb_type = 186
+            elif 'ICECUBE' in topic.upper():
+                grb.mission = 'ICECUBE'
+                grb.grb_type = 173
+                grb.is_grb = True  # Treat neutrinos as GRBs for follow-up
+            elif 'SVOM' in topic.upper():
+                grb.mission = 'SVOM'
+                grb.grb_type = 200
+            elif 'LVC' in topic.upper() or 'LIGO' in topic.upper():
+                grb.mission = 'LVC'
+                grb.grb_type = 150  # Gravitational wave
+                grb.is_grb = False  # Not a GRB, but treat as transient
             else:
-                grb.mission = 'UNKNOWN'
+                grb.mission = f'UNKNOWN({topic})'
                 grb.grb_type = 0
 
-            # VOEvent parsing - look for XML-like structure or key-value pairs
-            # Many VOEvents contain both XML structure and text parameters
+            # Try XML parsing first (most GCN messages are XML)
+            if any(marker in message for marker in ['<voe:VOEvent', '<?xml', '<VOEvent']):
+                try:
+                    # Use the robust XML parser
+                    parser = VoEventParser()
+                    grb = parser.parse_voevent(message, grb)
+                    logging.debug(f"Successfully parsed XML for {grb.mission} trigger {grb.grb_id}")
+                    return grb
+                except Exception as e:
+                    logging.warning(f"XML parsing failed for {topic}, trying text fallback: {e}")
 
-            # Try to parse as VOEvent XML first
-            if '<voe:VOEvent' in message or '<?xml' in message:
-                grb = self._parse_voevent_xml(message, grb)
-            else:
-                # Fallback to text parsing for mixed format messages
-                grb = self._parse_text_format(message, grb)
-
-            # Validate that we got essential information
+            # Fallback to enhanced text parsing
+            grb = self._parse_text_format(message, grb)
+            
+            # Final validation
             if not grb.grb_id:
                 if grb.trigger_num > 0:
                     grb.grb_id = str(grb.trigger_num)
                 else:
-                    grb.grb_id = f"{grb.mission}_GRB_{int(time.time())}"
+                    grb.grb_id = f"{grb.mission}_EVENT_{int(time.time())}"
 
             # Set detection time if not found
             if math.isnan(grb.detection_time):
@@ -844,9 +1214,345 @@ class GrbDaemon(Device, SimpleDeviceConfig):
             return grb
 
         except Exception as e:
-            logging.error(f"Error parsing GRB notice: {e}")
+            logging.error(f"Complete parsing failure for {topic}: {e}")
+            logging.exception("Detailed parsing error:")
             return None
 
+    def _parse_text_format(self, message: str, grb: GrbTarget) -> GrbTarget:
+        """Enhanced text format parser with better regex patterns."""
+        try:
+            # Enhanced trigger/sequence extraction
+            trigger_patterns = [
+                r'TRIGGER_NUM:\s*(\d+)',
+                r'TrigID["\s]*[:=]\s*["\']?(\d+)',
+                r'trigger[_\s]*id["\s]*[:=]\s*["\']?([^"\s,]+)',
+                r'Event_ID["\s]*[:=]\s*["\']?([^"\s,]+)',
+            ]
+            
+            for pattern in trigger_patterns:
+                match = re.search(pattern, message, re.IGNORECASE)
+                if match:
+                    grb.grb_id = match.group(1)
+                    try:
+                        grb.trigger_num = int(grb.grb_id)
+                    except (ValueError, TypeError):
+                        pass
+                    break
+
+            # Enhanced coordinate extraction with multiple formats
+            coordinate_patterns = [
+                # Standard RA/DEC format
+                (r'RA:\s*([\d.]+)', r'DEC?:\s*([-+]?[\d.]+)'),
+                # Parameter format
+                (r'RA["\s]*[:=]\s*["\']?([\d.]+)', r'Dec["\s]*[:=]\s*["\']?([-+]?[\d.]+)'),
+                # XML-like format in text
+                (r'<C1>([\d.]+)</C1>', r'<C2>([-+]?[\d.]+)</C2>'),
+            ]
+
+            for ra_pattern, dec_pattern in coordinate_patterns:
+                ra_match = re.search(ra_pattern, message, re.IGNORECASE)
+                dec_match = re.search(dec_pattern, message, re.IGNORECASE)
+
+                if ra_match and dec_match:
+                    try:
+                        ra = float(ra_match.group(1))
+                        dec = float(dec_match.group(1))
+                        
+                        # Validate ranges
+                        if 0 <= ra <= 360 and -90 <= dec <= 90:
+                            grb.ra = ra
+                            grb.dec = dec
+                            logging.debug(f"Extracted coordinates: RA={ra}, Dec={dec}")
+                            break
+                    except (ValueError, TypeError):
+                        continue
+
+            # Enhanced error extraction
+            error_patterns = [
+                r'ERROR:\s*([\d.]+)',
+                r'Error2?Radius["\s]*[:=]\s*["\']?([\d.]+)',
+                r'positional[_\s]*error["\s]*[:=]\s*["\']?([\d.]+)',
+            ]
+
+            for pattern in error_patterns:
+                match = re.search(pattern, message, re.IGNORECASE)
+                if match:
+                    try:
+                        error_val = float(match.group(1))
+                        # Convert from arcminutes to degrees if likely
+                        if error_val > 10:
+                            error_val = error_val / 60.0
+                        grb.error_box = error_val
+                        break
+                    except (ValueError, TypeError):
+                        pass
+
+            # Check for test/retraction indicators
+            test_indicators = ['TEST', 'RETRACTION', 'PRELIMINARY', 'SIMULATION']
+            if any(indicator in message.upper() for indicator in test_indicators):
+                grb.is_grb = False
+                logging.debug("Detected test/retraction/preliminary event")
+
+            return grb
+
+        except Exception as e:
+            logging.error(f"Error in enhanced text parsing: {e}")
+            return grb
+
+
+    def _execute_external_command(self, grb: GrbTarget):
+        """Execute external command for GRB processing."""
+        try:
+            import subprocess
+
+            # Build command arguments as specified in original grbd
+            # Format: target-id grb-id grb-seqn grb-type grb-ra grb-dec grb-is-grb grb-date grb-errorbox
+            cmd_args = [
+                self.add_exec,
+                str(grb.target_id),
+                grb.grb_id,
+                str(grb.sequence_num),
+                str(grb.grb_type),
+                f"{grb.ra:.6f}",
+                f"{grb.dec:.6f}",
+                "1" if grb.is_grb else "0",
+                f"{grb.detection_time:.6f}",
+                f"{grb.error_box:.6f}"
+            ]
+
+            logging.info(f"Executing external command: {' '.join(cmd_args)}")
+
+            # Execute command asynchronously
+            subprocess.Popen(cmd_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        except Exception as e:
+            logging.error(f"Error executing external command: {e}")
+
+    def _trigger_grb_observation(self, target_id: int):
+        """
+        Trigger GRB observation through RTS2 executor or queue.
+
+        Args:
+            target_id: Target ID to observe
+        """
+        try:
+            logging.info(f"Triggering GRB observation for target {target_id}")
+
+            # First try to find an executor connection
+            executor_conn = None
+            for conn in self.network.connection_manager.connections.values():
+                if (hasattr(conn, 'remote_device_type') and
+                    conn.remote_device_type == DeviceType.EXECUTOR and
+                    conn.state == ConnectionState.AUTH_OK):
+                    executor_conn = conn
+                    break
+
+            if executor_conn:
+                # Send execute GRB command to executor
+                cmd = f"grb {target_id}" # or now <tar_id>
+                executor_conn.send_command(cmd, self._on_execute_grb_result)
+                logging.info(f"Sent GRB execute command to executor: {cmd}")
+
+            elif self.queue_name.value:
+                # Queue GRB for selector
+                self._queue_grb_observation(target_id)
+
+            else:
+                logging.warning(f"No executor available and no queue specified for GRB {target_id}")
+
+        except Exception as e:
+            logging.error(f"Error triggering GRB observation: {e}")
+
+    def _queue_grb_observation(self, target_id: int):
+        """Queue GRB observation with selector."""
+        try:
+            # Find selector connections
+            selector_conns = []
+            for conn in self.network.connection_manager.connections.values():
+                if (hasattr(conn, 'remote_device_type') and
+                    conn.remote_device_type == DeviceType.SELECTOR and
+                    conn.state == ConnectionState.AUTH_OK):
+                    selector_conns.append(conn)
+
+            if not selector_conns:
+                logging.error(f"No selector available to queue GRB {target_id}")
+                return
+
+            # Send queue command to all selectors
+            for conn in selector_conns:
+                cmd = f"queue_now_once {self.queue_name.value} {target_id}"
+                conn.send_command(cmd, self._on_queue_grb_result)
+                logging.info(f"Queued GRB {target_id} to selector {conn.name}")
+
+        except Exception as e:
+            logging.error(f"Error queuing GRB observation: {e}")
+
+    def _on_execute_grb_result(self, conn, success, code, message):
+        """Handle result from executor GRB command."""
+        if success:
+            logging.info(f"GRB execution successful: {message}")
+        else:
+            logging.error(f"GRB execution failed: {message}")
+            # Try queuing if execution failed and queue is configured
+            if self.queue_name.value and self.current_grb:
+                self._queue_grb_observation(self.current_grb.target_id)
+
+    def _on_queue_grb_result(self, conn, success, code, message):
+        """Handle result from selector queue command."""
+        if success:
+            logging.info(f"GRB queued successfully: {message}")
+        else:
+            logging.error(f"GRB queue failed: {message}")
+
+    # RTS2 command handlers
+    def on_enabled_changed(self, old_value, new_value):
+        """Handle changes to GRB enabled state."""
+        if new_value:
+            logging.info("GRB processing enabled")
+        else:
+            logging.info("GRB processing disabled")
+
+    def on_create_disabled_changed(self, old_value, new_value):
+        """Handle changes to create disabled state."""
+#        self.create_disabled.value = new_value
+        logging.info(f"Create disabled set to: {new_value}")
+
+    def on_not_visible_changed(self, old_value, new_value):
+        """Handle changes to record not visible state."""
+#        self.record_not_visible = new_value
+        logging.info(f"Record not visible set to: {new_value}")
+
+#    def on_only_visible_tonight_changed(self, old_value, new_value):
+#        """Handle changes to only visible tonight state."""
+#        self.record_only_visible_tonight = new_value
+#        logging.info(f"Only visible tonight set to: {new_value}")
+
+    def on_min_grb_altitude_changed(self, old_value, new_value):
+        """Handle changes to minimum GRB altitude."""
+#        self.min_altitude = new_value
+        logging.info(f"Minimum GRB altitude set to: {self.min_altitude.value} degrees")
+
+
+# Additional command handlers for RTS2 integration
+class GrbCommands:
+    """Command handlers specific to GRB daemon."""
+
+    def __init__(self, grb_daemon):
+        self.grb_daemon = grb_daemon
+        self.handlers = {
+            "test": self.handle_test_grb,
+        }
+        self.needs_response = {
+            "test": True,
+        }
+
+    def get_commands(self):
+        """Get list of commands this handler supports."""
+        return list(self.handlers.keys())
+
+    def can_handle(self, command):
+        """Check if this handler can process a command."""
+        return command in self.handlers
+
+    def needs_response_for(self, command):
+        """Check if command needs a response."""
+        return self.needs_response.get(command, True)
+
+    def handle(self, command, conn, params):
+        """Dispatch command to appropriate handler."""
+        if command in self.handlers:
+            return self.handlers[command](conn, params)
+        return False
+
+    def handle_test_grb(self, conn, params):
+        """Handle test GRB trigger command."""
+        try:
+            parts = params.split()
+            if len(parts) != 1:
+                return False
+
+            target_id = int(parts[0])
+
+            # Trigger test GRB observation
+            if self.grb_daemon._trigger_grb_observation(target_id):
+                return True
+            else:
+                return False
+
+        except Exception as e:
+            logging.error(f"Error in test GRB command: {e}")
+            return False
+
+
+def main():
+    """Main entry point for GRB daemon."""
+
+    # Create application
+    app = App(description='RTS2 GRB Daemon with GCN Kafka Support')
+
+    # Register device options
+    app.register_device_options(GrbDaemon)
+
+    # Parse arguments
+    args = app.parse_args()
+
+    # Validate required arguments
+    if not args.gcn_client_id or not args.gcn_client_secret:
+        logging.error("GCN client ID and secret are required")
+        logging.error("Get credentials from: https://gcn.nasa.gov/")
+        logging.error("Use --gcn-client-id and --gcn-client-secret options")
+        return 1
+
+    # Test database connection
+    try:
+        conn = psycopg2.connect(
+            host="localhost",
+            database="stars",
+            user="mates",
+            password="pasewcic25"
+        )
+        conn.close()
+        logging.info("PostgreSQL database connection verified")
+    except Exception as e:
+        logging.error(f"Cannot connect to RTS2 database 'stars': {e}")
+        logging.error("Make sure PostgreSQL is running and RTS2 database is set up")
+        return 1
+
+    # Create device
+    device = app.create_device(GrbDaemon)
+
+    # Register additional command handlers
+    grb_commands = GrbCommands(device)
+    device.network.command_registry.register_handler(grb_commands)
+
+    logging.info("Starting RTS2 GRB Daemon with GCN Kafka interface")
+    logging.info(f"Client ID: {args.gcn_client_id}")
+    logging.info("Database: PostgreSQL 'stars' on localhost")
+
+    if args.queue_to:
+        logging.info(f"GRBs will be queued to: {args.queue_to}")
+
+#    if args.add_exec:
+#        logging.info(f"External script: {args.add_exec}")
+
+    # Run application
+    try:
+        app.run()
+        return 0
+    except KeyboardInterrupt:
+        logging.info("Shutting down GRB daemon")
+        return 0
+    except Exception as e:
+        logging.error(f"Fatal error in GRB daemon: {e}")
+        return 1
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main())
+
+
+if False:
     def _parse_voevent_xml(self, message: str, grb: GrbTarget) -> GrbTarget:
         """Parse VOEvent XML format message."""
         try:
@@ -857,6 +1563,7 @@ class GrbDaemon(Device, SimpleDeviceConfig):
             trig_match = re.search(r'<Param\s+name="TrigID"[^>]*value="([^"]*)"', message, re.IGNORECASE)
             if not trig_match:
                 trig_match = re.search(r'<Param\s+name="GraceID"[^>]*value="([^"]*)"', message, re.IGNORECASE)
+
             if trig_match:
                 grb.grb_id = trig_match.group(1)
                 try:
@@ -940,300 +1647,3 @@ class GrbDaemon(Device, SimpleDeviceConfig):
             logging.error(f"Error parsing VOEvent XML: {e}")
             return grb
 
-    def _parse_text_format(self, message: str, grb: GrbTarget) -> GrbTarget:
-        """Parse text format message (fallback)."""
-        try:
-            # Extract trigger/sequence information
-            trigger_match = re.search(r'TRIGGER_NUM:\s*(\d+)', message, re.IGNORECASE)
-            if trigger_match:
-                grb.grb_id = trigger_match.group(1)
-                grb.trigger_num = int(trigger_match.group(1))
-
-            sequence_match = re.search(r'SEQUENCE_NUM:\s*(\d+)', message, re.IGNORECASE)
-            if sequence_match:
-                grb.sequence_num = int(sequence_match.group(1))
-
-            # Extract coordinates
-            ra_match = re.search(r'RA:\s*([\d.]+)', message, re.IGNORECASE)
-            dec_match = re.search(r'DEC:\s*([-+]?[\d.]+)', message, re.IGNORECASE)
-
-            if ra_match and dec_match:
-                grb.ra = float(ra_match.group(1))
-                grb.dec = float(dec_match.group(1))
-
-            # Extract error box
-            error_match = re.search(r'ERROR:\s*([\d.]+)', message, re.IGNORECASE)
-            if error_match:
-                error_val = float(error_match.group(1))
-                # Convert from arcminutes to degrees if needed
-                if error_val > 10:  # Assume arcminutes if > 10
-                    grb.error_box = error_val / 60.0
-                else:
-                    grb.error_box = error_val
-
-            # Extract time
-            time_match = re.search(r'GRB_TIME:\s*([\d.]+)', message, re.IGNORECASE)
-            if time_match:
-                grb.detection_time = float(time_match.group(1))
-
-            return grb
-
-        except Exception as e:
-            logging.error(f"Error parsing text format: {e}")
-            return grb
-
-    def _execute_external_command(self, grb: GrbTarget):
-        """Execute external command for GRB processing."""
-        try:
-            import subprocess
-
-            # Build command arguments as specified in original grbd
-            # Format: target-id grb-id grb-seqn grb-type grb-ra grb-dec grb-is-grb grb-date grb-errorbox
-            cmd_args = [
-                self.add_exec,
-                str(grb.target_id),
-                grb.grb_id,
-                str(grb.sequence_num),
-                str(grb.grb_type),
-                f"{grb.ra:.6f}",
-                f"{grb.dec:.6f}",
-                "1" if grb.is_grb else "0",
-                f"{grb.detection_time:.6f}",
-                f"{grb.error_box:.6f}"
-            ]
-
-            logging.info(f"Executing external command: {' '.join(cmd_args)}")
-
-            # Execute command asynchronously
-            subprocess.Popen(cmd_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-        except Exception as e:
-            logging.error(f"Error executing external command: {e}")
-
-    def _trigger_grb_observation(self, target_id: int):
-        """
-        Trigger GRB observation through RTS2 executor or queue.
-
-        Args:
-            target_id: Target ID to observe
-        """
-        try:
-            logging.info(f"Triggering GRB observation for target {target_id}")
-
-            # First try to find an executor connection
-            executor_conn = None
-            for conn in self.network.connection_manager.connections.values():
-                if (hasattr(conn, 'remote_device_type') and
-                    conn.remote_device_type == DeviceType.EXECUTOR and
-                    conn.state == ConnectionState.AUTH_OK):
-                    executor_conn = conn
-                    break
-
-            if executor_conn:
-                # Send execute GRB command to executor
-                cmd = f"grb {target_id}" # or now <tar_id>
-                executor_conn.send_command(cmd, self._on_execute_grb_result)
-                logging.info(f"Sent GRB execute command to executor: {cmd}")
-
-            elif self.queue_name:
-                # Queue GRB for selector
-                self._queue_grb_observation(target_id)
-
-            else:
-                logging.error(f"No executor available and no queue specified for GRB {target_id}")
-
-        except Exception as e:
-            logging.error(f"Error triggering GRB observation: {e}")
-
-    def _queue_grb_observation(self, target_id: int):
-        """Queue GRB observation with selector."""
-        try:
-            # Find selector connections
-            selector_conns = []
-            for conn in self.network.connection_manager.connections.values():
-                if (hasattr(conn, 'remote_device_type') and
-                    conn.remote_device_type == DeviceType.SELECTOR and
-                    conn.state == ConnectionState.AUTH_OK):
-                    selector_conns.append(conn)
-
-            if not selector_conns:
-                logging.error(f"No selector available to queue GRB {target_id}")
-                return
-
-            # Send queue command to all selectors
-            for conn in selector_conns:
-                cmd = f"queue_now_once {self.queue_name} {target_id}"
-                conn.send_command(cmd, self._on_queue_grb_result)
-                logging.info(f"Queued GRB {target_id} to selector {conn.name}")
-
-        except Exception as e:
-            logging.error(f"Error queuing GRB observation: {e}")
-
-    def _on_execute_grb_result(self, conn, success, code, message):
-        """Handle result from executor GRB command."""
-        if success:
-            logging.info(f"GRB execution successful: {message}")
-        else:
-            logging.error(f"GRB execution failed: {message}")
-            # Try queuing if execution failed and queue is configured
-            if self.queue_name and self.current_grb:
-                self._queue_grb_observation(self.current_grb.target_id)
-
-    def _on_queue_grb_result(self, conn, success, code, message):
-        """Handle result from selector queue command."""
-        if success:
-            logging.info(f"GRB queued successfully: {message}")
-        else:
-            logging.error(f"GRB queue failed: {message}")
-
-    # RTS2 command handlers
-    def on_enabled_changed(self, old_value, new_value):
-        """Handle changes to GRB enabled state."""
-        if new_value:
-            logging.info("GRB processing enabled")
-        else:
-            logging.info("GRB processing disabled")
-
-    def on_create_disabled_changed(self, old_value, new_value):
-        """Handle changes to create disabled state."""
-        self.create_disabled = new_value
-        logging.info(f"Create disabled set to: {new_value}")
-
-    def on_not_visible_changed(self, old_value, new_value):
-        """Handle changes to record not visible state."""
-        self.record_not_visible = new_value
-        logging.info(f"Record not visible set to: {new_value}")
-
-    def on_only_visible_tonight_changed(self, old_value, new_value):
-        """Handle changes to only visible tonight state."""
-        self.record_only_visible_tonight = new_value
-        logging.info(f"Only visible tonight set to: {new_value}")
-
-    def on_min_grb_altitude_changed(self, old_value, new_value):
-        """Handle changes to minimum GRB altitude."""
-        self.min_grb_altitude = new_value
-        logging.info(f"Minimum GRB altitude set to: {new_value} degrees")
-
-
-# Additional command handlers for RTS2 integration
-class GrbCommands:
-    """Command handlers specific to GRB daemon."""
-
-    def __init__(self, grb_daemon):
-        self.grb_daemon = grb_daemon
-        self.handlers = {
-            "test": self.handle_test_grb,
-        }
-        self.needs_response = {
-            "test": True,
-        }
-
-    def get_commands(self):
-        """Get list of commands this handler supports."""
-        return list(self.handlers.keys())
-
-    def can_handle(self, command):
-        """Check if this handler can process a command."""
-        return command in self.handlers
-
-    def needs_response_for(self, command):
-        """Check if command needs a response."""
-        return self.needs_response.get(command, True)
-
-    def handle(self, command, conn, params):
-        """Dispatch command to appropriate handler."""
-        if command in self.handlers:
-            return self.handlers[command](conn, params)
-        return False
-
-    def handle_test_grb(self, conn, params):
-        """Handle test GRB trigger command."""
-        try:
-            parts = params.split()
-            if len(parts) != 1:
-                return False
-
-            target_id = int(parts[0])
-
-            # Trigger test GRB observation
-            if self.grb_daemon._trigger_grb_observation(target_id):
-                return True
-            else:
-                return False
-
-        except Exception as e:
-            logging.error(f"Error in test GRB command: {e}")
-            return False
-
-
-def main():
-    """Main entry point for GRB daemon."""
-
-    # Create application
-    app = App(description='RTS2 GRB Daemon with GCN Kafka Support')
-
-    # Register device options
-    app.register_device_options(GrbDaemon)
-
-    # Parse arguments
-    args = app.parse_args()
-
-    # Validate required arguments
-    if not args.gcn_client_id or not args.gcn_client_secret:
-        logging.error("GCN client ID and secret are required")
-        logging.error("Get credentials from: https://gcn.nasa.gov/")
-        logging.error("Use --gcn-client-id and --gcn-client-secret options")
-        return 1
-
-    if False:
-        # Test database connection
-        try:
-            conn = psycopg2.connect(
-                host="localhost",
-                database="stars",
-                user="rts2",
-                password=""
-            )
-            conn.close()
-            logging.info("PostgreSQL database connection verified")
-        except Exception as e:
-            logging.error(f"Cannot connect to RTS2 database 'stars': {e}")
-            logging.error("Make sure PostgreSQL is running and RTS2 database is set up")
-            return 1
-
-    # Create device
-    device = app.create_device(GrbDaemon)
-
-    # Register additional command handlers
-    grb_commands = GrbCommands(device)
-    device.network.command_registry.register_handler(grb_commands)
-
-    logging.info("Starting RTS2 GRB Daemon with GCN Kafka interface")
-    logging.info(f"GCN Domain: {args.gcn_domain}")
-    logging.info(f"Client ID: {args.gcn_client_id}")
-    logging.info("Database: PostgreSQL 'stars' on localhost")
-
-    if args.disable_grbs:
-        logging.info("GRB observations DISABLED - monitoring only")
-
-    if args.queue_to:
-        logging.info(f"GRBs will be queued to: {args.queue_to}")
-
-    if args.add_exec:
-        logging.info(f"External script: {args.add_exec}")
-
-    # Run application
-    try:
-        app.run()
-        return 0
-    except KeyboardInterrupt:
-        logging.info("Shutting down GRB daemon")
-        return 0
-    except Exception as e:
-        logging.error(f"Fatal error in GRB daemon: {e}")
-        return 1
-
-
-if __name__ == "__main__":
-    import sys
-    sys.exit(main())
