@@ -13,10 +13,10 @@ from dataclasses import dataclass
 
 from value import ValueTime
 from netman import NetworkManager
-from config import SimpleDeviceConfig
+from config import DeviceConfig
 
 
-class Device(SimpleDeviceConfig):
+class Device(DeviceConfig):
     """
     Base class for RTS2 devices with integrated NetworkManager and simple configuration.
 

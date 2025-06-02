@@ -1,4 +1,4 @@
-!/usr/bin/python3
+#!/usr/bin/python3
 """
 RTS2-Python OVIS Filter Wheel Driver
 
@@ -88,7 +88,7 @@ from value import (
 )
 from filterd import Filterd
 from constants import DeviceType
-from config import SimpleDeviceConfig
+from config import DeviceConfig
 from app import App
 
 class SerialCommunicator:
@@ -293,7 +293,7 @@ class SerialCommunicator:
         return self.connected
 
 
-class Ovis(Filterd):
+class Ovis(Filterd, DeviceConfig):
     """OVIS (Otevrena Veda Imaging Spectrograph) filter wheel driver."""
 
     def setup_config(self, config):

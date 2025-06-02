@@ -9,11 +9,11 @@ from typing import Dict, Any
 from value import ValueDouble, ValueInteger, ValueTime
 from device import Device
 from constants import DeviceType
-from config import SimpleDeviceConfig
+from config import DeviceConfig
 from app import App
 
 
-class TemperatureSensor(Device, SimpleDeviceConfig):
+class TemperatureSensor(Device, DeviceConfig):
     """Simple temperature sensor device + configuration support."""
 
     def setup_config(self, config):

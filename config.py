@@ -286,12 +286,12 @@ class DeviceConfigRegistry:
         return '\n'.join(summary)
 
 
-class SimpleDeviceConfig:
+class DeviceConfig:
     """
     Simple mixin that provides argparse-like configuration for devices.
     
     Usage:
-        class MyDevice(Device, SimpleDeviceConfig):
+        class MyDevice(Device, DeviceConfig):
             def setup_config(self, config):
                 config.add_argument('--my-option', help='My option')
                 config.add_argument('--my-port', type=int, default=8080, 

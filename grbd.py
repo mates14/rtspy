@@ -30,7 +30,7 @@ except ImportError:
 
 from constants import ConnectionState, DeviceType
 from device import Device
-from config import SimpleDeviceConfig
+from config import DeviceConfig
 from value import (ValueBool, ValueString, ValueInteger, ValueTime, ValueDouble, ValueRaDec)
 from app import App
 from voevent import VoEventParser, GrbTarget
@@ -176,7 +176,7 @@ class GcnKafkaConsumer:
         logging.info("GCN Kafka consumer thread stopped")
 
 
-class GrbDaemon(Device, SimpleDeviceConfig):
+class GrbDaemon(Device, DeviceConfig):
     """
     GRB Daemon - receives GCN alerts via Kafka and triggers observations.
 
