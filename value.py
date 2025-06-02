@@ -364,7 +364,7 @@ class ValueDouble(Value[float]):
     """Double precision floating point value."""
 
     def __init__(self, name: str, description: str = "", write_to_fits: bool = True,
-                 flags: int = 0, default: Optional[float] = None):
+                 flags: int = 0, default: Optional[float] = None, writable: bool = False):
         super().__init__(name, description, write_to_fits, flags, ValueType.DOUBLE)
         self._value = float('nan') if default is None else float(default)
 
@@ -385,7 +385,7 @@ class ValueDouble(Value[float]):
 
 class ValueTime(ValueDouble):
     """Time value with proper RTS2 typing."""
-    def __init__(self, name, description, write_to_fits=False, flags=0, default=None):
+    def __init__(self, name, description, write_to_fits=False, flags=0, default=None, writable: bool = False):
         # Use TIME type (0x3) instead of DOUBLE type (0x4)
         super().__init__(name, description, write_to_fits, flags, default=default)
         self.rts2_type = ValueType['TIME']
@@ -394,7 +394,7 @@ class ValueInteger(Value[int]):
     """Integer value."""
 
     def __init__(self, name: str, description: str = "", write_to_fits: bool = True,
-                 flags: int = 0, default: Optional[int] = None):
+                 flags: int = 0, default: Optional[int] = None, writable: bool = False):
         super().__init__(name, description, write_to_fits, flags, ValueType.INTEGER)
 
         if flags & ValueFlags.NOTNULL and default is None:
@@ -418,7 +418,7 @@ class ValueBool(Value[bool]):
     """Boolean value."""
 
     def __init__(self, name: str, description: str = "", write_to_fits: bool = True,
-                 flags: int = 0, default: Optional[bool] = None):
+                 flags: int = 0, default: Optional[bool] = None, writable: bool = False):
         super().__init__(name, description, write_to_fits, flags, ValueType.BOOL)
         self._value = default
 
@@ -479,7 +479,7 @@ class ValueCoordinate(Value[Coordinates]):
 
     def __init__(self, name: str, description: str = "", write_to_fits: bool = True,
                  flags: int = 0, value_type: ValueType = None,
-                 default_x: float = None, default_y: float = None):
+                 default_x: float = None, default_y: float = None, writable: bool = False):
         super().__init__(name, description, write_to_fits, flags, value_type)
 
         if default_x is not None and default_y is not None:
@@ -553,7 +553,7 @@ class ValueRaDec(ValueCoordinate):
     """Right ascension and declination coordinates."""
 
     def __init__(self, name: str, description: str = "", write_to_fits: bool = True,
-                 flags: int = 0, default_ra: float = None, default_dec: float = None):
+                 flags: int = 0, default_ra: float = None, default_dec: float = None, writable: bool = False):
         super().__init__(name, description, write_to_fits, flags, ValueType.RADEC,
                          default_ra, default_dec)
 
@@ -591,7 +591,7 @@ class ValueAltAz(ValueCoordinate):
     """Altitude and azimuth coordinates."""
 
     def __init__(self, name: str, description: str = "", write_to_fits: bool = True,
-                 flags: int = 0, default_alt: float = None, default_az: float = None):
+                 flags: int = 0, default_alt: float = None, default_az: float = None, writable: bool = False):
         super().__init__(name, description, write_to_fits, flags, ValueType.ALTAZ,
                          default_alt, default_az)
 
@@ -652,7 +652,7 @@ class ValueStat(ValueDouble):
     """A value that tracks statistics."""
 
     def __init__(self, name: str, description: str = "", write_to_fits: bool = True,
-                 flags: int = 0, default: Optional[float] = None):
+                 flags: int = 0, default: Optional[float] = None, writable: bool = False):
         super().__init__(name, description, write_to_fits, flags | ValueType.STAT, default)
         self._stats = Statistics()
 
@@ -708,7 +708,7 @@ class ValueSelection(Value[int]):
     """Selection value (enumeration with string labels)."""
 
     def __init__(self, name: str, description: str = "", write_to_fits: bool = True,
-                 flags: int = 0, default: Optional[int] = None):
+                 flags: int = 0, default: Optional[int] = None, writable: bool = False):
         super().__init__(name, description, write_to_fits, flags, ValueType.SELECTION)
         self._value = default if default is not None else 0
         self._selection_values = []  # List of string values
