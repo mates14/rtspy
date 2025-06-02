@@ -347,7 +347,7 @@ class ValueString(Value[str]):
     """String value with proper typing."""
 
     def __init__(self, name: str, description: str = "", write_to_fits: bool = True,
-                 flags: int = 0, default: str = ""):
+                 flags: int = 0, default: str = "", writable: bool = False):
         super().__init__(name, description, write_to_fits, flags, ValueType.STRING)
         self._value = default
 
