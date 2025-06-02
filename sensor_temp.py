@@ -9,7 +9,7 @@ from typing import Dict, Any
 from value import ValueDouble, ValueInteger, ValueTime
 from device import Device
 from constants import DeviceType
-from device_config import SimpleDeviceConfig
+from config import SimpleDeviceConfig
 from app import App
 
 
@@ -39,15 +39,12 @@ class TemperatureSensor(Device, SimpleDeviceConfig):
         super().__init__(device_name, DeviceType.SENSOR, port)
 
         # These will be set by apply_config() after configuration is processed
-        self.initial_temp = 20.0
         self.temp_range = 5.0
         self.update_interval = 2.0
 
         # Create device values
-        self.temperature = ValueDouble("TEMP", "Temperature in Celsius", write_to_fits=True)
-        self.number = ValueInteger("NUMBER", "Testing Integer", write_to_fits=True)
-        self.number.set_writable()
-        self.number.value = 20
+        self.temperature = ValueDouble("TEMP", "Temperature in Celsius", write_to_fits=True, initial=20.0)
+        self.number = ValueInteger("NUMBER", "Testing Integer", write_to_fits=True, writable=True, initial=20)
 
         # Initialize device state
         self.set_state(self.STATE_IDLE, "Initializing device")
@@ -68,16 +65,14 @@ class TemperatureSensor(Device, SimpleDeviceConfig):
         The 'config' parameter is a flat dictionary with all resolved values.
         """
         # Get configuration values with defaults
-        self.initial_temp = config.get('initial_temp', 20.0)
         self.temp_range = config.get('temp_range', 5.0)
         self.update_interval = config.get('update_interval', 2.0)
 
         # Set initial temperature
-        self.temperature.value = self.initial_temp
-        self.number.value = int(self.initial_temp)
+        self.temperature.value = config.get('initial_temp', 20.0)
 
         logging.info(f"Temperature sensor configured:")
-        logging.info(f"  Initial temperature: {self.initial_temp}°C")
+        logging.info(f"  Initial temperature: {self.temperature.value}°C")
         logging.info(f"  Temperature range: ±{self.temp_range}°C")
         logging.info(f"  Update interval: {self.update_interval}s")
 
