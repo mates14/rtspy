@@ -306,37 +306,23 @@ class Ovis(Filterd):
         super().setup_config(config)
 
         # OVIS-specific hardware options
-        config.add_argument('-f', '--device-file',
-                          help='Serial port device file (e.g., /dev/ttyUSB0)',
-                          section='hardware')
-        config.add_argument('--baudrate', type=int, default=9600,
-                          help='Serial port baud rate', section='hardware')
+        config.add_argument('-f', '--device-file', help='Serial port device file (e.g., /dev/ttyUSB0)', section='hardware')
+        config.add_argument('--baudrate', type=int, default=9600, help='Serial port baud rate', section='hardware')
 
         # Filter position configuration
-        config.add_argument('--f0-pos', type=int, default=2000,
-                          help='Filter 0 motor position', section='filters')
-        config.add_argument('--f1-pos', type=int, default=54500,
-                          help='Filter 1 motor position', section='filters')
-        config.add_argument('--f2-pos', type=int, default=107000,
-                          help='Filter 2 motor position', section='filters')
-        config.add_argument('--f3-pos', type=int, default=159500,
-                          help='Filter 3 motor position', section='filters')
-        config.add_argument('--f4-pos', type=int, default=212000,
-                          help='Filter 4 motor position', section='filters')
-        config.add_argument('--f5-pos', type=int, default=292000,
-                          help='Filter 5 motor position (grism)', section='filters')
-        config.add_argument('--f6-pos', type=int, default=300000,
-                          help='Filter 6 motor position (unused)', section='filters')
-        config.add_argument('--f7-pos', type=int, default=300000,
-                          help='Filter 7 motor position (limit)', section='filters')
+        config.add_argument('--f0-pos', type=int, default=2000, help='Filter 0 motor position', section='filters')
+        config.add_argument('--f1-pos', type=int, default=54500, help='Filter 1 motor position', section='filters')
+        config.add_argument('--f2-pos', type=int, default=107000, help='Filter 2 motor position', section='filters')
+        config.add_argument('--f3-pos', type=int, default=159500, help='Filter 3 motor position', section='filters')
+        config.add_argument('--f4-pos', type=int, default=212000, help='Filter 4 motor position', section='filters')
+        config.add_argument('--f5-pos', type=int, default=292000, help='Filter 5 motor position (grism)', section='filters')
+        config.add_argument('--f6-pos', type=int, default=300000, help='Filter 6 motor position (unused)', section='filters')
+        config.add_argument('--f7-pos', type=int, default=300000, help='Filter 7 motor position (limit)', section='filters')
 
         # Motor control options
-        config.add_argument('--motor-speed', type=int, default=100000,
-                          help='Motor speed setting', section='hardware')
-        config.add_argument('--motor-acceleration', type=int, default=100000,
-                          help='Motor acceleration setting', section='hardware')
-        config.add_argument('--home-timeout', type=float, default=30.0,
-                          help='Homing operation timeout in seconds', section='hardware')
+        config.add_argument('--motor-speed', type=int, default=100000, help='Motor speed setting', section='hardware')
+        config.add_argument('--motor-acceleration', type=int, default=100000, help='Motor acceleration setting', section='hardware')
+        config.add_argument('--home-timeout', type=float, default=30.0, help='Homing operation timeout in seconds', section='hardware')
 
     def __init__(self, device_name="W0", port=0):
         """Initialize the Ovis filter wheel device."""
@@ -364,40 +350,19 @@ class Ovis(Filterd):
         self.focpos = ValueInteger("FOCPOS", "[int] focuser position", write_to_fits=True)
         self.focpos.set_writable()
 
-        self.neon = ValueSelection("NEON", "[on/off] neon lamp status", write_to_fits=True)
-        self.neon.set_writable()
+        self.neon = ValueSelection("NEON", "[on/off] neon lamp status", write_to_fits=True, writable=True)
         self.neon.add_sel_val("off")
         self.neon.add_sel_val("on")
 
         # Filter positions - these will be updated from configuration
-        self.f0pos = ValueInteger("F0POS", "[int] filter 0 position", write_to_fits=True)
-        self.f1pos = ValueInteger("F1POS", "[int] filter 1 position", write_to_fits=True)
-        self.f2pos = ValueInteger("F2POS", "[int] filter 2 position", write_to_fits=True)
-        self.f3pos = ValueInteger("F3POS", "[int] filter 3 position", write_to_fits=True)
-        self.f4pos = ValueInteger("F4POS", "[int] filter 4 position", write_to_fits=True)
-        self.f5pos = ValueInteger("F5POS", "[int] filter 5 position", write_to_fits=True)
-        self.f6pos = ValueInteger("F6POS", "[int] filter 6 position", write_to_fits=True)
-        self.f7pos = ValueInteger("F7POS", "[int] filter 7 position", write_to_fits=True)
-
-        # Make filter positions writable
-        self.f0pos.set_writable()
-        self.f1pos.set_writable()
-        self.f2pos.set_writable()
-        self.f3pos.set_writable()
-        self.f4pos.set_writable()
-        self.f5pos.set_writable()
-        self.f6pos.set_writable()
-        self.f7pos.set_writable()
-
-        # Default filter positions
-        self.f0pos.value = 2000
-        self.f1pos.value = 54500
-        self.f2pos.value = 107000
-        self.f3pos.value = 159500
-        self.f4pos.value = 212000
-        self.f5pos.value = 292000  # grism
-        self.f6pos.value = 300000  # unused
-        self.f7pos.value = 300000  # limit
+        self.f0pos = ValueInteger("F0POS", "[int] filter 0 position", write_to_fits=False, writable=True, initial=2000)
+        self.f1pos = ValueInteger("F1POS", "[int] filter 1 position", write_to_fits=False, writable=True, initial=545000)
+        self.f2pos = ValueInteger("F2POS", "[int] filter 2 position", write_to_fits=False, writable=True, initial=107000)
+        self.f3pos = ValueInteger("F3POS", "[int] filter 3 position", write_to_fits=False, writable=True, initial=159000)
+        self.f4pos = ValueInteger("F4POS", "[int] filter 4 position", write_to_fits=False, writable=True, initial=212000)
+        self.f5pos = ValueInteger("F5POS", "[int] filter 5 position", write_to_fits=False, writable=True, initial=292000) # grism
+        self.f6pos = ValueInteger("F6POS", "[int] filter 6 position", write_to_fits=False, writable=True, initial=300000) # unused
+        self.f7pos = ValueInteger("F7POS", "[int] filter 7 position", write_to_fits=False, writable=True, initial=300000) # limit
 
         # Initialize not ready until motors are initialized
         self.set_state(self.STATE_IDLE | self.NOT_READY, "Initializing hardware")
