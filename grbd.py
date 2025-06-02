@@ -15,15 +15,10 @@ Based on the original RTS2 grbd.cpp but modernized to use:
 import logging
 import time
 import threading
-import json
 import re
-import os
 import math
-from typing import Dict, List, Optional, Any, Callable
+from typing import Dict, Optional, Any, Callable
 from datetime import datetime
-from dataclasses import dataclass, field
-from constants import ConnectionState, DeviceType
-from voevent import VoEventParser
 import psycopg2
 
 try:
@@ -33,31 +28,12 @@ except ImportError:
     logging.warning("gcn-kafka not available. Install with: pip install gcn-kafka")
     GCN_KAFKA_AVAILABLE = False
 
-from constants import DeviceType
+from constants import ConnectionState, DeviceType
 from device import Device
 from config import SimpleDeviceConfig
-from value import (ValueBool, ValueString, ValueInteger, ValueTime,
-                  ValueDouble, ValueRaDec, ValueAltAz)
+from value import (ValueBool, ValueString, ValueInteger, ValueTime, ValueDouble, ValueRaDec)
 from app import App
-
-
-@dataclass
-class GrbTarget:
-    """Represents a GRB target with all relevant information."""
-    target_id: int = 0
-    grb_id: str = ""
-    sequence_num: int = 0
-    grb_type: int = 0
-    ra: float = float('nan')
-    dec: float = float('nan')
-    error_box: float = float('nan')  # degrees
-    detection_time: float = float('nan')
-    is_grb: bool = True
-    mission: str = "UNKNOWN"
-    trigger_num: int = 0
-    fluence: float = float('nan')
-    peak_flux: float = float('nan')
-
+from voevent import VoEventParser, GrbTarget
 
 class GcnKafkaConsumer:
     """Handles GCN Kafka message consumption and parsing."""
@@ -1551,99 +1527,4 @@ if __name__ == "__main__":
     import sys
     sys.exit(main())
 
-
-if False:
-    def _parse_voevent_xml(self, message: str, grb: GrbTarget) -> GrbTarget:
-        """Parse VOEvent XML format message."""
-        try:
-            # Simple regex-based XML parsing for key fields
-            # In production, would use proper XML parser, but this works for most cases
-
-            # Extract TrigID/GraceID (GRB identifier)
-            trig_match = re.search(r'<Param\s+name="TrigID"[^>]*value="([^"]*)"', message, re.IGNORECASE)
-            if not trig_match:
-                trig_match = re.search(r'<Param\s+name="GraceID"[^>]*value="([^"]*)"', message, re.IGNORECASE)
-
-            if trig_match:
-                grb.grb_id = trig_match.group(1)
-                try:
-                    grb.trigger_num = int(grb.grb_id)
-                except:
-                    pass
-
-            # Extract sequence number
-            seq_match = re.search(r'<Param\s+name="Pkt_Ser_Num"[^>]*value="([^"]*)"', message, re.IGNORECASE)
-            if seq_match:
-                try:
-                    grb.sequence_num = int(seq_match.group(1))
-                except:
-                    pass
-
-            # Extract coordinates from C1 and C2 parameters
-            ra_match = re.search(r'<Param\s+name="RA"[^>]*value="([^"]*)"', message, re.IGNORECASE)
-            if not ra_match:
-                ra_match = re.search(r'<C1>([^<]*)</C1>', message)
-            if ra_match:
-                try:
-                    grb.ra = float(ra_match.group(1))
-                except:
-                    pass
-
-            dec_match = re.search(r'<Param\s+name="Dec"[^>]*value="([^"]*)"', message, re.IGNORECASE)
-            if not dec_match:
-                dec_match = re.search(r'<C2>([^<]*)</C2>', message)
-            if dec_match:
-                try:
-                    grb.dec = float(dec_match.group(1))
-                except:
-                    pass
-
-            # Extract error circle/box
-            error_match = re.search(r'<Param\s+name="Error2Radius"[^>]*value="([^"]*)"', message, re.IGNORECASE)
-            if not error_match:
-                error_match = re.search(r'<Param\s+name="ErrorRadius"[^>]*value="([^"]*)"', message, re.IGNORECASE)
-            if not error_match:
-                error_match = re.search(r'<Error2Radius>([^<]*)</Error2Radius>', message)
-            if error_match:
-                try:
-                    error_val = float(error_match.group(1))
-                    # Convert from arcminutes to degrees if needed
-                    if error_val > 10:  # Assume arcminutes if > 10
-                        grb.error_box = error_val / 60.0
-                    else:
-                        grb.error_box = error_val
-                except:
-                    pass
-
-            # Extract time - look for GRB_TIME or trigger time
-            time_match = re.search(r'<Param\s+name="GRB_Time"[^>]*value="([^"]*)"', message, re.IGNORECASE)
-            if not time_match:
-                time_match = re.search(r'<Param\s+name="Trigger_TJD"[^>]*value="([^"]*)"', message, re.IGNORECASE)
-                if time_match:
-                    # Handle TJD format
-                    sod_match = re.search(r'<Param\s+name="Trigger_SOD"[^>]*value="([^"]*)"', message, re.IGNORECASE)
-                    if sod_match:
-                        try:
-                            tjd = int(time_match.group(1))
-                            sod = float(sod_match.group(1))
-                            # Convert TJD + SOD to Unix timestamp
-                            jd = tjd + 2440000.5  # Convert TJD to JD
-                            grb.detection_time = (jd - 2440587.5) * 86400 + sod
-                        except:
-                            pass
-            else:
-                try:
-                    grb.detection_time = float(time_match.group(1))
-                except:
-                    pass
-
-            # Check if it's actually a GRB (vs. test or other event)
-            if any(word in message.upper() for word in ['TEST', 'RETRACTION', 'PRELIMINARY']):
-                grb.is_grb = False
-
-            return grb
-
-        except Exception as e:
-            logging.error(f"Error parsing VOEvent XML: {e}")
-            return grb
 
