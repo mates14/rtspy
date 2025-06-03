@@ -235,6 +235,9 @@ class GrbDaemon(Device, DeviceConfig):
 
         # Set initial state
         self.set_state(self.STATE_IDLE, "GRB daemon initializing")
+        # System state monitoring
+        self.system_state_mask = 0xff  # Will be updated from centrald
+        self.system_state_required = 0x03    # ON (0x0.) + NIGHT (0x.3)
 
     def apply_config(self, config: Dict[str, Any]):
         """Apply GRB-specific configuration."""
@@ -553,6 +556,25 @@ class GrbDaemon(Device, DeviceConfig):
             # Count subscribed topics
             if hasattr(self.gcn_consumer, 'topics'):
                 self.topics_subscribed.value = len(self.gcn_consumer.topics)
+
+        # Register interest in system state
+        self.network.register_state_interest( "centrald", self._on_system_state_changed)
+        logging.info("Monitoring centrald system state for GRB readiness")
+
+    def _on_system_state_changed(self, device_name, state, bop_state, message):
+        """Handle system state mask changes from centrald."""
+        try:
+            if state & 0xff == self.system_state_required:
+                logging.info("System ready for GRB observations (ON & NIGHT)")
+                self.trigger_ready = True
+                pass
+            else:
+                logging.info(f"System not ready for triggers (0x{state:02x})")
+                self.trigger_ready = False
+                pass
+
+        except (ValueError, TypeError):
+            logging.warning(f"Could not parse state mask: {state_mask_value}")
 
     def stop(self):
         """Stop the GRB daemon."""
@@ -1128,7 +1150,7 @@ class GrbDaemon(Device, DeviceConfig):
         Parse any transient notice from GCN - ROBUST VERSION.
 
         Returns:
-            GrbTarget for any transient (GRB, neutrino, whatever) 
+            GrbTarget for any transient (GRB, neutrino, whatever)
             or None if not a transient.
         """
         try:
@@ -1175,7 +1197,7 @@ class GrbDaemon(Device, DeviceConfig):
 
             # Fallback to enhanced text parsing
             grb = self._parse_text_format(message, grb)
-            
+
             # Final validation
             if not grb.grb_id:
                 if grb.trigger_num > 0:
@@ -1204,7 +1226,7 @@ class GrbDaemon(Device, DeviceConfig):
                 r'trigger[_\s]*id["\s]*[:=]\s*["\']?([^"\s,]+)',
                 r'Event_ID["\s]*[:=]\s*["\']?([^"\s,]+)',
             ]
-            
+
             for pattern in trigger_patterns:
                 match = re.search(pattern, message, re.IGNORECASE)
                 if match:
@@ -1233,7 +1255,7 @@ class GrbDaemon(Device, DeviceConfig):
                     try:
                         ra = float(ra_match.group(1))
                         dec = float(dec_match.group(1))
-                        
+
                         # Validate ranges
                         if 0 <= ra <= 360 and -90 <= dec <= 90:
                             grb.ra = ra
@@ -1314,6 +1336,12 @@ class GrbDaemon(Device, DeviceConfig):
         try:
             logging.info(f"Triggering GRB observation for target {target_id}")
 
+            if not self.trigger_ready:
+                logging.info(f"System not ready for immediate GRB observation (state=0x{self.system_state_mask:02x})")
+                logging.info("GRB will be discovered by scheduler for time-critical scheduling")
+                # Do not queue - let the scheduler handle it
+                return
+
             # First try to find an executor connection
             executor_conn = None
             for conn in self.network.connection_manager.connections.values():
@@ -1329,9 +1357,9 @@ class GrbDaemon(Device, DeviceConfig):
                 executor_conn.send_command(cmd, self._on_execute_grb_result)
                 logging.info(f"Sent GRB execute command to executor: {cmd}")
 
-            elif self.queue_name.value:
-                # Queue GRB for selector
-                self._queue_grb_observation(target_id)
+            #elif self.queue_name.value:
+            #    # Queue GRB for selector
+            #    self._queue_grb_observation(target_id)
 
             else:
                 logging.warning(f"No executor available and no queue specified for GRB {target_id}")
@@ -1367,11 +1395,13 @@ class GrbDaemon(Device, DeviceConfig):
         """Handle result from executor GRB command."""
         if success:
             logging.info(f"GRB execution successful: {message}")
+            with self._stats_lock:
+                self.observations_triggered.value += 1
         else:
             logging.error(f"GRB execution failed: {message}")
             # Try queuing if execution failed and queue is configured
-            if self.queue_name.value and self.current_grb:
-                self._queue_grb_observation(self.current_grb.target_id)
+            #if self.queue_name.value and self.current_grb:
+            #    self._queue_grb_observation(self.current_grb.target_id)
 
     def _on_queue_grb_result(self, conn, success, code, message):
         """Handle result from selector queue command."""
