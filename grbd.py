@@ -525,6 +525,10 @@ class GrbDaemon(Device, DeviceConfig):
         # Record start time for uptime calculation
         self.start_time = time.time()
 
+        # Register interest in system state
+        logging.info("Monitoring centrald system state for GRB readiness")
+        self.network.register_state_interest("centrald", self._on_system_state_changed)
+
         # Validate configuration
         if not self.gcn_client_id.value or not self.gcn_client_secret:
             logging.error("GCN client ID and secret must be provided")
@@ -556,10 +560,6 @@ class GrbDaemon(Device, DeviceConfig):
             # Count subscribed topics
             if hasattr(self.gcn_consumer, 'topics'):
                 self.topics_subscribed.value = len(self.gcn_consumer.topics)
-
-        # Register interest in system state
-        self.network.register_state_interest( "centrald", self._on_system_state_changed)
-        logging.info("Monitoring centrald system state for GRB readiness")
 
     def _on_system_state_changed(self, device_name, state, bop_state, message):
         """Handle system state mask changes from centrald."""
@@ -1340,7 +1340,7 @@ class GrbDaemon(Device, DeviceConfig):
                 logging.info(f"System not ready for immediate GRB observation (state=0x{self.system_state_mask:02x})")
                 logging.info("GRB will be discovered by scheduler for time-critical scheduling")
                 # Do not queue - let the scheduler handle it
-                return
+                eeturn
 
             # First try to find an executor connection
             executor_conn = None
