@@ -564,7 +564,7 @@ class GrbDaemon(Device, DeviceConfig):
             if hasattr(self.gcn_consumer, 'topics'):
                 self.topics_subscribed.value = len(self.gcn_consumer.topics)
 
-    def _on_system_state_changed(self, device_name, state, bop_state, message):
+    def _on_system_state_changed(self, dev, state, bop, msg):
         """Handle system state mask changes from centrald."""
         try:
             if state != self.system_state:
@@ -574,11 +574,9 @@ class GrbDaemon(Device, DeviceConfig):
                 if state & 0xff == self.system_state_required:
                     logging.info("System ready for GRB observations (ON & NIGHT)")
                     self.trigger_ready = True
-                    pass
                 else:
                     logging.info(f"System not ready for triggers (0x{state:02x})")
                     self.trigger_ready = False
-                    pass
 
         except (ValueError, TypeError):
             logging.warning(f"Could not parse state mask: {state_mask_value}")
@@ -1032,24 +1030,24 @@ class GrbDaemon(Device, DeviceConfig):
             return False
         return True
 
-    def _parse_coordinates_safely(self, ra_str, dec_str):
-        """FIXED: Safe coordinate parsing with validation."""
-        try:
-            ra = float(ra_str)
-            dec = float(dec_str)
-
-            # Validate ranges
-            if not (0 <= ra <= 360):
-                logging.warning(f"Invalid RA: {ra}, setting to NaN")
-                ra = float('nan')
-            if not (-90 <= dec <= 90):
-                logging.warning(f"Invalid Dec: {dec}, setting to NaN")
-                dec = float('nan')
-
-            return ra, dec
-        except (ValueError, TypeError):
-            logging.warning(f"Could not parse coordinates: '{ra_str}', '{dec_str}'")
-            return float('nan'), float('nan')
+#    def _parse_coordinates_safely(self, ra_str, dec_str):
+#        """FIXED: Safe coordinate parsing with validation."""
+#        try:
+#            ra = float(ra_str)
+#            dec = float(dec_str)
+#
+#            # Validate ranges
+#            if not (0 <= ra <= 360):
+#                logging.warning(f"Invalid RA: {ra}, setting to NaN")
+#                ra = float('nan')
+#            if not (-90 <= dec <= 90):
+#                logging.warning(f"Invalid Dec: {dec}, setting to NaN")
+#                dec = float('nan')
+#
+#            return ra, dec
+#        except (ValueError, TypeError):
+#            logging.warning(f"Could not parse coordinates: '{ra_str}', '{dec_str}'")
+#            return float('nan'), float('nan')
 
     def _calculate_angular_separation(self, ra1, dec1, ra2, dec2):
         """
@@ -1135,7 +1133,7 @@ class GrbDaemon(Device, DeviceConfig):
         if self.only_visible_tonight.value:
             # This would require detailed rise/set calculations
             # For now, just do a simplified check
-            current_time = time.time()
+            # current_time = time.time()
             # Simplified: check if object is at reasonable hour angle
             # In full implementation, would use libnova equivalent calculations
             pass
@@ -1347,7 +1345,7 @@ class GrbDaemon(Device, DeviceConfig):
                 logging.info(f"System not ready for immediate GRB observation (state=0x{self.system_state:02x})")
                 logging.info("GRB will be discovered by scheduler for time-critical scheduling")
                 # Do not queue - let the scheduler handle it
-                eeturn
+                return
 
             # First try to find an executor connection
             executor_conn = None
@@ -1559,9 +1557,6 @@ def main():
         logging.error(f"Fatal error in GRB daemon: {e}")
         return 1
 
-
 if __name__ == "__main__":
     import sys
     sys.exit(main())
-
-
