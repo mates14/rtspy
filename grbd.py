@@ -232,11 +232,14 @@ class GrbDaemon(Device, DeviceConfig):
 
         # Create RTS2 values for monitoring
         self._create_values()
+    
+        # keep record of centrald/system state
+        self.system_state = None
+        self.trigger_ready = False
 
         # Set initial state
         self.set_state(self.STATE_IDLE, "GRB daemon initializing")
         # System state monitoring
-        self.system_state_mask = 0xff  # Will be updated from centrald
         self.system_state_required = 0x03    # ON (0x0.) + NIGHT (0x.3)
 
     def apply_config(self, config: Dict[str, Any]):
@@ -564,14 +567,18 @@ class GrbDaemon(Device, DeviceConfig):
     def _on_system_state_changed(self, device_name, state, bop_state, message):
         """Handle system state mask changes from centrald."""
         try:
-            if state & 0xff == self.system_state_required:
-                logging.info("System ready for GRB observations (ON & NIGHT)")
-                self.trigger_ready = True
-                pass
-            else:
-                logging.info(f"System not ready for triggers (0x{state:02x})")
-                self.trigger_ready = False
-                pass
+            if state != self.system_state:
+                self.system_state = state
+                logging.info("System state changed to 0x{state:02x}")
+
+                if state & 0xff == self.system_state_required:
+                    logging.info("System ready for GRB observations (ON & NIGHT)")
+                    self.trigger_ready = True
+                    pass
+                else:
+                    logging.info(f"System not ready for triggers (0x{state:02x})")
+                    self.trigger_ready = False
+                    pass
 
         except (ValueError, TypeError):
             logging.warning(f"Could not parse state mask: {state_mask_value}")
@@ -1337,7 +1344,7 @@ class GrbDaemon(Device, DeviceConfig):
             logging.info(f"Triggering GRB observation for target {target_id}")
 
             if not self.trigger_ready:
-                logging.info(f"System not ready for immediate GRB observation (state=0x{self.system_state_mask:02x})")
+                logging.info(f"System not ready for immediate GRB observation (state=0x{self.system_state:02x})")
                 logging.info("GRB will be discovered by scheduler for time-critical scheduling")
                 # Do not queue - let the scheduler handle it
                 eeturn
