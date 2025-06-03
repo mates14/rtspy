@@ -3,7 +3,7 @@
 import time
 import logging
 import threading
-from typing import Optional
+from typing import Optional,Dict,Any
 
 from value import ValueString, ValueDouble
 from filterd import Filterd
@@ -13,19 +13,16 @@ class DummyFilter(Filterd):
     """Dummy filter wheel implementation for testing.
     This simulates a filter wheel with configurable filters and movement time."""
 
-    @classmethod
-    def register_options(cls, parser):
+    def setup_config(self, config):
         """Register DummyFilter-specific command line options."""
-        super().register_options(parser)
-        parser.add_argument('-s', '--sleep', type=float, default=1.0,
+        super().setup_config(config)
+        config.add_argument('-s', '--sleep', type=float, default=1.0,
                           help='Filter movement time in seconds')
 
-    @classmethod
-    def process_args(cls, device, args):
+    def apply_config(self, config: Dict[str, Any]):
         """Process arguments for this specific device."""
-        super().process_args(device, args)
-        if args.sleep:
-            device.filter_sleep.value = args.sleep
+        super().apply_config(config)
+        self.filter_sleep.value = config.get('sleep', 1.0)
 
     def __init__(self, device_name="W0", port=0):
         """Initialize the dummy filter wheel."""
@@ -36,21 +33,11 @@ class DummyFilter(Filterd):
         self.filter_num = 0
 
         # Simulated time to change filters
-        self.filter_sleep = ValueDouble("filter_sleep", "Time to change filter [s]")
-        self.filter_sleep.set_writable()
-        self.filter_sleep.value = 3.0
+        self.filter_sleep = ValueDouble("filter_sleep", "Time to change filter [s]", writable=True, initial=1.0)
 
         # Centrald connection parameters
         self.centrald_host = "localhost"
         self.centrald_port = 617
-
-        # Add filter names string for dynamic configuration
-        self.filter_names = ValueString("filter_names", "filter names")
-        self.filter_names.value="Clear:Red:Green:Blue:Ha:SII:OIII"
-
-        self.set_filters(self.filter_names.value)
-
-        #self.start()
 
     def on_filter_sleep_changed(self, old_value, new_value):
         return True
@@ -132,6 +119,13 @@ if __name__ == "__main__":
 
     # Create and configure device
     device = app.create_device(DummyFilter)
+
+    # Show config summary if debug enabled
+    if getattr(args, 'debug', False):
+        print("\nDummyFilter Configuration Summary:")
+        print("=" * 50)
+        print(device.get_config_summary())
+        print("=" * 50)
 
     # Run application main loop
     app.run()

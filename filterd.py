@@ -4,15 +4,17 @@ import time
 import logging
 import threading
 
+from typing import Any, Dict
 from value import (
     ValueSelection, ValueInteger, ValueBool, ValueString, ValueTime
 )
 from device import Device
+from config import DeviceConfig
 from constants import DeviceType, ConnectionState
 from commands import CommandRegistry
 
 
-class Filterd(Device):
+class Filterd(Device, DeviceConfig):
     """Base class for filter wheel devices.
 
     This class implements the main functionality of a filter wheel device,
@@ -25,16 +27,18 @@ class Filterd(Device):
     FILTERD_MOVE = 0x002
 
     @classmethod
-    def register_options(cls, parser):
+    def setup_config(self, config):
         """Register Filterd-specific command line options."""
-        parser.add_argument('-F', '--filters',
-                          help='Filter names (colon-separated)')
+        # super().setup_config(config)
+        config.add_argument('-F', '--filters', help='Filter names (colon-separated)')
+        config.add_argument('--default-filter', help='Default filter', default=0)
+        config.add_argument('--daytime-filter', help='Daytime filter', default=0)
 
-    @classmethod
-    def process_args(cls, device, args):
+    def apply_config(self, config: Dict[str, Any]):
         """Process arguments for this specific device."""
-        if args.filters:
-            device.set_filters(args.filters)
+        super().apply_config(config)
+        self.set_filters(config.get('filters', 'J:K:L'))
+        print(config)
 
     def __init__(self, device_name="W0", port=0):
         """Initialize the filter wheel device."""

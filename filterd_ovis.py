@@ -1,4 +1,4 @@
-!/usr/bin/python3
+#!/usr/bin/python3
 """
 RTS2-Python OVIS Filter Wheel Driver
 
@@ -81,12 +81,14 @@ import time
 import logging
 import threading
 import serial
+from typing import Dict, Any
 
 from value import (
     ValueSelection, ValueInteger, ValueBool, ValueString, ValueTime
 )
 from filterd import Filterd
 from constants import DeviceType
+from config import DeviceConfig
 from app import App
 
 class SerialCommunicator:
@@ -294,26 +296,46 @@ class SerialCommunicator:
 class Ovis(Filterd):
     """OVIS (Otevrena Veda Imaging Spectrograph) filter wheel driver."""
 
-    @classmethod
-    def register_options(cls, parser):
-        """Register command line options."""
-        super().register_options(parser)
-        parser.add_argument('-f', '--device-file',
-                          help='Serial port device file')
+    def setup_config(self, config):
+        """
+        Set up OVIS-specific configuration arguments.
 
-    @classmethod
-    def process_args(cls, device, args):
-        """Process command line arguments."""
-        super().process_args(device, args)
-        if hasattr(args, 'device_file') and args.device_file:
-            device.device_file = args.device_file
+        This method is called automatically by the configuration system.
+        """
+        # Call parent setup first to get standard filter options
+        super().setup_config(config)
+
+        # OVIS-specific hardware options
+        config.add_argument('-f', '--device-file', help='Serial port device file (e.g., /dev/ttyUSB0)', section='hardware')
+        config.add_argument('--baudrate', type=int, default=9600, help='Serial port baud rate', section='hardware')
+
+        # Filter position configuration
+        config.add_argument('--f0-pos', type=int, default=2000, help='Filter 0 motor position', section='filters')
+        config.add_argument('--f1-pos', type=int, default=54500, help='Filter 1 motor position', section='filters')
+        config.add_argument('--f2-pos', type=int, default=107000, help='Filter 2 motor position', section='filters')
+        config.add_argument('--f3-pos', type=int, default=159500, help='Filter 3 motor position', section='filters')
+        config.add_argument('--f4-pos', type=int, default=212000, help='Filter 4 motor position', section='filters')
+        config.add_argument('--f5-pos', type=int, default=292000, help='Filter 5 motor position (grism)', section='filters')
+        config.add_argument('--f6-pos', type=int, default=300000, help='Filter 6 motor position (unused)', section='filters')
+        config.add_argument('--f7-pos', type=int, default=300000, help='Filter 7 motor position (limit)', section='filters')
+
+        # Motor control options
+        config.add_argument('--motor-speed', type=int, default=100000, help='Motor speed setting', section='hardware')
+        config.add_argument('--motor-acceleration', type=int, default=100000, help='Motor acceleration setting', section='hardware')
+        config.add_argument('--home-timeout', type=float, default=30.0, help='Homing operation timeout in seconds', section='hardware')
 
     def __init__(self, device_name="W0", port=0):
         """Initialize the Ovis filter wheel device."""
         super().__init__(device_name, port)
 
-        # Serial connection
+        # Configuration will be applied in apply_config()
         self.device_file = None
+        self.baudrate = 9600
+        self.motor_speed = 100000
+        self.motor_acceleration = 100000
+        self.home_timeout = 30.0
+
+        # Serial connection
         self.serial_comm = None
 
         # Filter and motor state
@@ -328,56 +350,72 @@ class Ovis(Filterd):
         self.focpos = ValueInteger("FOCPOS", "[int] focuser position", write_to_fits=True)
         self.focpos.set_writable()
 
-        self.neon = ValueSelection("NEON", "[on/off] neon lamp status", write_to_fits=True)
-        self.neon.set_writable()
+        self.neon = ValueSelection("NEON", "[on/off] neon lamp status", write_to_fits=True, writable=True)
         self.neon.add_sel_val("off")
         self.neon.add_sel_val("on")
 
-        # Filter positions
-        self.f0pos = ValueInteger("F0POS", "[int] filter 0 position", write_to_fits=True)
-        self.f1pos = ValueInteger("F1POS", "[int] filter 1 position", write_to_fits=True)
-        self.f2pos = ValueInteger("F2POS", "[int] filter 2 position", write_to_fits=True)
-        self.f3pos = ValueInteger("F3POS", "[int] filter 3 position", write_to_fits=True)
-        self.f4pos = ValueInteger("F4POS", "[int] filter 4 position", write_to_fits=True)
-        self.f5pos = ValueInteger("F5POS", "[int] filter 5 position", write_to_fits=True)
-        self.f6pos = ValueInteger("F6POS", "[int] filter 6 position", write_to_fits=True)
-        self.f7pos = ValueInteger("F7POS", "[int] filter 7 position", write_to_fits=True)
-
-        # Make filter positions writable
-        self.f0pos.set_writable()
-        self.f1pos.set_writable()
-        self.f2pos.set_writable()
-        self.f3pos.set_writable()
-        self.f4pos.set_writable()
-        self.f5pos.set_writable()
-        self.f6pos.set_writable()
-        self.f7pos.set_writable()
-
-        # Default filter positions
-        self.f0pos.value = 2000
-        self.f1pos.value = 54500
-        self.f2pos.value = 107000
-        self.f3pos.value = 159500
-        self.f4pos.value = 212000
-        self.f5pos.value = 292000  # grism
-        self.f6pos.value = 300000  # unused
-        self.f7pos.value = 300000  # limit
+        # Filter positions - these will be updated from configuration
+        self.f0pos = ValueInteger("F0POS", "[int] filter 0 position", write_to_fits=False, writable=True, initial=2000)
+        self.f1pos = ValueInteger("F1POS", "[int] filter 1 position", write_to_fits=False, writable=True, initial=545000)
+        self.f2pos = ValueInteger("F2POS", "[int] filter 2 position", write_to_fits=False, writable=True, initial=107000)
+        self.f3pos = ValueInteger("F3POS", "[int] filter 3 position", write_to_fits=False, writable=True, initial=159000)
+        self.f4pos = ValueInteger("F4POS", "[int] filter 4 position", write_to_fits=False, writable=True, initial=212000)
+        self.f5pos = ValueInteger("F5POS", "[int] filter 5 position", write_to_fits=False, writable=True, initial=292000) # grism
+        self.f6pos = ValueInteger("F6POS", "[int] filter 6 position", write_to_fits=False, writable=True, initial=300000) # unused
+        self.f7pos = ValueInteger("F7POS", "[int] filter 7 position", write_to_fits=False, writable=True, initial=300000) # limit
 
         # Initialize not ready until motors are initialized
         self.set_state(self.STATE_IDLE | self.NOT_READY, "Initializing hardware")
+
+    def apply_config(self, config: Dict[str, Any]):
+        """
+        Apply OVIS-specific configuration.
+
+        This method is called automatically after all configuration sources
+        have been processed.
+        """
+        # Apply parent configuration first
+        super().apply_config(config)
+
+        # Apply hardware configuration
+        self.device_file = config.get('device_file')
+        self.baudrate = config.get('baudrate', 9600)
+        self.motor_speed = config.get('motor_speed', 100000)
+        self.motor_acceleration = config.get('motor_acceleration', 100000)
+        self.home_timeout = config.get('home_timeout', 30.0)
+
+        # Apply filter position configuration
+        self.f0pos.value = config.get('f0_pos', 2000)
+        self.f1pos.value = config.get('f1_pos', 54500)
+        self.f2pos.value = config.get('f2_pos', 107000)
+        self.f3pos.value = config.get('f3_pos', 159500)
+        self.f4pos.value = config.get('f4_pos', 212000)
+        self.f5pos.value = config.get('f5_pos', 292000)  # grism
+        self.f6pos.value = config.get('f6_pos', 300000)  # unused
+        self.f7pos.value = config.get('f7_pos', 300000)  # limit
+
+        logging.info(f"OVIS configuration applied:")
+        logging.info(f"  Device file: {self.device_file}")
+        logging.info(f"  Baud rate: {self.baudrate}")
+        logging.info(f"  Motor speed: {self.motor_speed}")
+        logging.info(f"  Motor acceleration: {self.motor_acceleration}")
+        logging.info(f"  Home timeout: {self.home_timeout}s")
+        logging.info(f"  Filter positions: F0={self.f0pos.value}, F1={self.f1pos.value}, "
+                    f"F2={self.f2pos.value}, F3={self.f3pos.value}, F4={self.f4pos.value}, "
+                    f"F5={self.f5pos.value}, F6={self.f6pos.value}, F7={self.f7pos.value}")
 
     def start(self):
         """Start the device."""
         super().start()
 
         if not self.device_file:
-            logging.error("No device file specified")
+            logging.error("No device file specified. Use --device-file option.")
             self.set_state(self.STATE_IDLE | self.ERROR_HW, "No device file specified")
             return
 
         try:
             # Create serial communicator
-            self.serial_comm = SerialCommunicator(self.device_file)
+            self.serial_comm = SerialCommunicator(self.device_file, self.baudrate)
             self.serial_comm.set_status_callback(self._handle_status_update)
             self.serial_comm.start()
 
@@ -390,9 +428,9 @@ class Ovis(Filterd):
                 self.set_state(self.STATE_IDLE | self.ERROR_HW, "Failed to power on motor")
                 return
 
-            # Set default speed/accel
-            self.serial_comm.send_command("M 1 SPD 100000")
-            self.serial_comm.send_command("M 1 ACC 100000")
+            # Set configured speed/accel
+            self.serial_comm.send_command(f"M 1 SPD {self.motor_speed}")
+            self.serial_comm.send_command(f"M 1 ACC {self.motor_acceleration}")
 
             # Home the filter wheel
             logging.info("Homing filter wheel")
@@ -401,8 +439,8 @@ class Ovis(Filterd):
             self.set_state(self._state | self.FILTERD_MOVE, "Homing filter wheel",
                             self.BOP_EXPOSURE)
 
-            # Send home command with long timeout
-            response = self.serial_comm.send_command("M 1 HOM", True, 30.0)
+            # Send home command with configured timeout
+            response = self.serial_comm.send_command("M 1 HOM", True, self.home_timeout)
 
             if not response or "OK" not in response:
                 logging.error("Failed to home filter wheel")
@@ -414,7 +452,7 @@ class Ovis(Filterd):
             self.filter_num = 0
             self.motor_initialized = True
 
-            # Sequence 3: Move to filter 1
+            # Sequence 3: Move to filter 0
             self.set_filter_num(0)
 
             # Mark device as ready
@@ -558,8 +596,8 @@ class Ovis(Filterd):
             self.BOP_EXPOSURE
         )
 
-        # Send home command with long timeout
-        response = self.serial_comm.send_command("M 1 HOM", True, 30.0)
+        # Send home command with configured timeout
+        response = self.serial_comm.send_command("M 1 HOM", True, self.home_timeout)
 
         if not response or "OK" not in response:
             logging.error("Failed to home filter wheel")
@@ -584,7 +622,7 @@ class Ovis(Filterd):
             if value.name == "NEON":
                 self._set_neon(new_value)
             elif value.name == "FOCPOS":
-                self.serial_comm.send_command(f"F 0 ABS {new_value}")
+                self.serial_comm.send_command(f"M 0 ABS {new_value}")
             elif value.name.startswith("F") and value.name.endswith("POS"):
                 # If this is the current filter, update position
                 filter_idx = int(value.name[1])
@@ -625,6 +663,13 @@ if __name__ == "__main__":
 
     # Create and configure device
     device = app.create_device(Ovis)
+
+    # Show config summary if debug enabled
+    if getattr(args, 'debug', False):
+        print("\nOVIS Configuration Summary:")
+        print("=" * 50)
+        print(device.get_config_summary())
+        print("=" * 50)
 
     # Run application main loop
     app.run()
