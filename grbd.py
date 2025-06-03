@@ -992,6 +992,8 @@ class GrbDaemon(Device, DeviceConfig):
         cursor.execute("SELECT nextval('grb_tar_id')")
         tar_id = cursor.fetchone()[0]
 
+        logging.debug(f"Generated new GRB target ID: {tar_id}")
+
         # Generate target name in RTS2 format
         grb_time = datetime.fromtimestamp(grb.detection_time)
         if grb.mission == 'ICECUBE':
@@ -1014,7 +1016,7 @@ class GrbDaemon(Device, DeviceConfig):
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (tar_id, 'G', target_name, grb.ra, grb.dec, tar_enabled, comment, 100, 100, None))
 
-        # Insert into grb table
+        # Insert into grb table (only one entry per GRB)
         cursor.execute("""
             INSERT INTO grb (
                 tar_id, grb_id, grb_seqn, grb_type, grb_ra, grb_dec,
@@ -1027,7 +1029,7 @@ class GrbDaemon(Device, DeviceConfig):
         logging.info(f"Created new GRB target: ID={tar_id}, {grb.grb_id} at "
                    f"RA={grb.ra:.3f}, Dec={grb.dec:.3f}, Error={grb.error_box:.3f}°")
 
-        # Add raw GCN packet data
+        # Add raw GCN packet data to grb_gcn table
         self._add_gcn_raw_packet(cursor, grb, grb_id_int)
 
         conn.commit()
@@ -1112,7 +1114,7 @@ class GrbDaemon(Device, DeviceConfig):
             packet_data[4] = int(grb.dec * 10000) if not math.isnan(grb.dec) else 0
             packet_data[5] = int(grb.error_box * 10000) if not math.isnan(grb.error_box) else 0
 
-            # Use PostgreSQL array type
+            # Insert into grb_gcn table (one entry per received packet), use PostgreSQL array type
             cursor.execute("""
                 INSERT INTO grb_gcn (
                     grb_id, grb_seqn, grb_type, grb_update, grb_update_usec, packet
