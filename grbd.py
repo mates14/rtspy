@@ -569,7 +569,7 @@ class GrbDaemon(Device, DeviceConfig):
         try:
             if state != self.system_state:
                 self.system_state = state
-                logging.info("System state changed to 0x{state:02x}")
+                logging.info(f"System state changed to 0x{state:02x}")
 
                 if state & 0xff == self.system_state_required:
                     logging.info("System ready for GRB observations (ON & NIGHT)")
