@@ -28,7 +28,7 @@ class WatcherDevice(Device, DeviceConfig):
 
     def __init__(self, device_name="WATCH", port=0):
         """Initialize the watcher device."""
-        super().__init__(device_name, DeviceType.SENSOR, port)
+        super().__init__(device_name, DeviceType.LOGD, port)
 
         # Default values for watched device/variable
         self.watch_value = "centrald.sun_alt"  # Default value to watch

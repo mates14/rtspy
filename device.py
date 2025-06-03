@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from value import ValueTime
 from netman import NetworkManager
 from config import DeviceConfig
+from constants import DeviceType
 
 
 class Device(DeviceConfig):
@@ -66,6 +67,30 @@ class Device(DeviceConfig):
     WR_HUMIDITY = 0x00400000
     WR_CLOUD = 0x00800000
 
+    # Device type to default name mapping
+    DEVICE_TYPE_DEFAULTS = {
+        DeviceType.SERVERD: "centrald",
+        DeviceType.MOUNT: "t0",
+        DeviceType.CCD: "t0",
+        DeviceType.DOME: "d0",
+        DeviceType.WEATHER: "weather",
+        DeviceType.ROTATOR: "r0",
+        DeviceType.PHOT: "p0",
+        DeviceType.PLAN: "plan",
+        DeviceType.GRB: "grb",
+        DeviceType.FOCUS: "f0",
+        DeviceType.MIRROR: "m0",
+        DeviceType.CUPOLA: "cup0",
+        DeviceType.FW: "w0",
+        DeviceType.SENSOR: "s0",
+        DeviceType.EXECUTOR: "exec",
+        DeviceType.IMGPROC: "imgp",
+        DeviceType.SELECTOR: "sel",
+        DeviceType.HTTPD: "httpd",
+        DeviceType.LOGD: "logd",
+        DeviceType.SCRIPTOR: "script"
+    }
+
     @classmethod
     def get_instance(cls):
         """Get the singleton device instance."""
@@ -80,6 +105,9 @@ class Device(DeviceConfig):
         if Device._instance is not None:
             logging.warning("Creating multiple Device instances is not recommended")
         Device._instance = self
+
+        if device_name is None:
+            device_name = self.DEVICE_TYPE_DEFAULTS.get(device_type, f"DEV{device_type}")
 
         self.device_name = device_name
         self.device_type = device_type
