@@ -232,7 +232,7 @@ class GrbDaemon(Device, DeviceConfig):
 
         # Create RTS2 values for monitoring
         self._create_values()
-    
+
         # keep record of centrald/system state
         self.system_state = None
         self.trigger_ready = False
@@ -734,6 +734,9 @@ class GrbDaemon(Device, DeviceConfig):
 
             logging.debug(f"No exact trigger match, searching for GRBs within 15 minutes of {grb.detection_time}")
 
+            # Convert grb.detection_time to proper type for database comparison
+            detection_timestamp = float(grb.detection_time)
+
             cursor.execute("""
                 SELECT g.tar_id, g.grb_id, g.grb_ra, g.grb_dec, g.grb_errorbox,
                        g.grb_date, t.tar_name, EXTRACT(EPOCH FROM g.grb_date) as epoch_time
@@ -742,7 +745,7 @@ class GrbDaemon(Device, DeviceConfig):
                 WHERE ABS(EXTRACT(EPOCH FROM g.grb_date) - %s) < %s
                   AND g.grb_is_grb = true
                 ORDER BY ABS(EXTRACT(EPOCH FROM g.grb_date) - %s)
-            """, (grb.detection_time, time_window, grb.detection_time))
+            """, (detection_timestamp, time_window, detection_timestamp))
 
             time_candidates = cursor.fetchall()
 
@@ -758,17 +761,25 @@ class GrbDaemon(Device, DeviceConfig):
                 (cand_tar_id, cand_grb_id, cand_ra, cand_dec, cand_errorbox,
                  cand_date, cand_name, cand_epoch) = candidate
 
-                time_diff = abs(grb.detection_time - cand_epoch)
+                # Convert decimal.Decimal to float for calculations
+                cand_epoch_float = float(cand_epoch) if cand_epoch is not None else 0.0
+                time_diff = abs(detection_timestamp - cand_epoch_float)
+
                 logging.debug(f"Candidate {cand_name} (trigger {cand_grb_id}): {time_diff:.1f}s apart")
+
+                # Convert coordinates to float if they're Decimal
+                cand_ra_float = float(cand_ra) if cand_ra is not None else float('nan')
+                cand_dec_float = float(cand_dec) if cand_dec is not None else float('nan')
+                cand_error_float = float(cand_errorbox) if cand_errorbox is not None else float('nan')
 
                 # If both have valid coordinates, check compatibility
                 if (self._is_valid_coordinates(grb.ra, grb.dec) and
-                    self._is_valid_coordinates(cand_ra, cand_dec)):
+                    self._is_valid_coordinates(cand_ra_float, cand_dec_float)):
 
                     # Calculate position difference with proper error combination
                     compatible = self._are_positions_compatible(
                         grb.ra, grb.dec, grb.error_box,
-                        cand_ra, cand_dec, cand_errorbox
+                        cand_ra_float, cand_dec_float, cand_error_float
                     )
 
                     if compatible:
@@ -784,7 +795,7 @@ class GrbDaemon(Device, DeviceConfig):
                     logging.info(f"GRB {grb.grb_id} (no coordinates) matches {cand_name} by time ({time_diff:.1f}s)")
                     return self._link_to_existing_target(cursor, conn, grb, grb_id_int, candidate)
 
-                elif not self._is_valid_coordinates(cand_ra, cand_dec):
+                elif not self._is_valid_coordinates(cand_ra_float, cand_dec_float):
                     # Candidate has no valid coordinates, link if this one does
                     if self._is_valid_coordinates(grb.ra, grb.dec):
                         logging.info(f"GRB {grb.grb_id} provides coordinates for existing target {cand_name}")
@@ -797,15 +808,15 @@ class GrbDaemon(Device, DeviceConfig):
         except Exception as e:
             logging.error(f"Error adding GRB to database: {e}")
             logging.exception("Detailed error:")
-            if conn:
+            if 'conn' in locals():
                 try:
                     conn.rollback()
                 except:
                     pass
             return None
         finally:
-            # FIXED: Always close connection
-            if conn:
+            # Always close connection
+            if 'conn' in locals():
                 try:
                     conn.close()
                 except:
@@ -857,21 +868,26 @@ class GrbDaemon(Device, DeviceConfig):
         """Update existing target for the same trigger ID."""
         (existing_tar_id, existing_error, existing_ra, existing_dec, existing_name) = existing
 
+        # Convert existing values to float to avoid Decimal issues
+        existing_ra_float = float(existing_ra) if existing_ra is not None else float('nan')
+        existing_dec_float = float(existing_dec) if existing_dec is not None else float('nan')
+        existing_error_float = float(existing_error) if existing_error is not None else float('nan')
+
         logging.info(f"Updating existing target {existing_name} (ID: {existing_tar_id}) for trigger {grb.grb_id}")
 
         # Determine if we should update the target position
         should_update_position = False
         update_reason = ""
 
-        if not self._is_valid_coordinates(existing_ra, existing_dec):
+        if not self._is_valid_coordinates(existing_ra_float, existing_dec_float):
             if self._is_valid_coordinates(grb.ra, grb.dec):
                 should_update_position = True
                 update_reason = "adding first valid coordinates"
         elif self._is_valid_coordinates(grb.ra, grb.dec):
-            if (existing_error is None or math.isnan(existing_error) or
-                (not math.isnan(grb.error_box) and grb.error_box < existing_error)):
+            if (math.isnan(existing_error_float) or
+                (not math.isnan(grb.error_box) and grb.error_box < existing_error_float)):
                 should_update_position = True
-                update_reason = f"better accuracy: {existing_error:.3f}° -> {grb.error_box:.3f}°"
+                update_reason = f"better accuracy: {existing_error_float:.3f}° -> {grb.error_box:.3f}°"
 
         # Update target position if warranted
         if should_update_position:
@@ -889,14 +905,18 @@ class GrbDaemon(Device, DeviceConfig):
                 grb_is_grb, grb_date, grb_last_update, grb_errorbox
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, to_timestamp(%s), to_timestamp(%s), %s)
         """, (existing_tar_id, grb_id_int, grb.sequence_num, grb.grb_type,
-              grb.ra, grb.dec, grb.is_grb, grb.detection_time,
+              grb.ra, grb.dec, grb.is_grb, float(grb.detection_time),
               time.time(), grb.error_box))
 
         # Add raw packet data
         self._add_gcn_raw_packet(cursor, grb, grb_id_int)
 
         conn.commit()
-        conn.close()
+
+        # Update statistics
+        with self._stats_lock:
+            self.targets_updated_today.value += 1
+
         return existing_tar_id
 
 
@@ -991,8 +1011,8 @@ class GrbDaemon(Device, DeviceConfig):
             INSERT INTO targets (
                 tar_id, type_id, tar_name, tar_ra, tar_dec,
                 tar_enabled, tar_comment, tar_priority, tar_bonus, tar_bonus_time
-            ) VALUES (%s, 'G', %s, %s, %s, %s, %s, 100, 100, NULL)
-        """, (tar_id, target_name, grb.ra, grb.dec, tar_enabled, comment))
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (tar_id, 'G', target_name, grb.ra, grb.dec, tar_enabled, comment, 100, 100, None))
 
         # Insert into grb table
         cursor.execute("""
@@ -1001,7 +1021,7 @@ class GrbDaemon(Device, DeviceConfig):
                 grb_is_grb, grb_date, grb_last_update, grb_errorbox
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, to_timestamp(%s), to_timestamp(%s), %s)
         """, (tar_id, grb_id_int, grb.sequence_num, grb.grb_type,
-              grb.ra, grb.dec, grb.is_grb, grb.detection_time,
+              grb.ra, grb.dec, grb.is_grb, float(grb.detection_time),
               time.time(), grb.error_box))
 
         logging.info(f"Created new GRB target: ID={tar_id}, {grb.grb_id} at "
@@ -1011,7 +1031,11 @@ class GrbDaemon(Device, DeviceConfig):
         self._add_gcn_raw_packet(cursor, grb, grb_id_int)
 
         conn.commit()
-        conn.close()
+
+        # Update statistics
+        with self._stats_lock:
+            self.targets_created_today.value += 1
+
         return tar_id
 
 
