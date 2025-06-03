@@ -74,7 +74,7 @@ class GcnKafkaConsumer:
                     'gcn.notices.svom.voevent.grm',
                     'gcn.notices.svom.voevent.eclairs',
                     'gcn.notices.svom.voevent.mxt',
-                    'gcn.notices.ep.wxt.alert',
+                    'gcn.notices.einstein_probe.wxt.alert',
                     # 'gcn.classic.text.LVC_INITIAL',
                     # 'gcn.classic.text.LVC_UPDATE',
 
