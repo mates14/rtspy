@@ -592,11 +592,7 @@ class AuthCommands:
             logging.debug(f"authorize request to {centrald_conn.name} for device {device_id}, key {key}")
 
             # Always queue the command - authorization is not time-critical
-            success = centrald_conn.send_command(
-                f"authorize {device_id} {key}",
-                callback=None,
-                queue_if_busy=True  # Always queue
-            )
+            success = centrald_conn.send_command(f"authorize {device_id} {key}")
 
             if not success:
                 logging.warning(f"Failed to queue authorize command for device {device_id}")
