@@ -1,18 +1,20 @@
 import logging
-from typing import Dict, List, Any, Callable, Optional, Tuple
+from typing import List, Any, Tuple
 from constants import ConnectionState, DevTypes
 
 class CommandRegistry:
     """
-    A simple registry for command handlers.
+    A registry for command handlers that supports multiple handlers per command.
 
-    This registry works with command handler groups rather than individual handlers.
+    This registry works with command handler groups and allows multiple handlers
+    to be registered for the same command. All handlers are executed in registration
+    order, with only the last handler sending the response.
     """
 
     def __init__(self):
         """Initialize the command registry."""
-        self.handlers = []  # List of handler groups
-        self.command_map = {}  # Command -> handler group
+        self.handlers = []  # List of handler groups (for backward compatibility)
+        self.command_handlers = []  # List of (command, handler) tuples
 
     def register_handler(self, handler):
         """
@@ -23,25 +25,41 @@ class CommandRegistry:
         """
         self.handlers.append(handler)
 
-        # Map each command to this handler
+        # Register each command from this handler
         for cmd in handler.get_commands():
-            if cmd in self.command_map:
-                logging.warning(f"Overwriting existing handler for command '{cmd}'")
-            self.command_map[cmd] = handler
+            self.command_handlers.append((cmd, handler))
+            logging.debug(f"Registered handler {handler.__class__.__name__} for command '{cmd}'")
 
         logging.debug(f"Registered handler for commands: {', '.join(handler.get_commands())}")
 
+    def find_handlers(self, command: str) -> List:
+        """
+        Find all handlers for a command.
+
+        Args:
+            command: Command to find handlers for
+
+        Returns:
+            List of handlers that can handle this command
+        """
+        handlers = []
+        for cmd, handler in self.command_handlers:
+            if cmd == command:
+                handlers.append(handler)
+        return handlers
+
     def find_handler(self, command: str):
         """
-        Find the handler for a command.
+        Find the first handler for a command (backward compatibility).
 
         Args:
             command: Command to find handler for
 
         Returns:
-            Handler or None if not found
+            First handler or None if not found
         """
-        return self.command_map.get(command)
+        handlers = self.find_handlers(command)
+        return handlers[0] if handlers else None
 
     def can_handle(self, command: str) -> bool:
         """
@@ -53,11 +71,11 @@ class CommandRegistry:
         Returns:
             True if command can be handled, False otherwise
         """
-        return command in self.command_map
+        return len(self.find_handlers(command)) > 0
 
     def dispatch(self, command: str, conn, params: str) -> Tuple[bool, Any]:
         """
-        Dispatch a command to its handler.
+        Dispatch a command to all its handlers.
 
         Args:
             command: Command to dispatch
@@ -67,21 +85,50 @@ class CommandRegistry:
         Returns:
             Tuple of (success, result)
         """
-        handler = self.find_handler(command)
-        if not handler:
+        handlers = self.find_handlers(command)
+        if not handlers:
             logging.warning(f"No handler for command '{command}'")
             return False, f"Unknown command: {command}"
 
-        try:
-            result = handler.handle(command, conn, params)
-            return True, result
-        except Exception as e:
-            logging.error(f"Error handling command '{command}': {e}", exc_info=True)
-            return False, f"Error handling command {command}: {str(e)}"
+        results = []
+        success_count = 0
+
+        for i, handler in enumerate(handlers):
+            is_last_handler = (i == len(handlers) - 1)
+
+            try:
+                result = handler.handle(command, conn, params)
+                results.append((handler.__class__.__name__, result))
+
+                if result:
+                    success_count += 1
+
+                logging.debug(f"Handler {handler.__class__.__name__} for '{command}': {result}")
+
+            except Exception as e:
+                logging.error(f"Error in {handler.__class__.__name__} handling command '{command}': {e}", exc_info=True)
+                results.append((handler.__class__.__name__, f"Error: {str(e)}"))
+
+                # If this is the last handler and it failed, send error response
+                if is_last_handler and self.needs_response(command):
+                    return False, f"Error handling command {command}: {str(e)}"
+
+        # Determine overall success (at least one handler succeeded)
+        overall_success = success_count > 0
+
+        # Return result summary
+        if overall_success:
+            successful_results = [r[1] for r in results if r[1] and not str(r[1]).startswith("Error")]
+            return True, successful_results[-1] if successful_results else True
+
+        failed_results = [r[1] for r in results]
+        return False, f"All handlers failed: {failed_results}"
 
     def needs_response(self, command: str) -> bool:
         """
         Check if a command needs a response.
+
+        Uses the first handler's response requirement for backward compatibility.
 
         Args:
             command: Command to check
@@ -101,9 +148,12 @@ class CommandRegistry:
         Get all registered command names.
 
         Returns:
-            List of command names
+            List of unique command names
         """
-        return list(self.command_map.keys())
+        commands = set()
+        for cmd, _ in self.command_handlers:
+            commands.add(cmd)
+        return list(commands)
 
 
 class ProtocolCommands:
@@ -195,7 +245,6 @@ class ProtocolCommands:
         if is_bop:
             if len(parts) < 2:
                 logging.warning(f"Invalid BOP format: {params}")
-                imessage_idxi = 2
                 return False
 
             bop_state = int(parts[1])
@@ -260,12 +309,10 @@ class ProtocolCommands:
         # Check if any component has registered interest in this value
         if hasattr(conn,'remote_device_name'):
             key = f"{conn.remote_device_name}.{value_name}"
-        #    logging.debug(f"Received update on {key}")
 
             if hasattr(self.network_manager, 'value_interests') and key in self.network_manager.value_interests:
                 # Call the registered callback with the value
                 self.network_manager.value_interests[key](value_data)
-        #        logging.debug(f"Dispatched value update for {key}")
 
         # Value commands don't expect response
         conn.command_in_progress = False
@@ -333,9 +380,9 @@ class ProtocolCommands:
         if value_op == "=":
             result = self.network_manager.handle_value_change_request(conn, value_name, value_data)
             return result
-        else:
-            logging.warning(f"Operand '{value_op}' not implemented in handle_x_command()")
-            return False
+
+        logging.warning(f"Operand '{value_op}' not implemented in handle_x_command()")
+        return False
 
     def handle_message(self, conn, params):
         """Handle message command (system messages)."""
@@ -463,7 +510,7 @@ class ProtocolCommands:
         conn.command_in_progress = False
         return True
 
-    def handle_ignore(self, conn, params):
+    def handle_ignore(self, conn, _):
         """Handle commands that require no action."""
         conn.command_in_progress = False
         return True
@@ -514,8 +561,8 @@ class AuthCommands:
         return False
 
     def handle_auth(self, conn, params):
-        """Handle authentication command."""
-        """The client sends this to request access, it attaches a key that is to be checked by the centrald"""
+        """Handle authentication command. The client sends this to request
+        access, it attaches a key that is to be checked by the centrald"""
         # Parse auth parameters
         auth_parts = params.split()
         if len(auth_parts) < 3:
@@ -534,29 +581,43 @@ class AuthCommands:
 
         # Log with entity info if we have it
         conn_desc = self.network_manager._get_entity_description(device_id)
-        logging.debug(f"Auth request from {conn_desc} (id:{device_id})") #: {entity['name']} (ID: {device_id})")
+        logging.debug(f"Auth request from {conn_desc} (id:{device_id})")
 
-        # Find appropriate centrald connection to verify this authorization
-        centrald_conn = self.network_manager.connection_manager.get_associated_centrald_connection()
+        # Find centrald connection - accept even non-authenticated ones
+        centrald_conn = self.network_manager.connection_manager.get_associated_centrald_connection(require_auth=False)
 
         if centrald_conn:
-            # Request key check from centrald
+            # We have some centrald connection - queue the authorize command
+            # The command queue will handle the case where centrald isn't ready yet
             logging.debug(f"authorize request to {centrald_conn.name} for device {device_id}, key {key}")
-            self.network_manager.send_command(
+
+            # Always queue the command - authorization is not time-critical
+            success = centrald_conn.send_command(
                 centrald_conn.id,
-                f"authorize {device_id} {key}")
-            # No immediate response - wait for centrald verification
+                f"authorize {device_id} {key}",
+                queue_if_busy=True  # Always queue
+            )
+
+            if not success:
+                logging.warning(f"Failed to queue authorize command for device {device_id}")
+                # Fall back to default authorization
+                self.network_manager._complete_client_authorization(conn)
 
         else:
-            # No centrald connection available, assume success for testing
-            logging.warning("No auth handler available, authorizing by default")
-            self.network_manager._complete_client_authorization(conn)
+            # No centrald connection at all - and someone is connecting to us?
+            # This should never happen in a properly configured system
+            logging.error("CRITICAL: No centrald connection when client requests authorization")
+            logging.error("This indicates a serious system configuration problem")
 
-        # Don't send immediate response - wait for verification
+            # Cleanly reject the client
+            self._send_auth_error(conn, "Authorization service not available")
+
+        # Don't send immediate response - wait for centrald verification or queue processing
         conn.command_in_progress = False
         return True
 
-    def _handle_auth_verification(self, centrald_conn, client_id, success, code, msg):
+#    def _handle_auth_verification(self, centrald_conn, client_id, success, code, msg):
+    def _handle_auth_verification(self, _, client_id, success, __, msg):
         """Handle response from centrald for authorization verification."""
         # Find the client connection directly from ConnectionManager
         client_conn = self.network_manager.connection_manager.get_connection(client_id)
@@ -574,6 +635,11 @@ class AuthCommands:
             logging.error(f"Centrald rejected authorization for client {client_id}: {msg}")
             client_conn.update_state(ConnectionState.AUTH_FAILED, "Authorization failed")
 
+    def _send_auth_error(self, conn, message):
+        """Send authentication error and close connection cleanly."""
+        conn.update_state(ConnectionState.AUTH_FAILED, message)
+        self.network_manager._send_error_response(conn, message, code=-1)
+        # Connection will be closed by client or timeout
 
     def handle_auth_response(self, conn, params):
         """Handle authentication response commands that start with 'A'."""
@@ -591,19 +657,19 @@ class AuthCommands:
         if subcommand == "registered_as":
             # This is "A registered_as ID" format
             return self.handle_registered_as(conn, f"registered_as {subparams}")
-        elif subcommand == "authorization_ok":
+        if subcommand == "authorization_ok":
             # This is "A authorization_ok ID" format
             return self.handle_authorization_ok(conn, f"A {subcommand} {subparams}")
-        elif subcommand == "authorization_failed":
+        if subcommand == "authorization_failed":
             # This is "A authorization_failed ID" format
             # Implement this handler if needed
             logging.warning(f"Authorization failed: {subparams}")
             conn.command_in_progress = False
             return True
-        else:
-            logging.warning(f"Unknown A-prefixed command: {subcommand} {subparams}")
-            conn.command_in_progress = False
-            return False
+
+        logging.warning(f"Unknown A-prefixed command: {subcommand} {subparams}")
+        conn.command_in_progress = False
+        return False
 
     def handle_registered_as(self, conn, line):
         """Handle the registration response from centrald."""
@@ -656,8 +722,8 @@ class AuthCommands:
         logging.debug(f"Processing key response: {line}")
         parts = line.split()
 
-        if len(parts) >= 2: # and parts[0] == "authorization_key":
-            device_name = parts[0]
+        if len(parts) >= 2:
+            #device_name = parts[0]
             auth_key = int(parts[1])
 
             # Store the key
@@ -665,19 +731,7 @@ class AuthCommands:
             logging.debug(f"Our device ({conn.device_id}) key ({auth_key}) stored")
 
             # Get our centrald ID
-            device_id = conn.device_id
-
-# no need to authenticate the just-received key
-#            if device_id > 0:
-#                logging.debug(f"Sending authorize command with ID {device_id} and key {auth_key}")
-#                # Send authorization request
-#                self.send_command(
-#                    conn.id,
-#                    f"authorize {conn.device_id} {auth_key}",
-#                    self._handle_authorize_response
-#                )
-#            else:
-#                logging.error("Could not determine centrald ID for authorization")
+            #device_id = conn.device_id
 
         conn.command_in_progress = False
         return True
