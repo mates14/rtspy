@@ -1,121 +1,123 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
+"""
+RTS2 Python Filter Wheel Base Class
+
+This module provides the base Filterd class that implements the RTS2 filter wheel
+interface. Like the focuser, it can be used as a standalone base or as a mixin
+for multi-function devices.
+"""
 
 import time
 import logging
-import threading
+from typing import Dict, Any, List, Optional
+from abc import ABC, abstractmethod
 
-from typing import Any, Dict
-from value import (
-    ValueSelection, ValueInteger, ValueBool, ValueString, ValueTime
-)
 from device import Device
 from config import DeviceConfig
-from constants import DeviceType, ConnectionState
-from commands import CommandRegistry
+from constants import DeviceType
+from value import ValueSelection, ValueInteger, ValueString, ValueTime
 
 
-class Filterd(Device, DeviceConfig):
-    """Base class for filter wheel devices.
+class FilterMixin(DeviceConfig):
+    """
+    Mixin class that provides complete filter wheel functionality.
 
-    This class implements the main functionality of a filter wheel device,
-    providing a common interface for different filter wheel implementations.
+    This can be used either as a standalone base (for pure filter wheels)
+    or as a mixin for multi-function devices. Includes all filter control,
+    state management, and command handling.
     """
 
-    # Device-specific status/state bits
+    # Filter wheel state constants
     FILTERD_MASK = 0x002
     FILTERD_IDLE = 0x000
     FILTERD_MOVE = 0x002
 
-    @classmethod
-    def setup_config(self, config):
-        """Register Filterd-specific command line options."""
-        # super().setup_config(config)
-        config.add_argument('-F', '--filters', help='Filter names (colon-separated)')
-        config.add_argument('--default-filter', help='Default filter', default=0)
-        config.add_argument('--daytime-filter', help='Daytime filter', default=0)
+    def setup_filter_config(self, config):
+        """Register filter wheel-specific configuration arguments."""
+        config.add_argument('-F', '--filters',
+                          help='Filter names (colon-separated)')
+        config.add_argument('--default-filter',
+                          help='Default filter', default=0)
+        config.add_argument('--daytime-filter',
+                          help='Daytime filter', default=0)
 
-    def apply_config(self, config: Dict[str, Any]):
-        """Process arguments for this specific device."""
-        super().apply_config(config)
-        self.set_filters(config.get('filters', 'J:K:L'))
-        print(config)
+    def apply_filter_config(self, config: Dict[str, Any]):
+        """Apply filter wheel-specific configuration."""
+        # Process filters string
+        filters_str = config.get('filters', 'J:H:K')  # default
+        self.filter = ValueSelection("filter", "used filter", writable=True)
+        self.set_filters(self.filter, filters_str)
 
-    def __init__(self, device_name="W0", port=0):
-        """Initialize the filter wheel device."""
-
-        super().__init__(device_name, DeviceType.FW, port)
-
-        # Create filter selection value
-        self.filter = ValueSelection("filter", "used filter")
-        self.filter.set_writable()
-
-        # Default filter (automatically set at script end)
+        # Default and daytime filters
         self.default_filter = None
+        default_filter_arg = config.get('default_filter')
+        if default_filter_arg:
+            self.default_filter = ValueSelection("def_filter", "default filter", writable=True)
+            self.set_filters(self.default_filter, filters_str)
+            self.default_filter.set_value_char_arr(default_filter_arg)
+
         self.arg_default_filter = None
+        daytime_filter_arg = config.get('daytime_filter')
+        if daytime_filter_arg:
+            self.daytime_filter = ValueSelection("day_filter", "daytime filter", writable=True)
+            self.set_filters(self.daytime_filter, filters_str)
+            self.daytime_filter.set_value_char_arr(daytime_filter_arg)
 
-        # Daytime filter (automatically set during day)
-        self.daytime_filter = None
-        self.arg_daytime_filter = None
-
+        # CCD integration
         self.associated_ccd = None
         self.ccd_exposing = False
 
+        # Movement state
         self.pending_filter_connection = None
         self.movement_in_progress = False
+        self._movement_start_time = None
+        self._target_filter = None
 
-    def _register_device_commands(self):
-        """Register device command handlers with the network."""
-        # Create and register the device command handler from parent
-        super()._register_device_commands()
+        # Store arguments for later processing
+        self.arg_default_filter = config.get('default_filter')
+        self.arg_daytime_filter = config.get('daytime_filter')
 
+    def is_filter_moving(self) -> bool:
+        """Check if filter wheel is currently moving."""
+        return bool(self._state & self.FILTERD_MOVE)
+
+    def on_value_changed_from_client(self, value, old_value, new_value):
+        """Handle value changes from network clients."""
+        try:
+            if value.name == "filter":
+                return self.on_filter_changed(old_value, new_value)
+        except Exception as e:
+            logging.error(f"Error handling filter value change: {e}")
+            return -1
+        return 0
+
+    def filter_idle(self):
+        """Filter wheel-specific idle processing."""
+        # Override in subclasses if periodic status checking is needed
+        return None
+
+    def _register_filter_commands(self):
+        """Register filter-specific command handlers with the network."""
         # Create and register filter-specific command handler
         filter_handler = FilterCommands(self)
         self.network.command_registry.register_handler(filter_handler)
 
-    def process_option(self, option, arg):
-        """Process command line options."""
-        if option == 'F':
-            return self.set_filters(arg)
-        elif option == 'default-filter':
-            self.default_filter = ValueSelection("def_filter", "default filter")
-            self.default_filter.set_writable()
-            self.default_filter.rts2_type |= 0x0080_0000  # AUTOSAVE
-            self.arg_default_filter = arg
-            return 0
-        elif option == 'daytime-filter':
-            self.daytime_filter = ValueSelection("day_filter", "daytime filter")
-            self.daytime_filter.set_writable()
-            self.daytime_filter.rts2_type |= 0x0080_0000  # AUTOSAVE
-            self.arg_daytime_filter = arg
-            return 0
-        return -1  # Option not recognized
 
-    def init_values(self):
-        """Initialize values after options are processed."""
-        if self.default_filter and self.arg_default_filter:
-            self.default_filter.copy_sel(self.filter)
-            self.default_filter.set_value_char_arr(self.arg_default_filter)
-
-        if self.daytime_filter and self.arg_daytime_filter:
-            self.daytime_filter.copy_sel(self.filter)
-            self.daytime_filter.set_value_char_arr(self.arg_daytime_filter)
-
-    def info(self):
-        """Update device information."""
+    def filter_info_update(self):
+        """Update filter information from hardware."""
         # Update filter position from hardware
         current_filter = self.get_filter_num()
         if current_filter != self.filter.value:
             self.filter.value = current_filter
-#        self.infotime.value=time.time()
 
-    def script_ends(self):
-        """Called when a script ends."""
+    def script_ends_filter(self):
+        """Called when a script ends - handle filter-specific cleanup."""
         if self.default_filter:
-            self.set_filter_num_mask(self.default_filter.value)
+            return self.set_filter_num_mask(self.default_filter.value)
         return 0
 
-    def on_state_changed(self, old_state, new_state, message):
-        """Handle device state changes."""
+    def on_filter_state_changed(self, old_state, new_state, message):
+        """Handle device state changes for filter-specific logic."""
         logging.debug(f"Filter state changed from {old_state:x} to {new_state:x}: {message}")
 
         # Check for day/night transition
@@ -126,6 +128,7 @@ class Filterd(Device, DeviceConfig):
         #except AttributeError:
         #    pass
 
+    # @abstractmethod could be... 
     def set_filter_num(self, new_filter):
         """
         Set filter number (position).
@@ -141,7 +144,7 @@ class Filterd(Device, DeviceConfig):
         """
         return 0
 
-    def get_filter_num(self):
+    def get_filter_num(self) -> int:
         """
         Get current filter number (position).
 
@@ -150,7 +153,7 @@ class Filterd(Device, DeviceConfig):
         Returns:
             Current filter position
         """
-        return self.filter.value
+        return self.filter.value if self.filter.value is not None else 0
 
     def on_filter_changed(self, old_value, new_value):
         """
@@ -178,13 +181,14 @@ class Filterd(Device, DeviceConfig):
 
         # Mark that movement is in progress
         self.movement_in_progress = True
+        self._movement_start_time = time.time()
 
         # Actually move the filter
         ret = self.set_filter_num(new_filter)
 
         if ret == 0:
             # Record the target filter (will be used for completion)
-            self.target_filter = new_filter
+            self._target_filter = new_filter
             # Do NOT update state or values yet - wait for movement completion
             # Return success to caller
             return ret
@@ -201,9 +205,15 @@ class Filterd(Device, DeviceConfig):
             return
 
         # Update the filter value
-        if hasattr(self, 'target_filter'):
-            self.filter.value = self.target_filter
-            del self.target_filter
+        if hasattr(self, '_target_filter') and self._target_filter is not None:
+            self.filter.value = self._target_filter
+            self._target_filter = None
+
+        # Record movement end time
+        if self._movement_start_time:
+            duration = time.time() - self._movement_start_time
+            logging.info(f"Filter movement completed in {duration:.1f}s to position {self.get_filter_num()}")
+            self._movement_start_time = None
 
         # Clear the movement flag
         self.movement_in_progress = False
@@ -227,7 +237,7 @@ class Filterd(Device, DeviceConfig):
         """
         return -1
 
-    def set_filters(self, filters_str):
+    def set_filters(self, filter_selval, filters_str):
         """
         Set filter names from a string.
 
@@ -264,9 +274,9 @@ class Filterd(Device, DeviceConfig):
             return -1
 
         # Clear and add all filters
-        self.filter.clear_selection()
+        filter_selval.clear_selection()
         for f in filter_list:
-            self.filter.add_sel_val(f)
+            filter_selval.add_sel_val(f)
 
         return 0
 
@@ -282,6 +292,12 @@ class Filterd(Device, DeviceConfig):
         """Get filter name from number."""
         return self.filter.get_sel_name(num)
 
+    def get_filter_name(self, filter_num: Optional[int] = None) -> str:
+        """Get filter name by number."""
+        if filter_num is None:
+            filter_num = self.get_filter_num()
+        return self.filter.get_sel_name(filter_num)
+
     def send_filter_names(self):
         """Send filter names to clients."""
         self.network.update_meta_informations(self.filter)
@@ -292,7 +308,6 @@ class Filterd(Device, DeviceConfig):
         #if (self._state & self.FILTERD_MASK) == self.FILTERD_MOVE:
         #    return True
         return False
-
 
     def set_associated_ccd(self, ccd_name):
         """Set the associated CCD device for state monitoring."""
@@ -376,7 +391,7 @@ class FilterCommands:
 
             # Set filter - don't complete the command until movement is done
             # Store the connection to respond to when movement completes
-            self.filter_device.pending_command_conn = conn
+            self.filter_device.pending_filter_connection = conn
 
             # Start the filter movement
             ret = self.filter_device.set_filter_num_mask(filter_num)
@@ -385,6 +400,7 @@ class FilterCommands:
                 # Error - send error response immediately
                 self.filter_device.network._send_error_response(
                     conn, f"Error setting filter to position {filter_num}")
+                self.filter_device.pending_filter_connection = None
                 return False
 
             # No response sent yet - it will be sent when movement completes
@@ -394,7 +410,6 @@ class FilterCommands:
             self.filter_device.network._send_error_response(
                 conn, f"Invalid filter number: {params}")
             return False
-
 
     def handle_home(self, conn, params):
         """Handle 'home' command to home the filter wheel."""
@@ -432,7 +447,8 @@ class FilterCommands:
             )
 
             # Call script_ends to perform any cleanup
-            self.filter_device.script_ends()
+            if hasattr(self.filter_device, 'script_ends_filter'):
+                self.filter_device.script_ends_filter()
 
             # Send OK response
             self.filter_device.network._send_ok_response(conn)
@@ -465,7 +481,9 @@ class FilterCommands:
         """Handle 'script_ends' command to notify device that script execution has ended."""
         try:
             # Call script_ends method on the device
-            ret = self.filter_device.script_ends()
+            ret = 0
+            if hasattr(self.filter_device, 'script_ends_filter'):
+                ret = self.filter_device.script_ends_filter()
 
             if ret == 0:
                 # Success
@@ -481,3 +499,79 @@ class FilterCommands:
             logging.error(f"Error handling script_ends command: {e}")
             self.filter_device.network._send_error_response(conn, f"Error: {str(e)}")
             return False
+
+
+class Filterd(Device, FilterMixin):
+    """
+    RTS2 Filter Wheel Device - standalone filter wheel implementation.
+
+    This class combines the Device base with FilterMixin to create
+    a complete filter wheel device.
+    """
+
+    def setup_config(self, config):
+        """Set up filter wheel configuration."""
+        # super().setup_config(config)
+        self.setup_filter_config(config)
+
+    def __init__(self, device_name="W0", port=0):
+        """Initialize filter wheel device."""
+        super().__init__(device_name, DeviceType.FW, port)
+
+    def apply_config(self, config: Dict[str, Any]):
+        """Apply configuration."""
+        super().apply_config(config)
+        self.apply_filter_config(config)
+
+    def _register_device_commands(self):
+        """Register device command handlers with the network."""
+        # Create and register the device command handler from parent
+        super()._register_device_commands()
+
+        # Register filter-specific commands
+        self._register_filter_commands()
+
+    def start(self):
+        """Start the filter wheel device."""
+        super().start()
+
+        logging.info(f"Filter wheel {self.device_name} started with {self.filter.sel_size()} positions")
+
+        # Set initial state
+        self.set_state(self.FILTERD_IDLE, "Filter wheel ready")
+
+    def info(self):
+        """Update filter wheel information - override in subclasses."""
+        super().info()
+        self.filter_info_update()
+
+    def idle(self):
+        """Device idle processing."""
+        # Call parent idle first
+        result = super().idle()
+
+        # Then filter-specific idle
+        filter_result = self.filter_idle()
+
+        # Return the most restrictive timing
+        if filter_result is not None:
+            if result is None:
+                return filter_result
+            else:
+                return min(result, filter_result)
+        return result
+
+    def script_ends(self):
+        """Called when a script ends."""
+        result = super().script_ends()
+        filter_result = self.script_ends_filter()
+
+        # Return error if either failed
+        if result != 0:
+            return result
+        return filter_result
+
+    def on_state_changed(self, old_state, new_state, message):
+        """Handle device state changes."""
+        super().on_state_changed(old_state, new_state, message)
+        self.on_filter_state_changed(old_state, new_state, message)
