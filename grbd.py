@@ -627,7 +627,7 @@ class GrbDaemon(Device, DeviceConfig):
             grb_info = None
 
             # Einstein Probe messages are JSON
-            if 'ep' in topic.lower():
+            if 'einstein_probe' in topic.lower():
                 grb_info = self._parse_ep_json(message)
             # The rest goes to the text/XML logic, skip if not parseable
             else:
