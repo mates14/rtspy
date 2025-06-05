@@ -593,8 +593,8 @@ class AuthCommands:
 
             # Always queue the command - authorization is not time-critical
             success = centrald_conn.send_command(
-                centrald_conn.id,
                 f"authorize {device_id} {key}",
+                callback=None,
                 queue_if_busy=True  # Always queue
             )
 
@@ -616,8 +616,7 @@ class AuthCommands:
         conn.command_in_progress = False
         return True
 
-#    def _handle_auth_verification(self, centrald_conn, client_id, success, code, msg):
-    def _handle_auth_verification(self, _, client_id, success, __, msg):
+    def _handle_auth_verification(self, centrald_conn, client_id, success, code, msg):
         """Handle response from centrald for authorization verification."""
         # Find the client connection directly from ConnectionManager
         client_conn = self.network_manager.connection_manager.get_connection(client_id)
