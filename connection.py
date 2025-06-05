@@ -339,7 +339,7 @@ class Connection:
             # Check for commands that can be executed
             try:
                 with self.command_queue_lock:
-                    if not self.pending_command and not self.command_queue.empty():
+                    if not self.pending_command and not self.command_queue.empty(): # and self.state == ConnectionState.AUTH_OK:
                         # Get next command from queue
                         queued_cmd = self.command_queue.get_nowait()
 
@@ -402,7 +402,7 @@ class Connection:
 
         with self.command_queue_lock:
             # Check if a command is already in progress
-            if self.pending_command is not None:
+            if (self.pending_command is not None) or (self.state != ConnectionState.AUTH_OK):
                 if queue_if_busy:
                     # Queue command for later execution
                     queued_cmd = QueuedCommand(command, callback, timeout)
@@ -681,16 +681,18 @@ class ConnectionManager:
                 # Send message
                 conn.send_msg(message)
 
-    def get_associated_centrald_connection(self, device_id=None):
+    def get_associated_centrald_connection(self, device_id=None, require_auth=True):
         """
         Get the centrald connection associated with this device.
 
-        In a single-centrald environment, returns the first authenticated centrald.
+        In a single-centrald environment, returns the first centrald.
         In a multi-centrald environment, returns the specific centrald this device
         is registered with.
 
         Args:
             device_id: Optional device ID to look for a specific association
+            require_auth: If True, only return AUTH_OK centrald connections
+                         If False, return any centrald connection
 
         Returns:
             Connection object or None if not found
@@ -700,14 +702,16 @@ class ConnectionManager:
             if device_id is not None:
                 for conn in self.connections.values():
                     if (conn.type == 'centrald' and
-                        conn.state == ConnectionState.AUTH_OK and
+                        (not require_auth or conn.state == ConnectionState.AUTH_OK) and
                         hasattr(conn, 'associated_devices') and
                         device_id in conn.associated_devices):
                         return conn
 
-            # Otherwise, return first authenticated centrald (single-centrald case)
+            # Otherwise, return first centrald (single-centrald case)
             for conn in self.connections.values():
-                if conn.type == 'centrald' and conn.state == ConnectionState.AUTH_OK:
+                if conn.type == 'centrald':
+                    if require_auth and conn.state != ConnectionState.AUTH_OK:
+                        continue
                     return conn
 
         return None
