@@ -17,6 +17,7 @@ import time
 import threading
 import re
 import math
+import json
 from typing import Dict, Optional, Any, Callable
 from datetime import datetime
 import psycopg2
@@ -73,6 +74,7 @@ class GcnKafkaConsumer:
                     'gcn.notices.svom.voevent.grm',
                     'gcn.notices.svom.voevent.eclairs',
                     'gcn.notices.svom.voevent.mxt',
+                    'gcn.notices.einstein_probe.wxt.alert',
                     # 'gcn.classic.text.LVC_INITIAL',
                     # 'gcn.classic.text.LVC_UPDATE',
 
@@ -291,6 +293,7 @@ class GrbDaemon(Device, DeviceConfig):
         self.maxi_alerts = ValueInteger("maxi_alerts", "MAXI alerts processed", initial=0)
         self.icecube_alerts = ValueInteger("icecube_alerts", "IceCube alerts processed", initial=0)
         self.svom_alerts = ValueInteger("svom_alerts", "SVOM alerts processed", initial=0)
+        self.ep_alerts = ValueInteger("ep_alerts", "Einstein Probe alerts processed", initial=0)
         self.other_alerts = ValueInteger("other_alerts", "Other mission alerts", initial=0)
 
         # === LAST GRB INFORMATION ===
@@ -324,6 +327,10 @@ class GrbDaemon(Device, DeviceConfig):
         self.last_icecube_time = ValueTime("last_icecube", "Time of last IceCube alert")
         self.last_icecube_trigger = ValueString("last_icecube_trigger", "Last IceCube event ID")
         self.last_icecube_coords = ValueRaDec("last_icecube_coords", "Last IceCube position")
+
+        self.last_ep_time = ValueTime("last_ep", "Time of last Einstein Probe alert")
+        self.last_ep_trigger = ValueString("last_ep_trigger", "Last Einstein Probe trigger ID")
+        self.last_ep_coords = ValueRaDec("last_ep_coords", "Last Einstein Probe position")
 
         # === ERROR TRACKING ===
         self.parse_errors = ValueInteger("parse_errors", "GCN message parse errors", initial=0)
@@ -392,6 +399,13 @@ class GrbDaemon(Device, DeviceConfig):
             self.last_icecube_trigger.value = grb_info.grb_id
             if self._is_valid_coordinates(grb_info.ra, grb_info.dec):
                 self.last_icecube_coords.value = (grb_info.ra, grb_info.dec)
+
+        elif mission == 'EINSTEIN_PROBE':
+            self.ep_alerts.value += 1
+            self.last_ep_time.value = current_time
+            self.last_ep_trigger.value = grb_info.grb_id
+            if self._is_valid_coordinates(grb_info.ra, grb_info.dec):
+                self.last_ep_coords.value = (grb_info.ra, grb_info.dec)
 
         else:
             self.other_alerts.value += 1
@@ -610,8 +624,14 @@ class GrbDaemon(Device, DeviceConfig):
             # Update last heartbeat
             self.last_heartbeat.value = self.last_packet_time
 
-            # Try to parse as GRB/transient, skip if not parseable
-            grb_info = self._parse_grb_notice(topic, message)
+            grb_info = None
+
+            # Einstein Probe messages are JSON
+            if 'einstein_probe' in topic.lower():
+                grb_info = self._parse_ep_json(message)
+            # The rest goes to the text/XML logic, skip if not parseable
+            else:
+                grb_info = self._parse_grb_notice(topic, message)
 
             if grb_info:
                 # Got valid transient info - process it
@@ -827,6 +847,14 @@ class GrbDaemon(Device, DeviceConfig):
         try:
             return int(grb_id)
         except (ValueError, TypeError):
+            # Handle Einstein Probe or other non-numeric IDs
+            if grb_id.startswith('EP_'):
+                # Extract timestamp from Einstein Probe ID
+                try:
+                    return int(grb_id[3:])
+                except (ValueError, TypeError):
+                    pass
+
             # If grb_id is not numeric, create a stable hash
             return abs(hash(grb_id)) % 2147483647
 
@@ -847,6 +875,8 @@ class GrbDaemon(Device, DeviceConfig):
 
         # Combined error using RSS (Root Sum of Squares)
         combined_error = math.sqrt(error1**2 + error2**2)
+        # Combined error (spherical triangle is better for large errors)
+        # combined_error = self._calculate_angular_separation(0, error1, error2, 0)
 
         # Add some tolerance for systematic errors
         tolerance = 1.0  # Additional 1 degree tolerance
@@ -854,7 +884,7 @@ class GrbDaemon(Device, DeviceConfig):
 
         compatible = angular_sep <= total_allowed_error
 
-        logging.debug(f"Position compatibility check:")
+        logging.debug( "Position compatibility check:")
         logging.debug(f"  Pos1: ({ra1:.3f}, {dec1:.3f}) ± {error1:.3f}°")
         logging.debug(f"  Pos2: ({ra2:.3f}, {dec2:.3f}) ± {error2:.3f}°")
         logging.debug(f"  Separation: {angular_sep:.3f}°")
@@ -998,6 +1028,8 @@ class GrbDaemon(Device, DeviceConfig):
         grb_time = datetime.fromtimestamp(grb.detection_time)
         if grb.mission == 'ICECUBE':
             target_name = f"IceCube {grb_time.strftime('%y%m%d.%f')[:-3]} trigger #{grb.grb_id}"
+        elif grb.mission == 'EINSTEIN_PROBE':
+            target_name = f"EP {grb_time.strftime('%y%m%d.%f')[:-3]} trigger #{grb.grb_id}"
         else:
             target_name = f"GRB {grb_time.strftime('%y%m%d.%f')[:-3]} GCN #{grb.grb_id}"
 
@@ -1081,8 +1113,6 @@ class GrbDaemon(Device, DeviceConfig):
 
         Uses the haversine formula for spherical coordinates.
         """
-        import math
-
         # Convert to radians
         ra1_rad = math.radians(ra1)
         dec1_rad = math.radians(dec1)
@@ -1328,6 +1358,115 @@ class GrbDaemon(Device, DeviceConfig):
             logging.error(f"Error in enhanced text parsing: {e}")
             return grb
 
+    def _parse_ep_json(self, message: str) -> Optional[GrbTarget]:
+        """
+        Parse Einstein Probe JSON alert message.
+
+        Args:
+            message: JSON message string
+
+        Returns:
+            GrbTarget object or None if parsing fails
+        """
+        try:
+
+            # Parse JSON
+            data = json.loads(message)
+
+            # Create new target
+            grb = GrbTarget()
+            grb.target_id = self.next_target_id
+            self.next_target_id += 1
+
+            # Set mission info
+            grb.mission = 'EINSTEIN_PROBE'
+            grb.grb_type = 210  # Use unique type for Einstein Probe
+            grb.is_grb = True
+
+            # Extract trigger ID
+            if 'id' in data and isinstance(data['id'], list) and len(data['id']) > 0:
+                grb.grb_id = str(data['id'][0])
+                try:
+                    grb.trigger_num = int(data['id'][0])
+                except (ValueError, TypeError):
+                    pass
+            else:
+                grb.grb_id = f"EP_{int(time.time())}"
+
+            # Extract coordinates
+            if 'ra' in data and 'dec' in data:
+                try:
+                    ra = float(data['ra'])
+                    dec = float(data['dec'])
+
+                    # Validate ranges
+                    if 0 <= ra <= 360 and -90 <= dec <= 90:
+                        grb.ra = ra
+                        grb.dec = dec
+
+                        # Extract error radius
+                        if 'ra_dec_error' in data:
+                            try:
+                                error_val = float(data['ra_dec_error'])
+                                grb.error_box = error_val
+                            except (ValueError, TypeError):
+                                pass
+                    else:
+                        logging.warning(f"Invalid Einstein Probe coordinates: RA={ra}, Dec={dec}")
+                except (ValueError, TypeError):
+                    logging.warning("Could not parse Einstein Probe coordinates")
+
+            # Extract trigger time
+            if 'trigger_time' in data:
+                try:
+                    # Parse ISO 8601 format: "2024-03-01T21:46:05.13Z"
+                    time_str = data['trigger_time']
+                    if time_str.endswith('Z'):
+                        time_str = time_str[:-1] + '+00:00'
+
+                    dt = datetime.fromisoformat(time_str)
+                    grb.detection_time = dt.timestamp()
+
+                    logging.debug(f"Parsed Einstein Probe time: {data['trigger_time']} -> {grb.detection_time}")
+                except (ValueError, TypeError) as e:
+                    logging.warning(f"Could not parse Einstein Probe trigger time: {e}")
+                    grb.detection_time = time.time()
+            else:
+                grb.detection_time = time.time()
+
+            # Extract additional information
+            if 'net_count_rate' in data:
+                try:
+                    grb.fluence = float(data['net_count_rate'])  # Store as fluence for now
+                except (ValueError, TypeError):
+                    pass
+
+            if 'image_snr' in data:
+                try:
+                    # Could store SNR as peak_flux or add new field
+                    grb.peak_flux = float(data['image_snr'])
+                except (ValueError, TypeError):
+                    pass
+
+            # Log energy range if available
+            if 'image_energy_range' in data:
+                energy_range = data['image_energy_range']
+                logging.debug(f"Einstein Probe energy range: {energy_range[0]}-{energy_range[1]} keV")
+
+            # Check for instrument info
+            instrument = data.get('instrument', 'WXT')
+            logging.info(f"Einstein Probe {instrument} alert: {grb.grb_id}")
+
+            return grb
+
+        except json.JSONDecodeError as e:
+            logging.error(f"JSON parsing error for Einstein Probe message: {e}")
+            return None
+        except Exception as e:
+            logging.error(f"Error parsing Einstein Probe message: {e}")
+            logging.exception("Detailed error:")
+            return None
+
 
     def _execute_external_command(self, grb: GrbTarget):
         """Execute external command for GRB processing."""
@@ -1513,8 +1652,8 @@ class GrbCommands:
             # Trigger test GRB observation
             if self.grb_daemon._trigger_grb_observation(target_id):
                 return True
-            else:
-                return False
+
+            return False
 
         except Exception as e:
             logging.error(f"Error in test GRB command: {e}")
