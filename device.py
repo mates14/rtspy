@@ -119,7 +119,7 @@ class Device(DeviceConfig):
         self.network = NetworkManager(device_name, device_type)
 
         # Set callback handlers
-        self.network.state_changed_callback = self._on_state_changed
+        self.network.state_changed_callback = self.on_state_changed
         self.network.info_callback = self.info
         self.network.centrald_connected_callback = self._on_centrald_connected
 
@@ -221,16 +221,8 @@ class Device(DeviceConfig):
         # Set BOP state
         self.set_full_bop_state(self._bop_state)
 
-    def _on_state_changed(self, old_state, new_state, message):
-        """Handle device state changes."""
-        # Check queued values that might now be executable
-        self.check_queued_values()
-
-        # Call user-defined state changed handler
-        self.on_state_changed(old_state, new_state, message)
-
     def on_state_changed(self, old_state, new_state, message):
-        """State change handler - override in subclasses."""
+        """Remote device state change handler - override in subclasses."""
         pass
 
     def set_state(self, new_state, description=None, new_bop=None):

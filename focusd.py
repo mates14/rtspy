@@ -249,19 +249,19 @@ class FocuserMixin(DeviceConfig):
         """
         try:
             # Check position limits
-            if hasattr(self, '_focus_min') and not math.isnan(self._focus_min) and target < self._focus_min:
-                logging.error(f"Target position {target} below minimum {self._focus_min}")
-                return -1
+ #           if hasattr(self, '_focus_min') and not math.isnan(self._focus_min) and target < self._focus_min:
+ #               logging.error(f"Target position {target} below minimum {self._focus_min}")
+ #               return -1
                 
-            if hasattr(self, '_focus_max') and not math.isnan(self._focus_max) and target > self._focus_max:
-                logging.error(f"Target position {target} above maximum {self._focus_max}")
-                return -1
+ #           if hasattr(self, '_focus_max') and not math.isnan(self._focus_max) and target > self._focus_max:
+ #               logging.error(f"Target position {target} above maximum {self._focus_max}")
+ #               return -1
             
             # Update target value
             self.foc_tar.value = target
             
             # Set focusing state with progress estimation
-            duration = self.estimate_offset_duration(abs(target - self.get_position()))
+#            duration = self.estimate_offset_duration(abs(target - self.get_position()))
             self.set_state(
                 self._state | self.FOC_FOCUSING,
                 f"Moving to position {target}",
@@ -269,18 +269,18 @@ class FocuserMixin(DeviceConfig):
             )
             
             # Set progress information if duration is available
-            if duration > 0:
-                start_time = time.time()
-                self.set_progress_state(
-                    self._state | self.FOC_FOCUSING,
-                    start_time,
-                    start_time + duration,
-                    f"Moving to position {target}"
-                )
+#            if duration > 0:
+#                start_time = time.time()
+#                self.set_progress_state(
+#                    self._state | self.FOC_FOCUSING,
+#                    start_time,
+#                    start_time + duration,
+#                    f"Moving to position {target}"
+#                )
             
             # Store target and start time
             self._target_position = target
-            self._focusing_start_time = time.time()
+#            self._focusing_start_time = time.time()
             self._movement_in_progress = True
             
             # Call hardware-specific movement function
@@ -531,9 +531,6 @@ class FocuserMixin(DeviceConfig):
 
     def should_queue_value(self, value):
         """Check if a value change should be queued."""
-        # Queue value changes when focuser is moving
-        if (self._state & self.FOC_MASK_FOCUSING) == self.FOC_FOCUSING:
-            return True
         return False
 
     def focuser_info_update(self):
