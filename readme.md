@@ -1,21 +1,20 @@
 # RTS2-Python
 
-A Python implementation of the RTS2 (Remote Telescope System 2nd Version) device drivers framework. This project aims to provide a complete Python-based alternative to the C++ RTS2 components, focusing on ease of development and extensibility while maintaining protocol compatibility with the original system.
+A Python implementation of the RTS2 (Remote Telescope System 2nd Version) device drivers framework. This project provides a complete Python-based alternative to the C++ RTS2 components, focusing on ease of development and extensibility while maintaining full protocol compatibility with the original system.
 
 ## Overview
 
 RTS2 (Remote Telescope System 2nd Version) is an open-source observatory control system designed for robotic observatories. This Python implementation provides:
 
-- RTS2 device driver (daemon) network protocol support
-- Device abstraction and inheritance framework
-- Value system with proper Python typing
-- Command handling with automatic distribution
-- Filter wheel device implementations
-- Example device drivers
+- Complete RTS2 device driver (daemon) network protocol support
+- Unified configuration system with command line, config files, and environment variables
+- Device abstraction framework with mixin architecture for multi-function devices
+- Type-safe value system with automatic network distribution
+- Command handling with automatic registration and dispatch
 - Device-to-device communication with automatic connection management
-- Value and state change callback system for inter-device communication
+- Production-ready implementations for filter wheels, focusers, and GRB detection
 
-Note that the development currently focuses on the device driver functionality. The client role is not implemented (although the device-to-device communication is similar). The code is being tested against the original RTS2 system to make sure it can work within an existing RTS2 installation.
+The framework is designed to work seamlessly within existing RTS2 installations, connecting to centrald and communicating with other RTS2 components.
 
 ## Installation
 
@@ -25,118 +24,142 @@ git clone https://github.com/yourusername/rts2-python.git
 cd rts2-python
 
 # Install dependencies
-pip install pyserial
+pip install pyserial psycopg2-binary gcn-kafka
 ```
 
-## Usage
+## Quick Start
 
-The framework is designed to be used as a base for creating your own device drivers. Example implementations are provided for several types of devices, particularly filter wheels.
-
-To run the example dummy filter wheel:
+Run the example dummy filter wheel to test the system:
 
 ```bash
-python filterd_dummy.py
+python filterd_dummy.py -d W0 -p 0 --filters "J:H:K:R:G:B"
 ```
 
 ## Architecture
 
 The system is built around several core components:
 
-- **App**: Application framework for handling command line arguments and device creation
-- **Device**: Base device class with network communication and value management
-- **NetworkManager**: Handles all network communication, authentication, and message distribution
-- **Value**: Type-safe values with serialization and change tracking
-- **Connection**: Network connection management
-- **CommandRegistry**: Command handler registration and dispatch system
+- **App**: Application framework handling configuration, command line parsing, and device lifecycle
+- **Device**: Base device class with integrated network communication and configuration
+- **DeviceConfig**: Unified configuration system supporting multiple sources with proper precedence
+- **NetworkManager**: Handles all network communication, authentication, and automatic device discovery
+- **Value**: Type-safe values with change tracking, callbacks, and automatic distribution
+- **Mixins**: Reusable device functionality components for filters, focusers, and other instruments
 
 ## Supported Devices
 
-Currently, the project includes implementations for the following devices:
-
-- **Filterd**: Base class for filter wheels
-- **Ovis**: OVIS filter wheel (Otevrena Veda Imaging Spectrograph, OV2023-2024, Adam Denko, Jan Sova, Veronika Modrá, Filip Bobal, Barbora Nohová)
+### Filter Wheels
+- **FilterMixin**: Complete filter wheel functionality as a mixin class
+- **Filterd**: Standalone filter wheel base class
 - **DummyFilter**: Simulated filter wheel for testing
-- **TemperatureSensor**: Simple temperature sensor example device
-- **WatcherDevice**: Example device for monitoring other devices' states and values
+- **OvisMultiFunction**: Real hardware driver for OVIS spectrograph (combines filter + focuser)
 
-### Value Interest Registration
+### Focusers
+- **FocuserMixin**: Complete focuser functionality with temperature compensation
+- **Focusd**: Standalone focuser base class with position control and limits
+- **DummyFocuser**: Simulated focuser with gradual movement simulation
 
-Devices can register interest in values from other devices and receive callbacks when those values change:
+### Observatory Control
+- **GrbDaemon**: Production GRB detection daemon with modern GCN Kafka interface
+- **TemperatureSensor**: Example environmental monitoring device
+- **WatcherDevice**: Device monitoring and inter-device communication example
+
+### Multi-Function Devices
+The mixin architecture allows combining multiple instrument types in a single device:
 
 ```python
-# Register interest in a value from another device
-self.network.register_interest_in_value(
-    device_name="centrald",
-    value_name="sun_alt",
-    callback=self._on_sun_altitude_update
-)
+class MultiInstrument(Device, FilterMixin, FocuserMixin):
+    def setup_config(self, config):
+        self.setup_filter_config(config)
+        self.setup_focuser_config(config)
 
-# Callback function
-def _on_sun_altitude_update(self, value_data):
-    # Process the updated value
-    new_altitude = float(value_data)
-    logging.info(f"Sun altitude changed to {new_altitude} degrees")
+    def apply_config(self, config):
+        super().apply_config(config)
+        self.apply_filter_config(config)
+        self.apply_focuser_config(config)
 ```
 
-### State Interest Registration
+## Configuration System
 
-Devices can also monitor the state changes of other devices:
+The unified configuration system supports multiple sources with proper precedence:
+
+1. Built-in defaults
+2. System config files (`/etc/rts2/rts2.conf`)
+3. User config files (`~/.rts2/rts2.conf`)
+4. Explicit config files (`--config myconfig.conf`)
+5. Environment variables (`RTS2_DEVICE_VARIABLE`)
+6. Command line arguments (highest priority)
+
+Example device with custom configuration:
 
 ```python
-# Register interest in state changes of another device
+class MyDevice(Device, DeviceConfig):
+    def setup_config(self, config):
+        config.add_argument('--my-option', help='Custom option')
+        config.add_argument('--my-port', type=int, default=8080,
+                           section='hardware', help='Hardware port')
+
+    def apply_config(self, config):
+        super().apply_config(config)
+        self.my_option = config.get('my_option')
+        self.my_port = config.get('my_port')
+```
+
+## Device-to-Device Communication
+
+Devices can automatically establish connections and monitor other devices:
+
+```python
+# Monitor another device's values
+self.network.register_interest_in_value(
+    device_name="TEMP",
+    value_name="temperature",
+    callback=self._on_temperature_update
+)
+
+# Monitor device state changes
 self.network.register_state_interest(
     device_name="CCD1",
     state_callback=self._on_ccd_state_changed
 )
-
-# Callback function
-def _on_ccd_state_changed(self, device_name, state, bop_state, message):
-    # React to the state change
-    if bop_state & self.BOP_EXPOSURE:
-        logging.info(f"Device {device_name} is now exposing")
-    else:
-        logging.info(f"Device {device_name} is no longer exposing")
 ```
 
-### Automatic Connection Management
+Connections are established automatically when centrald provides device information, with automatic reconnection on failure.
 
-The system automatically establishes and maintains connections to devices of interest:
+## GRB Detection System
 
-- When a device registers interest in another device's values or state, the connection is established automatically
-- If the connection is lost, the system will attempt to reconnect at regular intervals
-- All connection authentication and protocol handling is managed internally
+The included GRB daemon provides production-ready gamma-ray burst detection:
 
-This makes it easy to build distributed systems where devices can depend on each other without complex connection management code.
+- Modern GCN Kafka interface replacing legacy socket protocols
+- Robust VOEvent XML parsing with mission-specific handlers
+- PostgreSQL database integration with RTS2 target system
+- Automatic observation triggering with configurable constraints
+- Comprehensive monitoring and statistics
 
-## Creating a New Device Driver
+```bash
+python grbd.py --gcn-client-id YOUR_ID --gcn-client-secret YOUR_SECRET
+```
 
-To create a new device driver, extend the appropriate base class:
+## Creating Device Drivers
+
+Extend the appropriate base class or use mixins:
 
 ```python
 from filterd import Filterd
 
 class MyFilterWheel(Filterd):
-    @classmethod
-    def register_options(cls, parser):
-        super().register_options(parser)
-        parser.add_argument('--my-option', help='My custom option')
-
-    def __init__(self, device_name="W0", port=0):
-        super().__init__(device_name, port)
-        # Initialize your hardware-specific code here
-
-    def get_filter_num(self):
-        # Implement hardware-specific code to get filter position
-        return self.filter_num
+    def setup_config(self, config):
+        super().setup_config(config)
+        config.add_argument('--serial-port', help='Serial port device')
 
     def set_filter_num(self, new_filter):
-        # Implement hardware-specific code to set filter position
-        return 0  # Return 0 on success, -1 on error
-```
+        # Implement hardware-specific movement
+        return 0  # Success
 
-Then create a main section to run your device:
+    def get_filter_num(self):
+        # Read current position from hardware
+        return self.current_position
 
-```python
 if __name__ == "__main__":
     app = App(description='My Filter Wheel Driver')
     app.register_device_options(MyFilterWheel)
@@ -147,29 +170,26 @@ if __name__ == "__main__":
 
 ## Key Features
 
-- **Thread Safety**: All operations are designed to be thread-safe
-- **Type Safety**: Proper Python type hints throughout the codebase
-- **Protocol Compatibility**: Fully compatible with existing RTS2 centrald and clients
-- **Extensibility**: Easy extension points for new device types
-- **Automatic Value Distribution**: Values are automatically distributed to all connected clients
-- **Device Coordination**: Built-in support for device-to-device communication with callbacks
-- **Automatic Connection Management**: Devices can register interest and connections are handled automatically
+- **Full RTS2 Compatibility**: Seamless integration with existing RTS2 installations
+- **Modern Python Architecture**: Type hints, dataclasses, and proper error handling
+- **Unified Configuration**: Single system handling all configuration sources
+- **Mixin Architecture**: Reusable components for multi-function devices
+- **Automatic Device Discovery**: Zero-configuration device-to-device communication
+- **Production Ready**: Used in real observatory environments
 
 ## Logging
 
-The system uses Python's standard logging module with a custom formatter to match RTS2's log format:
+The system uses RTS2-compatible logging with proper formatting:
 
 ```
 2024-05-04T12:34:56.789 UTC DEVICENAME I Log message here
 ```
 
-Where the single letter represents the log level (D for DEBUG, I for INFO, etc.)
-
-Note that the original RTS2 network logging system (which sends logs over the network protocol for monitoring by other components like the RTS2 Monitor) is not yet implemented. Currently, logs are only written to the console/standard output.
+All network communication and device interactions are logged for debugging and monitoring.
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Contributions are welcome! The codebase follows modern Python practices with comprehensive type hints and documentation.
 
 ## License
 
@@ -177,4 +197,4 @@ This project is licensed under the [GNU General Public License v3.0](LICENSE).
 
 ## Acknowledgments
 
-This project is inspired by the original RTS2 system by Petr Kubanek et al. While reimplementing the functionality in Python, we strive to maintain compatibility with the original system.
+This project is inspired by the original RTS2 system by Petr Kubanek et al. The OVIS filter wheel implementation was developed as part of the "Otevřená Věda" program of the Academy of Sciences of the Czech Republic, with contributions from high school students and university collaborators.
