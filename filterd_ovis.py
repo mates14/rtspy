@@ -1,6 +1,6 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """
-RTS2-Python OVIS Filter Wheel Driver
+Complete OVIS Multi-function Device
 
 Driver for the OVIS (Otevřená Věda Imaging Spectrograph) low budget
 spectrograph Copyright (C) 2023-2025 Martin Jelínek
@@ -75,24 +75,32 @@ The primary functionality is to manage the filter wheel positions, with the
 ability to move to absolute positions, home the motors, and track current
 position. It also exposes controls for the calibration lamp.
 
+This device combines both filter wheel and focuser functionality using the
+OVIS hardware with two stepper motors:
+- Motor 0: Focuser
+- Motor 1: Filter wheel
+
 """
 
 import time
 import logging
 import threading
 import serial
+import math
 from typing import Dict, Any
 
-from value import (
-    ValueSelection, ValueInteger, ValueBool, ValueString, ValueTime
-)
-from filterd import Filterd
+from device import Device
 from constants import DeviceType
-from config import DeviceConfig
+from value import (
+    ValueSelection, ValueInteger, ValueBool, ValueString, ValueTime, ValueDouble
+)
+from focusd import FocuserMixin
+from filterd import FilterMixin
 from app import App
 
+
 class SerialCommunicator:
-    """Simple serial device communicator."""
+    """Serial device communicator for OVIS hardware."""
 
     def __init__(self, device_file: str, baudrate: int = 9600):
         self.device_file = device_file
@@ -125,7 +133,6 @@ class SerialCommunicator:
         self.running = False
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=2.0)
-
         self._close()
 
     def _connect(self):
@@ -184,7 +191,6 @@ class SerialCommunicator:
 
         try:
             with self.lock:
-#                logging.debug(f"Sending command: {cmd.strip()}")
                 self.serial_conn.write(cmd.encode())
                 self.serial_conn.flush()
 
@@ -193,7 +199,6 @@ class SerialCommunicator:
                     self.serial_conn.timeout = timeout
                     try:
                         response = self.serial_conn.readline().decode().strip()
-#                        logging.debug(f"Received response: {response}")
                         return response
                     finally:
                         self.serial_conn.timeout = orig_timeout
@@ -206,7 +211,6 @@ class SerialCommunicator:
     def _status_loop(self):
         """Background thread loop to poll device status."""
         logging.info("Status monitoring thread started")
-
         connect_retry_time = 0
 
         while self.running:
@@ -243,7 +247,7 @@ class SerialCommunicator:
             # Parse motor statuses
             motor_statuses = []
 
-            # Parse motor 0 status (first line)
+            # Parse motor 0 status (focuser - first line)
             motor_info = response.split()
             if len(motor_info) >= 5 and motor_info[0] == "M" and motor_info[1] == "0":
                 motor_statuses.append({
@@ -254,7 +258,7 @@ class SerialCommunicator:
                     'acceleration': int(float(motor_info[5])) if len(motor_info) > 5 else 0
                 })
 
-            # Read motor 1 status (second line)
+            # Read motor 1 status (filter wheel - second line)
             response = self.serial_conn.readline().decode().strip()
             motor_info = response.split()
             if len(motor_info) >= 5 and motor_info[0] == "M" and motor_info[1] == "1":
@@ -293,42 +297,59 @@ class SerialCommunicator:
         return self.connected
 
 
-class Ovis(Filterd):
-    """OVIS (Otevrena Veda Imaging Spectrograph) filter wheel driver."""
+class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
+    """
+    OVIS Multi-function Device - combines filter wheel and focuser.
+
+    This device uses the proven filter wheel implementation from filterd_ovis.py
+    and adds focuser functionality using FocuserMixin.
+
+    Hardware:
+    - Motor 0: Focuser
+    - Motor 1: Filter wheel
+    - Neon calibration lamp with relay control
+    """
 
     def setup_config(self, config):
-        """
-        Set up OVIS-specific configuration arguments.
-
-        This method is called automatically by the configuration system.
-        """
-        # Call parent setup first to get standard filter options
-        super().setup_config(config)
+        """Set up configuration for both filter and focuser."""
+        #super().setup_config(config)
+        self.setup_filter_config(config)
+        self.setup_focuser_config(config)
 
         # OVIS-specific hardware options
-        config.add_argument('-f', '--device-file', help='Serial port device file (e.g., /dev/ttyUSB0)', section='hardware')
-        config.add_argument('--baudrate', type=int, default=9600, help='Serial port baud rate', section='hardware')
+        config.add_argument('-f', '--device-file',
+                          help='Serial port device file (e.g., /dev/ttyUSB0)', section='hardware')
+        config.add_argument('--baudrate', type=int, default=9600,
+                          help='Serial port baud rate', section='hardware')
 
-        # Filter position configuration
-        config.add_argument('--f0-pos', type=int, default=2000, help='Filter 0 motor position', section='filters')
-        config.add_argument('--f1-pos', type=int, default=54500, help='Filter 1 motor position', section='filters')
-        config.add_argument('--f2-pos', type=int, default=107000, help='Filter 2 motor position', section='filters')
-        config.add_argument('--f3-pos', type=int, default=159500, help='Filter 3 motor position', section='filters')
-        config.add_argument('--f4-pos', type=int, default=212000, help='Filter 4 motor position', section='filters')
-        config.add_argument('--f5-pos', type=int, default=292000, help='Filter 5 motor position (grism)', section='filters')
-        config.add_argument('--f6-pos', type=int, default=300000, help='Filter 6 motor position (unused)', section='filters')
-        config.add_argument('--f7-pos', type=int, default=300000, help='Filter 7 motor position (limit)', section='filters')
+        # Filter positions (hardware supports positions 0-5)
+        config.add_argument('--f0-pos', type=int, default=2000,
+                          help='Filter 0 motor position', section='filters')
+        config.add_argument('--f1-pos', type=int, default=54500,
+                          help='Filter 1 motor position', section='filters')
+        config.add_argument('--f2-pos', type=int, default=107000,
+                          help='Filter 2 motor position', section='filters')
+        config.add_argument('--f3-pos', type=int, default=159500,
+                          help='Filter 3 motor position', section='filters')
+        config.add_argument('--f4-pos', type=int, default=212000,
+                          help='Filter 4 motor position', section='filters')
+        config.add_argument('--f5-pos', type=int, default=292000,
+                          help='Filter 5 motor position (grism)', section='filters')
 
         # Motor control options
-        config.add_argument('--motor-speed', type=int, default=100000, help='Motor speed setting', section='hardware')
-        config.add_argument('--motor-acceleration', type=int, default=100000, help='Motor acceleration setting', section='hardware')
-        config.add_argument('--home-timeout', type=float, default=30.0, help='Homing operation timeout in seconds', section='hardware')
+        config.add_argument('--motor-speed', type=int, default=100000,
+                          help='Motor speed setting', section='hardware')
+        config.add_argument('--motor-acceleration', type=int, default=100000,
+                          help='Motor acceleration setting', section='hardware')
+        config.add_argument('--home-timeout', type=float, default=30.0,
+                          help='Homing operation timeout in seconds', section='hardware')
 
-    def __init__(self, device_name="W0", port=0):
-        """Initialize the Ovis filter wheel device."""
-        super().__init__(device_name, port)
+    def __init__(self, device_name="OVIS", port=0):
+        """Initialize OVIS multi-function device."""
+        # Initialize as a filter wheel device type (we could also use FOCUS or custom)
+        super().__init__(device_name, DeviceType.FW, port)
 
-        # Configuration will be applied in apply_config()
+        # Hardware configuration (will be set by apply_config)
         self.device_file = None
         self.baudrate = 9600
         self.motor_speed = 100000
@@ -338,74 +359,85 @@ class Ovis(Filterd):
         # Serial connection
         self.serial_comm = None
 
-        # Filter and motor state
+        # Motor positions and state
+        self.motor_status_lock = threading.RLock()
+
+        # Filter wheel state (from filterd_ovis.py)
         self.filter_num = 0
         self.filter_moving = False
         self.motor_initialized = False
-        self.motor_position = 0
-        self.motor_status_lock = threading.RLock()
 
-        # Create device values
-        self.m1pos = ValueInteger("M1POS", "[int] motor position", write_to_fits=True)
-        self.focpos = ValueInteger("FOCPOS", "[int] focuser position", write_to_fits=True)
-        self.focpos.set_writable()
+        # OVIS-specific values (from filterd_ovis.py)
+        self.m0pos = ValueInteger("M0POS", "[int] focuser motor position", write_to_fits=True)
+        self.m1pos = ValueInteger("M1POS", "[int] filter motor position", write_to_fits=True)
 
-        self.neon = ValueSelection("NEON", "[on/off] neon lamp status", write_to_fits=True, writable=True)
+        self.neon = ValueSelection("NEON", "[on/off] neon lamp status",
+                                 write_to_fits=True, writable=True)
         self.neon.add_sel_val("off")
         self.neon.add_sel_val("on")
 
-        # Filter positions - these will be updated from configuration
+        # Filter position values (hardware supports positions 0-5)
         self.f0pos = ValueInteger("F0POS", "[int] filter 0 position", write_to_fits=False, writable=True, initial=2000)
-        self.f1pos = ValueInteger("F1POS", "[int] filter 1 position", write_to_fits=False, writable=True, initial=545000)
+        self.f1pos = ValueInteger("F1POS", "[int] filter 1 position", write_to_fits=False, writable=True, initial=54500)
         self.f2pos = ValueInteger("F2POS", "[int] filter 2 position", write_to_fits=False, writable=True, initial=107000)
-        self.f3pos = ValueInteger("F3POS", "[int] filter 3 position", write_to_fits=False, writable=True, initial=159000)
+        self.f3pos = ValueInteger("F3POS", "[int] filter 3 position", write_to_fits=False, writable=True, initial=159500)
         self.f4pos = ValueInteger("F4POS", "[int] filter 4 position", write_to_fits=False, writable=True, initial=212000)
-        self.f5pos = ValueInteger("F5POS", "[int] filter 5 position", write_to_fits=False, writable=True, initial=292000) # grism
-        self.f6pos = ValueInteger("F6POS", "[int] filter 6 position", write_to_fits=False, writable=True, initial=300000) # unused
-        self.f7pos = ValueInteger("F7POS", "[int] filter 7 position", write_to_fits=False, writable=True, initial=300000) # limit
+        self.f5pos = ValueInteger("F5POS", "[int] filter 5 position (grism)", write_to_fits=False, writable=True, initial=292000)
+
+        # Set device types for mixins
+        self.focuser_type = "OVIS_FOCUSER"
+
+        # Initialize filter names (matching filterd_ovis.py)
+        filter_names = "J:H:K:R:G:B"  # Default filter names, will be overridden by config
 
         # Initialize not ready until motors are initialized
         self.set_state(self.STATE_IDLE | self.NOT_READY, "Initializing hardware")
 
     def apply_config(self, config: Dict[str, Any]):
-        """
-        Apply OVIS-specific configuration.
-
-        This method is called automatically after all configuration sources
-        have been processed.
-        """
-        # Apply parent configuration first
+        """Apply configuration to both mixins and OVIS-specific settings."""
         super().apply_config(config)
+        self.apply_filter_config(config)
+        self.apply_focuser_config(config)
 
-        # Apply hardware configuration
+        # Apply OVIS-specific config
         self.device_file = config.get('device_file')
         self.baudrate = config.get('baudrate', 9600)
         self.motor_speed = config.get('motor_speed', 100000)
         self.motor_acceleration = config.get('motor_acceleration', 100000)
         self.home_timeout = config.get('home_timeout', 30.0)
 
-        # Apply filter position configuration
+        # Apply filter positions (hardware supports positions 0-5)
         self.f0pos.value = config.get('f0_pos', 2000)
         self.f1pos.value = config.get('f1_pos', 54500)
         self.f2pos.value = config.get('f2_pos', 107000)
         self.f3pos.value = config.get('f3_pos', 159500)
         self.f4pos.value = config.get('f4_pos', 212000)
-        self.f5pos.value = config.get('f5_pos', 292000)  # grism
-        self.f6pos.value = config.get('f6_pos', 300000)  # unused
-        self.f7pos.value = config.get('f7_pos', 300000)  # limit
+        self.f5pos.value = config.get('f5_pos', 292000)
 
-        logging.info(f"OVIS configuration applied:")
+        # Set focuser type value
+        if hasattr(self, 'foc_type'):
+            self.foc_type.value = self.focuser_type
+
+        logging.info(f"OVIS Multi-function configuration applied:")
         logging.info(f"  Device file: {self.device_file}")
         logging.info(f"  Baud rate: {self.baudrate}")
         logging.info(f"  Motor speed: {self.motor_speed}")
         logging.info(f"  Motor acceleration: {self.motor_acceleration}")
         logging.info(f"  Home timeout: {self.home_timeout}s")
-        logging.info(f"  Filter positions: F0={self.f0pos.value}, F1={self.f1pos.value}, "
-                    f"F2={self.f2pos.value}, F3={self.f3pos.value}, F4={self.f4pos.value}, "
-                    f"F5={self.f5pos.value}, F6={self.f6pos.value}, F7={self.f7pos.value}")
+
+    def _register_device_commands(self):
+        """Register command handlers for both filter and focuser."""
+        # Register base device commands
+        super()._register_device_commands()
+
+        # Register filter commands
+        self._register_filter_commands()
+
+        # Register focuser commands
+        self._register_focuser_commands()
 
     def start(self):
-        """Start the device."""
+        """Start the OVIS device."""
         super().start()
 
         if not self.device_file:
@@ -419,29 +451,31 @@ class Ovis(Filterd):
             self.serial_comm.set_status_callback(self._handle_status_update)
             self.serial_comm.start()
 
-            # Initialize the device
-            logging.info("Initializing Ovis filter wheel")
+            # Initialize the hardware (from filterd_ovis.py)
+            logging.info("Initializing OVIS multi-function device")
 
-            # Sequence 1: Turn on motor and home
-            if not self.serial_comm.send_command("M 1 ON"):
-                logging.error("Failed to power on filter wheel motor")
-                self.set_state(self.STATE_IDLE | self.ERROR_HW, "Failed to power on motor")
+            # Power on both motors
+            if not self.serial_comm.send_command("M 0 ON"):  # Focuser
+                logging.error("Failed to power on focuser motor")
+                self.set_state(self.STATE_IDLE | self.ERROR_HW, "Failed to power on focuser motor")
                 return
 
-            # Set configured speed/accel
+            if not self.serial_comm.send_command("M 1 ON"):  # Filter wheel
+                logging.error("Failed to power on filter wheel motor")
+                self.set_state(self.STATE_IDLE | self.ERROR_HW, "Failed to power on filter wheel motor")
+                return
+
+            # Set configured speed/acceleration for both motors
+            self.serial_comm.send_command(f"M 0 SPD {self.motor_speed}")
+            self.serial_comm.send_command(f"M 0 ACC {self.motor_acceleration}")
             self.serial_comm.send_command(f"M 1 SPD {self.motor_speed}")
             self.serial_comm.send_command(f"M 1 ACC {self.motor_acceleration}")
 
-            # Home the filter wheel
+            # Home the filter wheel (from filterd_ovis.py)
             logging.info("Homing filter wheel")
+            self.set_state(self._state | self.FILTERD_MOVE, "Homing filter wheel", self.BOP_EXPOSURE)
 
-            # Sequence 2: Home the motor
-            self.set_state(self._state | self.FILTERD_MOVE, "Homing filter wheel",
-                            self.BOP_EXPOSURE)
-
-            # Send home command with configured timeout
             response = self.serial_comm.send_command("M 1 HOM", True, self.home_timeout)
-
             if not response or "OK" not in response:
                 logging.error("Failed to home filter wheel")
                 self.set_state(self.STATE_IDLE | self.ERROR_HW, "Failed to home filter wheel")
@@ -452,72 +486,78 @@ class Ovis(Filterd):
             self.filter_num = 0
             self.motor_initialized = True
 
-            # Sequence 3: Move to filter 0
+            # Move filter to position 0
             self.set_filter_num(0)
 
+            # Initialize focuser position
+            self.foc_pos.value = 0.0
+            self.foc_tar.value = 0.0
+            self.foc_def.value = 0.0
+
             # Mark device as ready
-            self.set_state(self.FILTERD_IDLE, "Filter wheel idle", 0)
-            self.set_ready("Filter wheel initialized and ready")
+            self.set_state(self.STATE_IDLE, "OVIS multi-function device ready", 0)
+            self.set_ready("Multi-function device initialized and ready")
 
         except Exception as e:
-            logging.error(f"Error initializing device: {e}")
+            logging.error(f"Error initializing OVIS device: {e}")
             self.set_state(self.STATE_IDLE | self.ERROR_HW, f"Initialization error: {e}")
 
     def stop(self):
-        """Stop the device."""
+        """Stop the OVIS device."""
         if self.serial_comm:
             try:
-                # Turn off the motors
+                # Turn off both motors
                 self.serial_comm.send_command("M 0 OFF")
                 self.serial_comm.send_command("M 1 OFF")
             except:
                 pass
-
             self.serial_comm.stop()
             self.serial_comm = None
-
         super().stop()
 
     def _handle_status_update(self, motor_statuses, neon_status):
-        """Handle status updates from the device."""
-        # Update filter wheel motor status
-        m1_status = next((m for m in motor_statuses if m['motor'] == 1), None)
-        if m1_status:
-            # Get position and moving state
-            current_pos = m1_status['position']
-            is_moving = bool(m1_status['is_moving'])
+        """Handle status updates from hardware."""
+        with self.motor_status_lock:
+            # Process each motor status
+            for motor in motor_statuses:
+                if motor['motor'] == 0:  # Focuser
+                    if not self.m0pos.value == motor['position']:
+                        self.m0pos.value = motor['position']
+                        self.foc_pos.value = float(motor['position'])
 
-            with self.motor_status_lock:
-                # Store values
-                old_moving = self.filter_moving and self.motor_position != current_pos
-                self.motor_position = current_pos
-                self.m1pos.value = current_pos
+                    # Check for focuser movement completion
+                    if (hasattr(self, '_movement_in_progress') and self._movement_in_progress and
+                        not motor['is_moving']):
+                        self._handle_focuser_movement_complete()
 
-                # Check if movement completed
-                if old_moving and not is_moving:
-                    self._handle_movement_complete()
+                elif motor['motor'] == 1:  # Filter wheel
+                    if not self.m1pos.value == motor['position']:
+                        self.m1pos.value = motor['position']
 
-        # Update neon status
-        if neon_status is not None:
-            self.neon.value = neon_status
+                    # Check for filter movement completion
+                    if self.filter_moving and not motor['is_moving']:
+                       self._handle_filter_movement_complete()
 
-    def _handle_movement_complete(self):
-        """Handle filter movement completion."""
-        logging.info(f"Filter movement completed at position {self.motor_position}")
+            # Update neon status
+            if neon_status is not None:
+                if not self.neon.value == neon_status:
+                    self.neon.value = neon_status
+
+    def _handle_filter_movement_complete(self):
+        """Handle filter movement completion (hardware supports positions 0-5)."""
+        logging.info(f"Filter movement completed at position {self.m1pos.value}")
 
         # Find which filter position we're closest to
         target_positions = [
-            self.f0pos.value, self.f1pos.value,
-            self.f2pos.value, self.f3pos.value,
-            self.f4pos.value, self.f5pos.value,
-            self.f6pos.value, self.f7pos.value
+            self.f0pos.value, self.f1pos.value, self.f2pos.value,
+            self.f3pos.value, self.f4pos.value, self.f5pos.value
         ]
 
         closest_filter = 0
-        closest_distance = abs(self.motor_position - target_positions[0])
+        closest_distance = abs(self.m1pos.value - target_positions[0])
 
         for i in range(1, len(target_positions)):
-            distance = abs(self.motor_position - target_positions[i])
+            distance = abs(self.m1pos.value - target_positions[i])
             if distance < closest_distance:
                 closest_distance = distance
                 closest_filter = i
@@ -529,16 +569,24 @@ class Ovis(Filterd):
         # Reset device state
         self.filter_moving = False
         self.movement_completed()
-        self.set_state(self._state & ~(self.FILTERD_MOVE), "Filter wheel idle", 0)
 
-    def get_filter_num(self):
-        """Get current filter number."""
+    def _handle_focuser_movement_complete(self):
+        """Handle focuser movement completion."""
+        logging.info(f"Focuser movement completed at position {self.m0pos.value}")
+
+        # Call the focuser mixin's end_focusing method
+        self.end_focusing()
+
+    # ========== FilterMixin Implementation ==========
+
+    def get_filter_num(self) -> int:
+        """Get current filter number (from filterd_ovis.py)."""
         return self.filter_num
 
     def set_filter_num(self, new_filter):
-        """Set filter wheel position."""
+        """Set filter wheel position (hardware supports positions 0-5)."""
         # Validate filter number
-        if new_filter < 0 or new_filter >= 8:
+        if new_filter < 0 or new_filter >= 6:
             logging.error(f"Invalid filter number: {new_filter}")
             return -1
 
@@ -554,10 +602,8 @@ class Ovis(Filterd):
 
         # Get target position
         target_positions = [
-            self.f0pos.value, self.f1pos.value,
-            self.f2pos.value, self.f3pos.value,
-            self.f4pos.value, self.f5pos.value,
-            self.f6pos.value, self.f7pos.value
+            self.f0pos.value, self.f1pos.value, self.f2pos.value,
+            self.f3pos.value, self.f4pos.value, self.f5pos.value
         ]
 
         target_position = target_positions[new_filter]
@@ -582,7 +628,7 @@ class Ovis(Filterd):
         return 0
 
     def home_filter(self):
-        """Home the filter wheel."""
+        """Home the filter wheel (from filterd_ovis.py)."""
         if not self.serial_comm:
             logging.error("Cannot home filter: device not connected")
             return -1
@@ -615,27 +661,118 @@ class Ovis(Filterd):
         self.set_state(self._state & ~(self.FILTERD_MOVE), "Filter wheel homed", 0)
         return 0
 
-    def on_value_changed_from_client(self, value, old_value, new_value):
-        """Handle value changes from client."""
+    # ========== FocuserMixin Implementation ==========
+
+    def set_to(self, position: float) -> int:
+        """Move focuser to target position."""
         try:
-            # Handle specific values
+            if not self.serial_comm:
+                logging.error("Cannot move focuser: device not connected")
+                return -1
+
+            # Check if already at target position (within tolerance)
+            current_pos = self.get_position()
+            position_tolerance = 10.0  # Motor steps tolerance
+            if abs(current_pos - position) <= position_tolerance:
+                logging.info(f"Focuser already at target position {position} (current: {current_pos})")
+                # Still need to mark movement as complete for state management
+                self._handle_focuser_movement_complete()
+                return 0
+
+            # Send movement command to motor 0 (focuser)
+            cmd = f"M 0 ABS {int(position)}"
+            self.serial_comm.send_command(cmd)
+            logging.info(f"Moving focuser to position {position}")
+            return 0
+        except Exception as e:
+            logging.error(f"Error moving focuser: {e}")
+            return -1
+
+    def is_at_start_position(self) -> bool:
+        """Check if focuser is at start position."""
+        return abs(self.get_position()) < 10.0
+
+    def home_focuser(self) -> int:
+        """Home the focuser."""
+        if not self.serial_comm:
+            logging.error("Cannot home focuser: device not connected")
+            return -1
+
+        logging.info("Homing focuser")
+
+        # Set device state to show movement
+        self.set_state(
+            self._state | self.FOC_FOCUSING,
+            "Homing focuser",
+            self.BOP_EXPOSURE
+        )
+
+        # Send home command
+        response = self.serial_comm.send_command("M 0 HOM", True, self.home_timeout)
+
+        if not response or "OK" not in response:
+            logging.error("Failed to home focuser")
+            self.set_state(self._state & ~(self.FOC_FOCUSING), "Focuser homing failed", 0)
+            return -1
+
+        # Homing successful
+        logging.info("Focuser homed successfully")
+
+        # Update focuser position
+        self.foc_pos.value = 0.0
+        self.foc_tar.value = 0.0
+
+        # Reset state
+        self.set_state(self._state & ~(self.FOC_FOCUSING), "Focuser homed", 0)
+        return 0
+
+    # ========== Device Methods ==========
+
+    def info(self):
+        """Update device information."""
+        super().info()
+        # Motor positions are updated via status callback
+
+        # Update filter and focuser info
+        self.filter_info_update()
+        self.focuser_info_update()
+
+    def idle(self):
+        """Combined idle processing for both functions."""
+        # Call parent idle
+        result = super().idle()
+
+        # Call mixin idle methods
+        filter_result = self.filter_idle()
+        focuser_result = self.focuser_idle()
+
+        # Return most restrictive timing
+        results = [r for r in [result, filter_result, focuser_result] if r is not None]
+        return min(results) if results else None
+
+    def on_value_changed_from_client(self, value, old_value, new_value):
+        """Handle value changes for both functions."""
+        try:
+            # Handle neon lamp (from filterd_ovis.py)
             if value.name == "NEON":
                 self._set_neon(new_value)
-            elif value.name == "FOCPOS":
-                self.serial_comm.send_command(f"M 0 ABS {new_value}")
-            elif value.name.startswith("F") and value.name.endswith("POS"):
-                # If this is the current filter, update position
+                return 0
+            if value.name.startswith("F") and value.name.endswith("POS"):
                 filter_idx = int(value.name[1])
-                if filter_idx == self.filter_num:
+                if filter_idx == self.filter.value:
+                    # Update current filter position
                     self.serial_comm.send_command(f"M 1 ABS {new_value}")
+                return 0
+            # Let mixins handle their values
+            filter_result = FilterMixin.on_value_changed_from_client(self, value, old_value, new_value)
+            focuser_result = FocuserMixin.on_value_changed_from_client(self, value, old_value, new_value)
+            return min(focuser_result,filter_result)
         except Exception as e:
-            logging.error(f"Error handling value change {value.name}: {e}")
-
-        # Call parent handler
-        super().on_value_changed_from_client(value, old_value, new_value)
+            logging.error(f"Error handling value change: {e}")
+            return -1
 
     def _set_neon(self, new_value):
-        """Set neon lamp state."""
+        """Set neon lamp state (from filterd_ovis.py)."""
         if not self.serial_comm:
             return
 
@@ -650,26 +787,41 @@ class Ovis(Filterd):
 
         logging.info(f"Neon lamp set to {'ON' if new_value else 'OFF'}")
 
-
-if __name__ == "__main__":
+def main():
+    """Main entry point for OVIS multi-function device."""
     # Create application
-    app = App(description='OVIS Filter Wheel Driver')
+    app = App(description='OVIS Multi-function Device (Filter + Focuser)')
 
-    # Register device-specific options
-    app.register_device_options(Ovis)
+    # Register device options
+    app.register_device_options(OvisMultiFunction)
 
-    # Parse command line arguments
+    # Parse arguments
     args = app.parse_args()
 
-    # Create and configure device
-    device = app.create_device(Ovis)
+    # Create device
+    device = app.create_device(OvisMultiFunction)
 
     # Show config summary if debug enabled
     if getattr(args, 'debug', False):
-        print("\nOVIS Configuration Summary:")
+        print("\nOVIS Multi-function Configuration:")
         print("=" * 50)
         print(device.get_config_summary())
         print("=" * 50)
 
-    # Run application main loop
-    app.run()
+    logging.info("Starting OVIS Multi-function Device (Filter + Focuser)")
+
+    # Run application
+    try:
+        app.run()
+        return 0
+    except KeyboardInterrupt:
+        logging.info("Shutting down OVIS multi-function device")
+        return 0
+    except Exception as e:
+        logging.error(f"Fatal error in OVIS device: {e}")
+        return 1
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main())
