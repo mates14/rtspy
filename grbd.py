@@ -751,7 +751,6 @@ class GrbDaemon(Device, DeviceConfig):
 
             # Step 2: Look for GRBs within 15-minute time window
             time_window = 900  # 15 minutes in seconds
-
             logging.debug(f"No exact trigger match, searching for GRBs within 15 minutes of {grb.detection_time}")
 
             # Convert grb.detection_time to proper type for database comparison
@@ -783,14 +782,13 @@ class GrbDaemon(Device, DeviceConfig):
 
                 # Convert decimal.Decimal to float for calculations
                 cand_epoch_float = float(cand_epoch) if cand_epoch is not None else 0.0
-                time_diff = abs(detection_timestamp - cand_epoch_float)
-
-                logging.debug(f"Candidate {cand_name} (trigger {cand_grb_id}): {time_diff:.1f}s apart")
-
-                # Convert coordinates to float if they're Decimal
                 cand_ra_float = float(cand_ra) if cand_ra is not None else float('nan')
                 cand_dec_float = float(cand_dec) if cand_dec is not None else float('nan')
                 cand_error_float = float(cand_errorbox) if cand_errorbox is not None else float('nan')
+
+                time_diff = abs(detection_timestamp - cand_epoch_float)
+
+                logging.debug(f"Candidate {cand_name} (trigger {cand_grb_id}): {time_diff:.1f}s apart")
 
                 # If both have valid coordinates, check compatibility
                 if (self._is_valid_coordinates(grb.ra, grb.dec) and
@@ -865,6 +863,15 @@ class GrbDaemon(Device, DeviceConfig):
         Uses proper error combination: total_error = sqrt(err1² + err2²)
         But also handles RA/Dec errors separately if needed.
         """
+
+        # ensure all inputs are float
+        ra1 = float(ra1) if ra1 is not None else float('nan')
+        dec1 = float(dec1) if dec1 is not None else float('nan')
+        err1 = float(err1) if err1 is not None else float('nan')
+        ra2 = float(ra2) if ra2 is not None else float('nan')
+        dec2 = float(dec2) if dec2 is not None else float('nan')
+        err2 = float(err2) if err2 is not None else float('nan')
+
         # Calculate angular separation
         angular_sep = self._calculate_angular_separation(ra1, dec1, ra2, dec2)
 
@@ -960,6 +967,9 @@ class GrbDaemon(Device, DeviceConfig):
         """Link new GRB alert to existing target based on time/position match."""
         (cand_tar_id, cand_grb_id, cand_ra, cand_dec, cand_errorbox,
          cand_date, cand_name, cand_epoch) = candidate
+
+        # Convert Decimal to float for time calculations
+        cand_epoch_float = float(cand_epoch) if cand_epoch is not None else 0.0
 
         time_diff = abs(grb.detection_time - cand_epoch)
         logging.info(f"Linking GRB {grb.grb_id} to existing target {cand_name} "
@@ -1637,9 +1647,13 @@ class GrbCommands:
         self.grb_daemon = grb_daemon
         self.handlers = {
             "test": self.handle_test_grb,
+            "script_ends": self.handle_script_ends,
+            "status_info": self.handle_status_info,
         }
         self.needs_response = {
             "test": True,
+            "script_ends": True,
+            "status_info": True,
         }
 
     def get_commands(self):
@@ -1677,6 +1691,27 @@ class GrbCommands:
 
         except Exception as e:
             logging.error(f"Error in test GRB command: {e}")
+            return False
+
+    def handle_script_ends(self, conn, params):
+        """Handle script_ends command."""
+        try:
+            # GRB daemon doesn't need to do anything special for script_ends
+            self.grb_daemon.network._send_ok_response(conn, "Script end acknowledged")
+            return True
+        except Exception as e:
+            logging.error(f"Error in script_ends command: {e}")
+            return False
+
+    def handle_status_info(self, conn, params):
+        """Handle status_info command."""
+        try:
+            # Send current device status
+            self.grb_daemon.network._send_status(conn)
+            self.grb_daemon.network._send_ok_response(conn, "Status sent")
+            return True
+        except Exception as e:
+            logging.error(f"Error in status_info command: {e}")
             return False
 
 
