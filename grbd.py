@@ -893,7 +893,6 @@ class GrbDaemon(Device, DeviceConfig):
 
         return compatible
 
-
     def _update_existing_grb_target(self, cursor, conn, grb: GrbTarget, grb_id_int: int, existing):
         """Update existing target for the same trigger ID."""
         (existing_tar_id, existing_error, existing_ra, existing_dec, existing_name) = existing
@@ -919,26 +918,34 @@ class GrbDaemon(Device, DeviceConfig):
                 should_update_position = True
                 update_reason = f"better accuracy: {existing_error_float:.3f}° -> {grb.error_box:.3f}°"
 
-        # Update target position if warranted
+        # Update both targets and grb tables synchronously if position should be updated
         if should_update_position:
+            # Update targets table with new coordinates
             cursor.execute("""
                 UPDATE targets
                 SET tar_ra = %s, tar_dec = %s
                 WHERE tar_id = %s
             """, (grb.ra, grb.dec, existing_tar_id))
-            logging.info(f"  Updated target position: {update_reason}")
 
-        # Always insert new GRB record for this alert
-        cursor.execute("""
-            INSERT INTO grb (
-                tar_id, grb_id, grb_seqn, grb_type, grb_ra, grb_dec,
-                grb_is_grb, grb_date, grb_last_update, grb_errorbox
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, to_timestamp(%s), to_timestamp(%s), %s)
-        """, (existing_tar_id, grb_id_int, grb.sequence_num, grb.grb_type,
-              grb.ra, grb.dec, grb.is_grb, float(grb.detection_time),
-              time.time(), grb.error_box))
+            # UPDATE the GRB record with new coordinates too
+            cursor.execute("""
+                UPDATE grb SET
+                    grb_seqn = %s, grb_type = %s, grb_ra = %s, grb_dec = %s,
+                    grb_is_grb = %s, grb_last_update = to_timestamp(%s), grb_errorbox = %s
+                WHERE tar_id = %s
+            """, (grb.sequence_num, grb.grb_type, grb.ra, grb.dec, grb.is_grb,
+                  time.time(), grb.error_box, existing_tar_id))
 
-        # Add raw packet data
+            logging.info(f"  Updated target and grb position: {update_reason}")
+        else:
+            # UPDATE only metadata in GRB record (no coordinate changes)
+            cursor.execute("""
+                UPDATE grb SET
+                    grb_seqn = %s, grb_type = %s, grb_is_grb = %s, grb_last_update = to_timestamp(%s)
+                WHERE tar_id = %s
+            """, (grb.sequence_num, grb.grb_type, grb.is_grb, time.time(), existing_tar_id))
+
+        # Add raw packet data to grb_gcn table (this can have multiple entries per GRB)
         self._add_gcn_raw_packet(cursor, grb, grb_id_int)
 
         conn.commit()
@@ -948,7 +955,6 @@ class GrbDaemon(Device, DeviceConfig):
             self.targets_updated_today.value += 1
 
         return existing_tar_id
-
 
     def _link_to_existing_target(self, cursor, conn, grb: GrbTarget, grb_id_int: int, candidate):
         """Link new GRB alert to existing target based on time/position match."""
@@ -973,32 +979,38 @@ class GrbDaemon(Device, DeviceConfig):
                 should_update_position = True
                 update_reason = f"better accuracy: {cand_errorbox:.3f}° -> {grb.error_box:.3f}°"
 
-        # Update target position if warranted
+        # Update both targets and grb tables synchronously if position should be updated
         if should_update_position:
+            # Update targets table with new coordinates
             cursor.execute("""
                 UPDATE targets
                 SET tar_ra = %s, tar_dec = %s
                 WHERE tar_id = %s
             """, (grb.ra, grb.dec, cand_tar_id))
-            logging.info(f"  Updated target position: {update_reason}")
 
-        # Insert new GRB record pointing to the existing target
-        cursor.execute("""
-            INSERT INTO grb (
-                tar_id, grb_id, grb_seqn, grb_type, grb_ra, grb_dec,
-                grb_is_grb, grb_date, grb_last_update, grb_errorbox
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, to_timestamp(%s), to_timestamp(%s), %s)
-        """, (cand_tar_id, grb_id_int, grb.sequence_num, grb.grb_type,
-              grb.ra, grb.dec, grb.is_grb, grb.detection_time,
-              time.time(), grb.error_box))
+            # UPDATE the GRB record with new coordinates too
+            cursor.execute("""
+                UPDATE grb SET
+                    grb_seqn = %s, grb_type = %s, grb_ra = %s, grb_dec = %s,
+                    grb_is_grb = %s, grb_last_update = to_timestamp(%s), grb_errorbox = %s
+                WHERE tar_id = %s
+            """, (grb.sequence_num, grb.grb_type, grb.ra, grb.dec, grb.is_grb,
+                  time.time(), grb.error_box, cand_tar_id))
 
-        # Add raw packet data
+            logging.info(f"  Updated target and grb position: {update_reason}")
+        else:
+            # UPDATE only metadata in GRB record (no coordinate changes)
+            cursor.execute("""
+                UPDATE grb SET
+                    grb_seqn = %s, grb_type = %s, grb_is_grb = %s, grb_last_update = to_timestamp(%s)
+                WHERE tar_id = %s
+            """, (grb.sequence_num, grb.grb_type, grb.is_grb, time.time(), cand_tar_id))
+
+        # Add raw packet data to grb_gcn table (this can have multiple entries per GRB)
         self._add_gcn_raw_packet(cursor, grb, grb_id_int)
 
         conn.commit()
-        conn.close()
         return cand_tar_id
-
 
     def _create_new_grb_if_valid(self, cursor, conn, grb: GrbTarget, grb_id_int: int):
         """Create new GRB target only if coordinates are valid."""
@@ -1022,7 +1034,7 @@ class GrbDaemon(Device, DeviceConfig):
         cursor.execute("SELECT nextval('grb_tar_id')")
         tar_id = cursor.fetchone()[0]
 
-        logging.debug(f"Generated new GRB target ID: {tar_id}")
+        logging.info(f"Generated new GRB target ID: {tar_id}")
 
         # Generate target name in RTS2 format
         grb_time = datetime.fromtimestamp(grb.detection_time)
@@ -1040,38 +1052,46 @@ class GrbDaemon(Device, DeviceConfig):
         # Determine if target should be enabled
         tar_enabled = not self.create_disabled.value
 
-        # Insert into targets table
-        cursor.execute("""
-            INSERT INTO targets (
-                tar_id, type_id, tar_name, tar_ra, tar_dec,
-                tar_enabled, tar_comment, tar_priority, tar_bonus, tar_bonus_time
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """, (tar_id, 'G', target_name, grb.ra, grb.dec, tar_enabled, comment, 100, 100, None))
+        try:
+            # Insert into targets table first
+            cursor.execute("""
+                INSERT INTO targets (
+                    tar_id, type_id, tar_name, tar_ra, tar_dec,
+                    tar_enabled, tar_comment, tar_priority, tar_bonus, tar_bonus_time
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (tar_id, 'G', target_name, grb.ra, grb.dec, tar_enabled, comment, 100, 100, None))
 
-        # Insert into grb table (only one entry per GRB)
-        cursor.execute("""
-            INSERT INTO grb (
-                tar_id, grb_id, grb_seqn, grb_type, grb_ra, grb_dec,
-                grb_is_grb, grb_date, grb_last_update, grb_errorbox
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, to_timestamp(%s), to_timestamp(%s), %s)
-        """, (tar_id, grb_id_int, grb.sequence_num, grb.grb_type,
-              grb.ra, grb.dec, grb.is_grb, float(grb.detection_time),
-              time.time(), grb.error_box))
+            # Immediately insert corresponding grb table entry with same tar_id
+            # This must be done atomically to maintain the one-to-one relationship
+            cursor.execute("""
+                INSERT INTO grb (
+                    tar_id, grb_id, grb_seqn, grb_type, grb_ra, grb_dec,
+                    grb_is_grb, grb_date, grb_last_update, grb_errorbox
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, to_timestamp(%s), to_timestamp(%s), %s)
+            """, (tar_id, grb_id_int, grb.sequence_num, grb.grb_type,
+                  grb.ra, grb.dec, grb.is_grb, float(grb.detection_time),
+                  time.time(), grb.error_box))
 
-        logging.info(f"Created new GRB target: ID={tar_id}, {grb.grb_id} at "
-                   f"RA={grb.ra:.3f}, Dec={grb.dec:.3f}, Error={grb.error_box:.3f}°")
+            logging.info(f"Created new GRB target: ID={tar_id}, {grb.grb_id} at "
+                       f"RA={grb.ra:.3f}, Dec={grb.dec:.3f}, Error={grb.error_box:.3f}°")
 
-        # Add raw GCN packet data to grb_gcn table
-        self._add_gcn_raw_packet(cursor, grb, grb_id_int)
+            # Add raw GCN packet data to grb_gcn table
+            self._add_gcn_raw_packet(cursor, grb, grb_id_int)
 
-        conn.commit()
+            # Commit the transaction - all inserts succeed together or fail together
+            conn.commit()
 
-        # Update statistics
-        with self._stats_lock:
-            self.targets_created_today.value += 1
+            # Update statistics only after successful commit
+            with self._stats_lock:
+                self.targets_created_today.value += 1
 
-        return tar_id
+            return tar_id
 
+        except Exception as e:
+            # If any insert fails, rollback the entire transaction
+            logging.error(f"Failed to create GRB target {tar_id}: {e}")
+            conn.rollback()
+            return None
 
     def _is_valid_coordinates(self, ra, dec):
         """Check if coordinates are valid (not NaN, None, not 0,0, within range)."""
