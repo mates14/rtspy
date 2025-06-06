@@ -195,8 +195,8 @@ class GrbDaemon(Device, DeviceConfig):
         # GCN connection options
         #config.add_argument('--gcn-client-id', help='GCN Kafka client ID', required=True)
         #config.add_argument('--gcn-client-secret', help='GCN Kafka client secret', required=True)
-        config.add_argument('--gcn-client-id', help='GCN Kafka client ID', default='ibkn5j8ocfhhdftq6feedfmdv')
-        config.add_argument('--gcn-client-secret', help='GCN Kafka client secret', default='rh3v8p9sqq9o0q8goqufdl2449eq7fl37hf74096c5km9l6cjm')
+        config.add_argument('--gcn-client-id', help='GCN Kafka client ID', default=None)
+        config.add_argument('--gcn-client-secret', help='GCN Kafka client secret', default=None)
 
         # GRB processing options
         config.add_argument('--disable-grbs', action='store_true', help='Disable GRB observations (monitoring only)')
