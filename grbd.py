@@ -708,6 +708,33 @@ class GrbDaemon(Device, DeviceConfig):
             logging.error(f"Error processing transient: {e}")
             logging.exception("Detailed error:")
 
+    def _sanitize_db_row(self, row):
+        """
+        Sanitize database row by converting all Decimal/numeric types to float.
+
+        Args:
+            row: Database row tuple
+
+        Returns:
+            Tuple with all numeric values converted to float
+        """
+        if not row:
+            return row
+
+        sanitized = []
+        for value in row:
+            if value is None:
+                sanitized.append(None)
+            elif hasattr(value, '__float__'):  # Handles Decimal, int, float
+                try:
+                    sanitized.append(float(value))
+                except (ValueError, TypeError):
+                    sanitized.append(value)  # Keep original if conversion fails
+            else:
+                sanitized.append(value)  # Keep strings, dates, etc. as-is
+
+        return tuple(sanitized)
+
     def _add_grb_to_database(self, grb: GrbTarget) -> Optional[int]:
         """
         Add GRB target to RTS2 PostgreSQL database with time-based deduplication.
@@ -746,12 +773,13 @@ class GrbDaemon(Device, DeviceConfig):
             existing_exact = cursor.fetchone()
 
             if existing_exact:
+                existing_exact = self._sanitize_db_row(existing_exact)
                 logging.debug(f"Found existing trigger {grb.grb_id}: {existing_exact[4]}")
                 return self._update_existing_grb_target(cursor, conn, grb, grb_id_int, existing_exact)
 
             # Step 2: Look for GRBs within 15-minute time window
             time_window = 900  # 15 minutes in seconds
-            logging.debug(f"No exact trigger match, searching for GRBs within 15 minutes of {grb.detection_time}")
+            logging.debug(f"No exact trigger match, searching for GRBs within {float(time_window)/60.0:.1f} minutes of {grb.detection_time}")
 
             # Convert grb.detection_time to proper type for database comparison
             detection_timestamp = float(grb.detection_time)
@@ -768,6 +796,9 @@ class GrbDaemon(Device, DeviceConfig):
 
             time_candidates = cursor.fetchall()
 
+            # Sanitize ALL candidates immediately after query
+            time_candidates = [self._sanitize_db_row(row) for row in time_candidates]
+
             if not time_candidates:
                 logging.debug("No GRBs found within 15-minute window")
                 return self._create_new_grb_if_valid(cursor, conn, grb, grb_id_int)
@@ -775,29 +806,22 @@ class GrbDaemon(Device, DeviceConfig):
             logging.debug(f"Found {len(time_candidates)} GRBs within 15-minute window")
 
             # Step 3: Check if any candidates are position-compatible
-            # (This is the rare multi-GRB safety check)
             for candidate in time_candidates:
                 (cand_tar_id, cand_grb_id, cand_ra, cand_dec, cand_errorbox,
                  cand_date, cand_name, cand_epoch) = candidate
 
-                # Convert decimal.Decimal to float for calculations
-                cand_epoch_float = float(cand_epoch) if cand_epoch is not None else 0.0
-                cand_ra_float = float(cand_ra) if cand_ra is not None else float('nan')
-                cand_dec_float = float(cand_dec) if cand_dec is not None else float('nan')
-                cand_error_float = float(cand_errorbox) if cand_errorbox is not None else float('nan')
-
-                time_diff = abs(detection_timestamp - cand_epoch_float)
+                time_diff = abs(detection_timestamp - cand_epoch) if cand_epoch is not None else 999.0
 
                 logging.debug(f"Candidate {cand_name} (trigger {cand_grb_id}): {time_diff:.1f}s apart")
 
                 # If both have valid coordinates, check compatibility
                 if (self._is_valid_coordinates(grb.ra, grb.dec) and
-                    self._is_valid_coordinates(cand_ra_float, cand_dec_float)):
+                    self._is_valid_coordinates(cand_ra, cand_dec)):
 
                     # Calculate position difference with proper error combination
                     compatible = self._are_positions_compatible(
                         grb.ra, grb.dec, grb.error_box,
-                        cand_ra_float, cand_dec_float, cand_error_float
+                        cand_ra, cand_dec, cand_errorbox
                     )
 
                     if compatible:
@@ -813,7 +837,7 @@ class GrbDaemon(Device, DeviceConfig):
                     logging.info(f"GRB {grb.grb_id} (no coordinates) matches {cand_name} by time ({time_diff:.1f}s)")
                     return self._link_to_existing_target(cursor, conn, grb, grb_id_int, candidate)
 
-                elif not self._is_valid_coordinates(cand_ra_float, cand_dec_float):
+                elif not self._is_valid_coordinates(cand_ra, cand_dec):
                     # Candidate has no valid coordinates, link if this one does
                     if self._is_valid_coordinates(grb.ra, grb.dec):
                         logging.info(f"GRB {grb.grb_id} provides coordinates for existing target {cand_name}")
@@ -968,10 +992,8 @@ class GrbDaemon(Device, DeviceConfig):
         (cand_tar_id, cand_grb_id, cand_ra, cand_dec, cand_errorbox,
          cand_date, cand_name, cand_epoch) = candidate
 
-        # Convert Decimal to float for time calculations
-        cand_epoch_float = float(cand_epoch) if cand_epoch is not None else 0.0
+        time_diff = abs(float(grb.detection_time) - cand_epoch) if cand_epoch is not None else 999.0
 
-        time_diff = abs(grb.detection_time - cand_epoch)
         logging.info(f"Linking GRB {grb.grb_id} to existing target {cand_name} "
                    f"(time difference: {time_diff:.1f}s)")
 
