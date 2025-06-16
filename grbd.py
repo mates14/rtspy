@@ -18,6 +18,7 @@ import threading
 import re
 import math
 import json
+import decimal
 from typing import Dict, Optional, Any, Callable
 from datetime import datetime
 import psycopg2
@@ -1487,7 +1488,7 @@ class GrbDaemon(Device, DeviceConfig):
             # Build command arguments as specified in original grbd
             # Format: target-id grb-id grb-seqn grb-type grb-ra grb-dec grb-is-grb grb-date grb-errorbox
             cmd_args = [
-                self.add_exec,
+                #self.add_exec,
                 str(grb.target_id),
                 grb.grb_id,
                 str(grb.sequence_num),
