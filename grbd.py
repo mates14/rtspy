@@ -1516,11 +1516,11 @@ class GrbDaemon(Device, DeviceConfig):
             target_id: Target ID to observe
         """
         try:
-            logging.info(f"Triggering GRB observation for target {target_id}")
+            logging.debug(f"Triggering GRB observation for target {target_id}")
 
             if not self.trigger_ready:
-                logging.info(f"System not ready for immediate GRB observation (state=0x{self.system_state:02x})")
-                logging.info("GRB will be discovered by scheduler for time-critical scheduling")
+                logging.debug(f"System not ready for immediate GRB observation (state=0x{self.system_state:02x})")
+                logging.debug("GRB will be discovered by scheduler for time-critical scheduling")
                 # Do not queue - let the scheduler handle it
                 return
 
@@ -1537,7 +1537,7 @@ class GrbDaemon(Device, DeviceConfig):
                 # Send execute GRB command to executor
                 cmd = f"grb {target_id}" # or now <tar_id>
                 executor_conn.send_command(cmd, self._on_execute_grb_result)
-                logging.info(f"Sent GRB execute command to executor: {cmd}")
+                logging.debug(f"Sent GRB execute command to executor: {cmd}")
 
             #elif self.queue_name.value:
             #    # Queue GRB for selector
@@ -1574,13 +1574,13 @@ class GrbDaemon(Device, DeviceConfig):
             logging.error(f"Error queuing GRB observation: {e}")
 
     def _on_execute_grb_result(self, conn, success, code, message):
-        """Handle result from executor GRB command."""
+        """Handle result from executor command - failures are normal."""
         if success:
             logging.info(f"GRB execution successful: {message}")
             with self._stats_lock:
                 self.observations_triggered.value += 1
         else:
-            logging.error(f"GRB execution failed: {message}")
+            logging.debug(f"Executor rejected GRB: {message}")
             # Try queuing if execution failed and queue is configured
             #if self.queue_name.value and self.current_grb:
             #    self._queue_grb_observation(self.current_grb.target_id)
