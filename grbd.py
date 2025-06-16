@@ -710,13 +710,13 @@ class GrbDaemon(Device, DeviceConfig):
 
     def _sanitize_db_row(self, row):
         """
-        Sanitize database row by converting all Decimal/numeric types to float.
+        Sanitize database row by converting PostgreSQL numeric types appropriately.
 
         Args:
             row: Database row tuple
 
         Returns:
-            Tuple with all numeric values converted to float
+            Tuple with Decimal values converted to float
         """
         if not row:
             return row
@@ -725,11 +725,9 @@ class GrbDaemon(Device, DeviceConfig):
         for value in row:
             if value is None:
                 sanitized.append(None)
-            elif hasattr(value, '__float__'):  # Handles Decimal, int, float
-                try:
-                    sanitized.append(float(value))
-                except (ValueError, TypeError):
-                    sanitized.append(value)  # Keep original if conversion fails
+            elif isinstance(value, decimal.Decimal):
+                # Convert to float for arithmetic operations
+                sanitized.append(float(value))
             else:
                 sanitized.append(value)  # Keep strings, dates, etc. as-is
 
