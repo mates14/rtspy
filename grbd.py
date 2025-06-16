@@ -649,22 +649,11 @@ class GrbDaemon(Device, DeviceConfig):
             logging.exception("Detailed traceback:")
 
     def _process_grb_info(self, grb_info: 'GrbTarget'):
-        """Process parsed GRB information - FIXED VERSION."""
+        """Process parsed GRB information with clean, concise logging."""
         try:
             # Update mission statistics
             self._update_mission_statistics(grb_info.mission, grb_info)
             self._update_recent_grbs(grb_info)
-
-            logging.info(f"Received transient alert: {grb_info.grb_id} "
-                        f"from {grb_info.mission}")
-
-            # Log coordinates if valid
-            if self._is_valid_coordinates(grb_info.ra, grb_info.dec):
-                logging.info(f"  Position: RA={grb_info.ra:.3f}, Dec={grb_info.dec:.3f}")
-                if not math.isnan(grb_info.error_box):
-                    logging.info(f"  Error box: {grb_info.error_box:.3f} degrees")
-            else:
-                logging.info(f"  No valid coordinates (RA={grb_info.ra:.3f}, Dec={grb_info.dec:.3f})")
 
             # Add to database with proper error handling
             db_start_time = time.time()
@@ -685,12 +674,12 @@ class GrbDaemon(Device, DeviceConfig):
 
                 # Only trigger observations for valid coordinates
                 if not self._is_valid_coordinates(grb_info.ra, grb_info.dec):
-                    logging.info(f"Skipping observation trigger for {grb_info.grb_id} - no valid coordinates")
+                    logging.debug(f"Skipping observation trigger for {grb_info.grb_id} - no valid coordinates")
                     return
 
                 # Check visibility if filtering enabled
                 if not self._check_visibility_constraints(grb_info):
-                    logging.info(f"Transient {grb_info.grb_id} not visible, skipping observation")
+                    logging.debug(f"Transient {grb_info.grb_id} not visible, skipping observation")
                     return
 
                 # Trigger observation if enabled
@@ -699,9 +688,9 @@ class GrbDaemon(Device, DeviceConfig):
                     with self._stats_lock:
                         self.observations_triggered.value += 1
                 else:
-                    logging.info(f"Transient observation disabled: {grb_info.grb_id}")
+                    logging.debug(f"Transient observation disabled: {grb_info.grb_id}")
             else:
-                logging.info(f"Transient {grb_info.grb_id} not added to database")
+                logging.warning(f"Transient {grb_info.grb_id} not added to database")
 
         except Exception as e:
             self._log_error("grb_processing", str(e))
@@ -734,15 +723,7 @@ class GrbDaemon(Device, DeviceConfig):
         return tuple(sanitized)
 
     def _add_grb_to_database(self, grb: GrbTarget) -> Optional[int]:
-        """
-        Add GRB target to RTS2 PostgreSQL database with time-based deduplication.
-
-        Logic:
-        1. Check for exact trigger ID match first
-        2. If not found, look for GRBs within 15-minute time window
-        3. If found, verify coordinates are consistent (rare multi-GRB check)
-        4. Otherwise create new target
-        """
+        """ Add GRB target to RTS2 PostgreSQL database with time-based deduplication."""
         try:
             # Connect to RTS2 PostgreSQL database
             conn = psycopg2.connect(
@@ -755,7 +736,6 @@ class GrbDaemon(Device, DeviceConfig):
 
             # Convert string grb_id to integer for database
             grb_id_int = self._convert_grb_id_to_int(grb.grb_id)
-
             logging.debug(f"Processing GRB ID: {grb.grb_id} -> {grb_id_int}")
 
             # Step 1: Check for existing GRB by exact trigger ID
@@ -777,9 +757,6 @@ class GrbDaemon(Device, DeviceConfig):
 
             # Step 2: Look for GRBs within 15-minute time window
             time_window = 900  # 15 minutes in seconds
-            logging.debug(f"No exact trigger match, searching for GRBs within {float(time_window)/60.0:.1f} minutes of {grb.detection_time}")
-
-            # Convert grb.detection_time to proper type for database comparison
             detection_timestamp = float(grb.detection_time)
 
             cursor.execute("""
@@ -793,8 +770,6 @@ class GrbDaemon(Device, DeviceConfig):
             """, (detection_timestamp, time_window, detection_timestamp))
 
             time_candidates = cursor.fetchall()
-
-            # Sanitize ALL candidates immediately after query
             time_candidates = [self._sanitize_db_row(row) for row in time_candidates]
 
             if not time_candidates:
@@ -823,26 +798,26 @@ class GrbDaemon(Device, DeviceConfig):
                     )
 
                     if compatible:
-                        logging.info(f"GRB {grb.grb_id} matches existing target {cand_name} "
+                        logging.debug(f"GRB {grb.grb_id} matches existing target {cand_name} "
                                    f"(time: {time_diff:.1f}s, positions compatible)")
                         return self._link_to_existing_target(cursor, conn, grb, grb_id_int, candidate)
                     else:
-                        logging.warning(f"Potential multi-GRB situation! {grb.grb_id} within {time_diff:.1f}s "
+                        logging.debug(f"Potential multi-GRB situation! {grb.grb_id} within {time_diff:.1f}s "
                                       f"of {cand_name} but positions incompatible. Creating separate target.")
 
                 elif not self._is_valid_coordinates(grb.ra, grb.dec):
                     # New GRB has no valid coordinates, assume it's related to first time match
-                    logging.info(f"GRB {grb.grb_id} (no coordinates) matches {cand_name} by time ({time_diff:.1f}s)")
+                    logging.debug(f"GRB {grb.grb_id} (no coordinates) matches {cand_name} by time ({time_diff:.1f}s)")
                     return self._link_to_existing_target(cursor, conn, grb, grb_id_int, candidate)
 
                 elif not self._is_valid_coordinates(cand_ra, cand_dec):
                     # Candidate has no valid coordinates, link if this one does
                     if self._is_valid_coordinates(grb.ra, grb.dec):
-                        logging.info(f"GRB {grb.grb_id} provides coordinates for existing target {cand_name}")
+                        logging.debug(f"GRB {grb.grb_id} provides coordinates for existing target {cand_name}")
                         return self._link_to_existing_target(cursor, conn, grb, grb_id_int, candidate)
 
             # Step 4: No compatible candidates found, create new target
-            logging.info(f"No compatible targets found within 15 minutes, creating new target for {grb.grb_id}")
+            logging.debug(f"No compatible targets found within 15 minutes, creating new target for {grb.grb_id}")
             return self._create_new_grb_if_valid(cursor, conn, grb, grb_id_int)
 
         except Exception as e:
@@ -855,7 +830,6 @@ class GrbDaemon(Device, DeviceConfig):
                     pass
             return None
         finally:
-            # Always close connection
             if 'conn' in locals():
                 try:
                     conn.close()
@@ -926,37 +900,26 @@ class GrbDaemon(Device, DeviceConfig):
         """Update existing target for the same trigger ID."""
         (existing_tar_id, existing_error, existing_ra, existing_dec, existing_name) = existing
 
-        # Convert existing values to float to avoid Decimal issues
-        existing_ra_float = float(existing_ra) if existing_ra is not None else float('nan')
-        existing_dec_float = float(existing_dec) if existing_dec is not None else float('nan')
-        existing_error_float = float(existing_error) if existing_error is not None else float('nan')
-
-        logging.info(f"Updating existing target {existing_name} (ID: {existing_tar_id}) for trigger {grb.grb_id}")
-
         # Determine if we should update the target position
         should_update_position = False
         update_reason = ""
 
-        if not self._is_valid_coordinates(existing_ra_float, existing_dec_float):
+        if not self._is_valid_coordinates(existing_ra, existing_dec):
             if self._is_valid_coordinates(grb.ra, grb.dec):
                 should_update_position = True
                 update_reason = "adding first valid coordinates"
         elif self._is_valid_coordinates(grb.ra, grb.dec):
-            if (math.isnan(existing_error_float) or
-                (not math.isnan(grb.error_box) and grb.error_box < existing_error_float)):
+            if (math.isnan(existing_error) or
+                (not math.isnan(grb.error_box) and grb.error_box < existing_error)):
                 should_update_position = True
-                update_reason = f"better accuracy: {existing_error_float:.3f}° -> {grb.error_box:.3f}°"
+                update_reason = f"better accuracy: {existing_error:.3f}° -> {grb.error_box:.3f}°"
 
-        # Update both targets and grb tables synchronously if position should be updated
+        # Update database
         if should_update_position:
-            # Update targets table with new coordinates
             cursor.execute("""
-                UPDATE targets
-                SET tar_ra = %s, tar_dec = %s
-                WHERE tar_id = %s
+                UPDATE targets SET tar_ra = %s, tar_dec = %s WHERE tar_id = %s
             """, (grb.ra, grb.dec, existing_tar_id))
 
-            # UPDATE the GRB record with new coordinates too
             cursor.execute("""
                 UPDATE grb SET
                     grb_seqn = %s, grb_type = %s, grb_ra = %s, grb_dec = %s,
@@ -964,8 +927,6 @@ class GrbDaemon(Device, DeviceConfig):
                 WHERE tar_id = %s
             """, (grb.sequence_num, grb.grb_type, grb.ra, grb.dec, grb.is_grb,
                   time.time(), grb.error_box, existing_tar_id))
-
-            logging.info(f"  Updated target and grb position: {update_reason}")
         else:
             # UPDATE only metadata in GRB record (no coordinate changes)
             cursor.execute("""
@@ -976,8 +937,12 @@ class GrbDaemon(Device, DeviceConfig):
 
         # Add raw packet data to grb_gcn table (this can have multiple entries per GRB)
         self._add_gcn_raw_packet(cursor, grb, grb_id_int)
-
         conn.commit()
+
+        # CLEAN SINGLE-LINE LOG
+        coords_str = f"RA={grb.ra:.3f} Dec={grb.dec:.3f}" if self._is_valid_coordinates(grb.ra, grb.dec) else "no coords"
+        error_str = f"±{grb.error_box:.3f}°" if not math.isnan(grb.error_box) else ""
+        logging.info(f"Trigger from {grb.mission}: updating #{existing_tar_id} {existing_name} {coords_str} {error_str}")
 
         # Update statistics
         with self._stats_lock:
@@ -991,9 +956,6 @@ class GrbDaemon(Device, DeviceConfig):
          cand_date, cand_name, cand_epoch) = candidate
 
         time_diff = abs(float(grb.detection_time) - cand_epoch) if cand_epoch is not None else 999.0
-
-        logging.info(f"Linking GRB {grb.grb_id} to existing target {cand_name} "
-                   f"(time difference: {time_diff:.1f}s)")
 
         # Determine if we should update the target position
         should_update_position = False
@@ -1013,9 +975,7 @@ class GrbDaemon(Device, DeviceConfig):
         if should_update_position:
             # Update targets table with new coordinates
             cursor.execute("""
-                UPDATE targets
-                SET tar_ra = %s, tar_dec = %s
-                WHERE tar_id = %s
+                UPDATE targets SET tar_ra = %s, tar_dec = %s WHERE tar_id = %s
             """, (grb.ra, grb.dec, cand_tar_id))
 
             # UPDATE the GRB record with new coordinates too
@@ -1026,8 +986,6 @@ class GrbDaemon(Device, DeviceConfig):
                 WHERE tar_id = %s
             """, (grb.sequence_num, grb.grb_type, grb.ra, grb.dec, grb.is_grb,
                   time.time(), grb.error_box, cand_tar_id))
-
-            logging.info(f"  Updated target and grb position: {update_reason}")
         else:
             # UPDATE only metadata in GRB record (no coordinate changes)
             cursor.execute("""
@@ -1038,8 +996,13 @@ class GrbDaemon(Device, DeviceConfig):
 
         # Add raw packet data to grb_gcn table (this can have multiple entries per GRB)
         self._add_gcn_raw_packet(cursor, grb, grb_id_int)
-
         conn.commit()
+
+        # CLEAN SINGLE-LINE LOG
+        coords_str = f"RA={grb.ra:.3f} Dec={grb.dec:.3f}" if self._is_valid_coordinates(grb.ra, grb.dec) else "no coords"
+        error_str = f"±{grb.error_box:.3f}°" if not math.isnan(grb.error_box) else ""
+        logging.info(f"Trigger from {grb.mission}: linking #{cand_tar_id} {cand_name} {coords_str} {error_str} ({time_diff:.0f}s apart)")
+
         return cand_tar_id
 
     def _create_new_grb_if_valid(self, cursor, conn, grb: GrbTarget, grb_id_int: int):
@@ -1063,8 +1026,6 @@ class GrbDaemon(Device, DeviceConfig):
         # Generate new target ID using the sequence
         cursor.execute("SELECT nextval('grb_tar_id')")
         tar_id = cursor.fetchone()[0]
-
-        logging.info(f"Generated new GRB target ID: {tar_id}")
 
         # Generate target name in RTS2 format
         grb_time = datetime.fromtimestamp(grb.detection_time)
@@ -1092,7 +1053,6 @@ class GrbDaemon(Device, DeviceConfig):
             """, (tar_id, 'G', target_name, grb.ra, grb.dec, tar_enabled, comment, 100, 100, None))
 
             # Immediately insert corresponding grb table entry with same tar_id
-            # This must be done atomically to maintain the one-to-one relationship
             cursor.execute("""
                 INSERT INTO grb (
                     tar_id, grb_id, grb_seqn, grb_type, grb_ra, grb_dec,
@@ -1102,14 +1062,16 @@ class GrbDaemon(Device, DeviceConfig):
                   grb.ra, grb.dec, grb.is_grb, float(grb.detection_time),
                   time.time(), grb.error_box))
 
-            logging.info(f"Created new GRB target: ID={tar_id}, {grb.grb_id} at "
-                       f"RA={grb.ra:.3f}, Dec={grb.dec:.3f}, Error={grb.error_box:.3f}°")
-
             # Add raw GCN packet data to grb_gcn table
             self._add_gcn_raw_packet(cursor, grb, grb_id_int)
 
             # Commit the transaction - all inserts succeed together or fail together
             conn.commit()
+
+            # CLEAN SINGLE-LINE LOG
+            coords_str = f"RA={grb.ra:.3f} Dec={grb.dec:.3f}" if self._is_valid_coordinates(grb.ra, grb.dec) else "no coords"
+            error_str = f"±{grb.error_box:.3f}°" if not math.isnan(grb.error_box) else ""
+            logging.info(f"Trigger from {grb.mission}: creating #{tar_id} {target_name} {coords_str} {error_str}")
 
             # Update statistics only after successful commit
             with self._stats_lock:
@@ -1304,7 +1266,7 @@ class GrbDaemon(Device, DeviceConfig):
                     logging.debug(f"Successfully parsed XML for {grb.mission} trigger {grb.grb_id}")
                     return grb
                 except Exception as e:
-                    logging.warning(f"XML parsing failed for {topic}, trying text fallback: {e}")
+                    logging.debug(f"XML parsing failed for {topic}, trying text fallback: {e}")
 
             # Fallback to enhanced text parsing
             grb = self._parse_text_format(message, grb)
@@ -1323,8 +1285,7 @@ class GrbDaemon(Device, DeviceConfig):
             return grb
 
         except Exception as e:
-            logging.error(f"Complete parsing failure for {topic}: {e}")
-            logging.exception("Detailed parsing error:")
+            logging.debug(f"Complete parsing failure for {topic}: {e}")
             return None
 
     def _parse_text_format(self, message: str, grb: GrbTarget) -> GrbTarget:
