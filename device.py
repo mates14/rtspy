@@ -467,7 +467,7 @@ class DeviceCommands:
                 self.network.info_callback()
 
             self.network.values['infotime']._value = time.time()
-            logging.info(f"{self.network.values}")
+            logging.debug(f"DeviceCommands::handle_info() network.values:{self.network.values}")
 
             # Send all values
             with self.network._lock:
