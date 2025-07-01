@@ -63,7 +63,7 @@ class GcnKafkaConsumer:
                     'gcn.classic.voevent.FERMI_GBM_ALERT',
                     'gcn.classic.voevent.FERMI_GBM_FIN_POS',
                     'gcn.classic.voevent.FERMI_GBM_FLT_POS',
-                    'gcn.classic.voevent.FERMI_GBM_POS_TEST',
+#                    'gcn.classic.voevent.FERMI_GBM_POS_TEST',
                     'gcn.classic.voevent.FERMI_GBM_GND_POS',
                     'gcn.classic.voevent.FERMI_GBM_SUBTHRESH',
                     'gcn.classic.voevent.MAXI_UNKNOWN',
