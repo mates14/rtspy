@@ -119,6 +119,24 @@ class QueueSelector(Device, DeviceConfig):
         config.add_argument('--db-password', default='pasewcic25',
                           help='Database password', section='database')
 
+        # Queue configuration - map queue names to IDs
+        config.add_argument('--queue-grb', type=int, default=0,
+                          help='GRB queue ID', section='queues')
+        config.add_argument('--queue-manual', type=int, default=1,
+                          help='Manual queue ID', section='queues')
+        config.add_argument('--queue-scheduler', type=int, default=2,
+                          help='Scheduler queue ID', section='queues')
+        config.add_argument('--queue-integral', type=int, default=3,
+                          help='Integral targets queue ID', section='queues')
+        config.add_argument('--queue-regular', type=int, default=4,
+                          help='Regular targets queue ID', section='queues')
+        config.add_argument('--queue-longscript', type=int, default=5,
+                          help='Longscript queue ID', section='queues')
+        config.add_argument('--queue-longscript2', type=int, default=6,
+                          help='Longscript2 queue ID', section='queues')
+        config.add_argument('--queue-plan', type=int, default=7,
+                          help='Plan queue ID', section='queues')
+
         # Observatory location
         config.add_argument('--latitude', type=float, default=50.0,
                           help='Observatory latitude (degrees)', section='observatory')
@@ -183,6 +201,18 @@ class QueueSelector(Device, DeviceConfig):
             'password': config.get('db_password', 'pasewcic25')
         }
 
+        # Queue ID mapping
+        self.queue_ids = {
+            'grb': config.get('queue_grb', 0),
+            'manual': config.get('queue_manual', 1),
+            'scheduler': config.get('queue_scheduler', 2),
+            'integral_targets': config.get('queue_integral', 3),
+            'regular_targets': config.get('queue_regular', 4),
+            'longscript': config.get('queue_longscript', 5),
+            'longscript2': config.get('queue_longscript2', 6),
+            'plan': config.get('queue_plan', 7)
+        }
+
         # Observatory configuration
         self.observatory_config = {
             'latitude': config.get('latitude', 50.0),
@@ -209,6 +239,7 @@ class QueueSelector(Device, DeviceConfig):
         logging.info(f"Queue selector configured:")
         logging.info(f"  Database: {self.db_config['dbname']}@{self.db_config['host']}")
         logging.info(f"  Observatory: {self.observatory_config['latitude']:.2f}°, {self.observatory_config['longitude']:.2f}°")
+        logging.info(f"  Scheduler queue ID: {self.queue_ids['scheduler']}")
         logging.info(f"  Time slice: {self.time_slice}s")
         logging.info(f"  Flats: {self.flat_sun_min.value}° to {self.flat_sun_max.value}°")
 
@@ -457,39 +488,44 @@ class QueueSelector(Device, DeviceConfig):
 
             cursor = self.db_conn.cursor()
 
-            # Query scheduler queue
+            # Get scheduler queue ID
+            scheduler_queue_id = self.queue_ids.get('scheduler', 2)
+
+            # Query queues_targets table with correct column names
             query = """
-                SELECT q.qid, q.tar_id, q.queue_start, q.queue_end,
+                SELECT qt.qid, qt.tar_id, qt.time_start, qt.time_end,
                        t.tar_name, t.tar_ra, t.tar_dec
-                FROM queue q
-                JOIN targets t ON q.tar_id = t.tar_id
-                WHERE q.queue_name = 'scheduler'
-                  AND q.queue_start > now() - interval '1 hour'
-                  AND q.queue_start < now() + interval '24 hours'
-                ORDER BY q.queue_start
+                FROM queues_targets qt
+                JOIN targets t ON qt.tar_id = t.tar_id
+                WHERE qt.queue_id = %s
+                  AND qt.time_start IS NOT NULL
+                  AND qt.time_start > now() - interval '1 hour'
+                  AND qt.time_start < now() + interval '24 hours'
+                ORDER BY qt.time_start
                 LIMIT 1
             """
 
-            cursor.execute(query)
+            cursor.execute(query, (scheduler_queue_id,))
             row = cursor.fetchone()
 
             if row:
-                qid, tar_id, queue_start, queue_end, tar_name, tar_ra, tar_dec = row
+                qid, tar_id, time_start, time_end, tar_name, tar_ra, tar_dec = row
 
                 # Update queue size
                 cursor.execute("""
-                    SELECT COUNT(*) FROM queue
-                    WHERE queue_name = 'scheduler'
-                      AND queue_start > now()
-                """)
+                    SELECT COUNT(*) FROM queues_targets
+                    WHERE queue_id = %s
+                      AND time_start IS NOT NULL
+                      AND time_start > now()
+                """, (scheduler_queue_id,))
                 count = cursor.fetchone()[0]
                 self.queue_size.value = count
 
                 return ScheduledTarget(
                     qid=qid,
                     tar_id=tar_id,
-                    queue_start=queue_start,
-                    queue_end=queue_end,
+                    queue_start=time_start,
+                    queue_end=time_end,
                     tar_name=tar_name,
                     tar_ra=tar_ra or 0.0,
                     tar_dec=tar_dec or 0.0
@@ -501,6 +537,36 @@ class QueueSelector(Device, DeviceConfig):
         except Exception as e:
             logging.error(f"Error querying scheduler queue: {e}")
             return None
+
+    def _get_queue_targets(self, queue_name: str, limit: int = 10) -> list:
+        """Get targets from specified queue."""
+        try:
+            if not self.db_conn or self.db_conn.closed:
+                self.db_conn = psycopg2.connect(**self.db_config)
+
+            cursor = self.db_conn.cursor()
+            queue_id = self.queue_ids.get(queue_name)
+
+            if queue_id is None:
+                logging.warning(f"Unknown queue name: {queue_name}")
+                return []
+
+            query = """
+                SELECT qt.qid, qt.tar_id, qt.time_start, qt.time_end,
+                       t.tar_name, t.tar_ra, t.tar_dec, qt.queue_order
+                FROM queues_targets qt
+                JOIN targets t ON qt.tar_id = t.tar_id
+                WHERE qt.queue_id = %s
+                ORDER BY COALESCE(qt.time_start, '1970-01-01'::timestamp), qt.queue_order
+                LIMIT %s
+            """
+
+            cursor.execute(query, (queue_id, limit))
+            return cursor.fetchall()
+
+        except Exception as e:
+            logging.error(f"Error querying queue {queue_name}: {e}")
+            return []
 
     def _execute_target(self, target_id: int, target_type: str) -> bool:
         """Execute target with appropriate timing."""
