@@ -1,83 +1,79 @@
 #!/usr/bin/env python3
 
 """
-RTS2 Queue Selector - Simplified Implementation
+RTS2 Queue Selector Daemon
 
-This selector reads from the "scheduler" queue in the database and executes
-targets at their scheduled times. It handles calibrations and respects
-GRB grace periods.
+A simplified queue-based target selector that:
+1. Reads scheduled targets from the RTS2 PostgreSQL database
+2. Executes targets from queues in proper time order
+3. Handles calibrations (flats/darks) at appropriate times
+4. Respects GRB grace periods to avoid interrupting alert observations
+
+This replaces the complex C++ selector with a simple queue executor.
 """
 
 import time
+import math
 import logging
 import threading
-import math
 import psycopg2
-from typing import Dict, Any, Optional, Tuple
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from dataclasses import dataclass
+from typing import Optional, Dict, List, Tuple
 
 from device import Device
 from config import DeviceConfig
-from constants import DeviceType, ConnectionState
-from value import (ValueBool, ValueString, ValueInteger, ValueTime, ValueDouble,
-                  ValueSelection)
 from app import App
+from value import ValueDouble, ValueInteger, ValueBool, ValueTime, ValueString
+from constants import DeviceType
 
 
 @dataclass
 class ScheduledTarget:
-    """Represents a target from the scheduler queue."""
+    """Represents a scheduled target from the database."""
     qid: int
     tar_id: int
     queue_start: datetime
-    queue_end: datetime
+    queue_end: Optional[datetime]
     tar_name: str
     tar_ra: float
     tar_dec: float
+    queue_order: int = 0
 
 
 class SunCalculator:
     """Simple sun position calculator for calibration timing."""
 
-    def __init__(self, latitude: float, longitude: float, altitude: float = 0):
+    def __init__(self, latitude: float, longitude: float):
         self.latitude = math.radians(latitude)
         self.longitude = math.radians(longitude)
-        self.altitude = altitude
 
-    def get_sun_elevation(self, when: Optional[datetime] = None) -> float:
-        """Get sun elevation in degrees."""
-        if when is None:
-            when = datetime.utcnow()
+    def get_sun_elevation(self, dt: Optional[datetime] = None) -> float:
+        """Calculate sun elevation angle in degrees."""
+        if dt is None:
+            dt = datetime.now(timezone.utc)
 
-        # Simplified sun position calculation
-        # For production use, consider using astropy or pyephem
+        # Julian day calculation
+        jd = self._julian_day(dt)
 
-        # Days since J2000.0
-        jd = self._julian_day(when)
+        # Solar position calculation (simplified)
         n = jd - 2451545.0
-
-        # Mean longitude
-        L = math.radians(280.460 + 0.9856474 * n)
-
-        # Mean anomaly
-        g = math.radians(357.528 + 0.9856003 * n)
-
-        # Ecliptic longitude
-        lambda_sun = L + math.radians(1.915 * math.sin(g) + 0.020 * math.sin(2 * g))
+        L = (280.460 + 0.9856474 * n) % 360
+        g = math.radians((357.528 + 0.9856003 * n) % 360)
+        lambda_sun = math.radians(L + 1.915 * math.sin(g) + 0.020 * math.sin(2 * g))
 
         # Declination
-        declination = math.asin(math.sin(math.radians(23.439)) * math.sin(lambda_sun))
+        delta = math.asin(0.39795 * math.cos(lambda_sun))
 
         # Hour angle
-        gmst = math.radians(280.46061837 + 360.98564736629 * (jd - 2451545.0))
-        lmst = gmst + self.longitude
-        ha = lmst - lambda_sun
+        gmst = (18.697374558 + 24.06570982441908 * (jd - 2451545.0)) % 24
+        lst = (gmst + self.longitude * 12 / math.pi) % 24
+        ha = math.radians(15 * (lst - math.degrees(lambda_sun) / 15))
 
         # Elevation
         elevation = math.asin(
-            math.sin(self.latitude) * math.sin(declination) +
-            math.cos(self.latitude) * math.cos(declination) * math.cos(ha)
+            math.sin(self.latitude) * math.sin(delta) +
+            math.cos(self.latitude) * math.cos(delta) * math.cos(ha)
         )
 
         return math.degrees(elevation)
@@ -102,7 +98,7 @@ class QueueSelector(Device, DeviceConfig):
     Handles calibrations and respects GRB grace periods.
     """
 
-    # Target constants
+    # Target type constants (from C++ RTS2)
     TARGET_FLAT = 2
     TARGET_DARK = 3
 
@@ -119,216 +115,122 @@ class QueueSelector(Device, DeviceConfig):
         config.add_argument('--db-password', default='pasewcic25',
                           help='Database password', section='database')
 
-        # Queue configuration - map queue names to IDs
-        config.add_argument('--queue-grb', type=int, default=0,
-                          help='GRB queue ID', section='queues')
-        config.add_argument('--queue-manual', type=int, default=1,
-                          help='Manual queue ID', section='queues')
-        config.add_argument('--queue-scheduler', type=int, default=2,
-                          help='Scheduler queue ID', section='queues')
-        config.add_argument('--queue-integral', type=int, default=3,
-                          help='Integral targets queue ID', section='queues')
-        config.add_argument('--queue-regular', type=int, default=4,
-                          help='Regular targets queue ID', section='queues')
-        config.add_argument('--queue-longscript', type=int, default=5,
-                          help='Longscript queue ID', section='queues')
-        config.add_argument('--queue-longscript2', type=int, default=6,
-                          help='Longscript2 queue ID', section='queues')
-        config.add_argument('--queue-plan', type=int, default=7,
-                          help='Plan queue ID', section='queues')
+        # Queue names (mapped to queue IDs in database)
+        config.add_argument('--add-queue', action='append', dest='queue_names',
+                          help='Add queue name (can be used multiple times)')
 
-        # Observatory location
+        # Observatory location for sun calculations
         config.add_argument('--latitude', type=float, default=50.0,
                           help='Observatory latitude (degrees)', section='observatory')
         config.add_argument('--longitude', type=float, default=14.0,
                           help='Observatory longitude (degrees)', section='observatory')
-        config.add_argument('--altitude', type=float, default=500.0,
-                          help='Observatory altitude (meters)', section='observatory')
 
         # Calibration timing
-        config.add_argument('--flat-sun-min', type=float, default=-15.0,
+        config.add_argument('--flat-sun-min', type=float, default=-8.0,
                           help='Minimum sun elevation for flats (degrees)', section='calibration')
-        config.add_argument('--flat-sun-max', type=float, default=-8.0,
+        config.add_argument('--flat-sun-max', type=float, default=-4.0,
                           help='Maximum sun elevation for flats (degrees)', section='calibration')
+        config.add_argument('--dark-sun-min', type=float, default=-12.0,
+                          help='Minimum sun elevation for darks (degrees)', section='calibration')
+        config.add_argument('--dark-sun-max', type=float, default=-8.0,
+                          help='Maximum sun elevation for darks (degrees)', section='calibration')
 
-        # Timing parameters
-        config.add_argument('--time-slice', type=int, default=300,
-                          help='Time slice for scheduling (seconds)', section='timing')
-        config.add_argument('--grb-grace-period', type=int, default=1200,
-                          help='GRB grace period (seconds)', section='timing')
+        # Timing control
+        config.add_argument('--time-slice', type=float, default=300.0,
+                          help='Time slice before target start to issue next command (seconds)')
+        config.add_argument('--grb-grace-period', type=float, default=1200.0,
+                          help='GRB grace period to avoid interruptions (seconds)')
         config.add_argument('--update-interval', type=float, default=30.0,
-                          help='Queue check interval (seconds)', section='timing')
+                          help='Selector main loop interval (seconds)')
 
-    def __init__(self, device_name="SEL", port=0):
-        """Initialize the queue selector."""
-        super().__init__(device_name, DeviceType.SELECTOR, port)
+        # Executor device
+        config.add_argument('--executor', default='EXEC',
+                          help='Executor device name')
 
-        # Configuration values (set by apply_config)
-        self.db_config = {}
-        self.observatory_config = {}
-        self.time_slice = 300
-        self.grb_grace_period = 1200
-        self.update_interval = 30.0
-
-        # Create RTS2 values for monitoring
-        self._create_values()
-
-        # State tracking
-        self.last_issued_target = None
-        self.grb_grace_end = 0
-        self.system_state = 0
-        self.system_ready = False
-
-        # Executor state tracking
-        self.executor_current = -1  # What executor is actually observing
-        self.executor_is_idle = True
-
-        # Threading
-        self.running = False
-        self.selector_thread = None
-
-        # Sun calculator (initialized in apply_config)
-        self.sun_calc = None
-
-        # Database connection
-        self.db_conn = None
-
-    def _on_executor_current_changed(self, value_data):
-        """Handle executor current target change."""
-        try:
-            old_current = self.executor_current
-            self.executor_current = int(value_data) if value_data != "-1" else -1
-            self.executor_is_idle = (self.executor_current == -1)
-
-            # Detect external intervention
-            if (self.executor_current != -1 and
-                self.executor_current != self.last_issued_target and
-                old_current != self.executor_current):
-
-                logging.info(f"External target detected: {self.executor_current} (we issued: {self.last_issued_target})")
-                self.grb_grace_end = time.time() + self.grb_grace_period
-
-            logging.debug(f"Executor current: {self.executor_current} (idle: {self.executor_is_idle})")
-
-        except (ValueError, TypeError):
-            logging.warning(f"Invalid executor current value: {value_data}")
-            self.executor_current = -1
-            self.executor_is_idle = True
-
-    def apply_config(self, config: Dict[str, Any]):
-        """Apply selector configuration."""
+    def apply_config(self, config):
+        """Apply configuration and initialize selector."""
         super().apply_config(config)
 
         # Database configuration
         self.db_config = {
-            'host': config.get('db_host', 'localhost'),
-            'dbname': config.get('db_name', 'stars'),
-            'user': config.get('db_user', 'mates'),
-            'password': config.get('db_password', 'pasewcic25')
+            'host': config.get('db_host'),
+            'database': config.get('db_name'),
+            'user': config.get('db_user'),
+            'password': config.get('db_password')
         }
 
-        # Queue ID mapping
-        self.queue_ids = {
-            'grb': config.get('queue_grb', 0),
-            'manual': config.get('queue_manual', 1),
-            'scheduler': config.get('queue_scheduler', 2),
-            'integral_targets': config.get('queue_integral', 3),
-            'regular_targets': config.get('queue_regular', 4),
-            'longscript': config.get('queue_longscript', 5),
-            'longscript2': config.get('queue_longscript2', 6),
-            'plan': config.get('queue_plan', 7)
-        }
+        # Queue name to ID mapping (default RTS2 queues)
+        default_queues = ['grb', 'manual', 'scheduler', 'integral_targets',
+                         'regular_targets', 'longscript', 'longscript2', 'plan']
+        queue_names = config.get('queue_names') or default_queues
 
-        # Observatory configuration
-        self.observatory_config = {
-            'latitude': config.get('latitude', 50.0),
-            'longitude': config.get('longitude', 14.0),
-            'altitude': config.get('altitude', 500.0)
-        }
+        # Map queue names to IDs (0-based indexing as per RTS2 convention)
+        self.queue_name_to_id = {name: idx for idx, name in enumerate(queue_names)}
+        logging.info(f"Queue mapping: {self.queue_name_to_id}")
 
-        # Timing configuration
-        self.time_slice = config.get('time_slice', 300)
-        self.grb_grace_period = config.get('grb_grace_period', 1200)
-        self.update_interval = config.get('update_interval', 30.0)
+        # Observatory and calibration settings
+        self.sun_calc = SunCalculator(config.get('latitude'), config.get('longitude'))
+        self.flat_sun_min = config.get('flat_sun_min')
+        self.flat_sun_max = config.get('flat_sun_max')
+        self.dark_sun_min = config.get('dark_sun_min')
+        self.dark_sun_max = config.get('dark_sun_max')
 
-        # Calibration configuration
-        self.flat_sun_min.value = config.get('flat_sun_min', -15.0)
-        self.flat_sun_max.value = config.get('flat_sun_max', -8.0)
+        # Timing settings
+        self.time_slice = config.get('time_slice')
+        self.grb_grace_period = config.get('grb_grace_period')
+        self.update_interval = config.get('update_interval')
+        self.executor_name = config.get('executor')
 
-        # Initialize sun calculator
-        self.sun_calc = SunCalculator(
-            self.observatory_config['latitude'],
-            self.observatory_config['longitude'],
-            self.observatory_config['altitude']
-        )
+        # Runtime state
+        self.db_conn = None
+        self.selector_thread = None
+        self.running = False
+        self.grb_grace_end = 0.0
 
-        logging.info(f"Queue selector configured:")
-        logging.info(f"  Database: {self.db_config['dbname']}@{self.db_config['host']}")
-        logging.info(f"  Observatory: {self.observatory_config['latitude']:.2f}°, {self.observatory_config['longitude']:.2f}°")
-        logging.info(f"  Scheduler queue ID: {self.queue_ids['scheduler']}")
-        logging.info(f"  Time slice: {self.time_slice}s")
-        logging.info(f"  Flats: {self.flat_sun_min.value}° to {self.flat_sun_max.value}°")
+        # System state tracking
+        self.system_state = 0
+        self.system_ready = False
 
-    def _create_values(self):
-        """Create RTS2 values for monitoring."""
+        # Last selected target
+        self.last_target_id = None
+        self.last_command_time = 0.0
 
-        # Status values
-        self.enabled = ValueBool("enabled", "Selector enabled", writable=True, initial=True)
-        self.queue_only = ValueBool("queue_only", "Only select from queue", writable=True, initial=True)
+    def __init__(self, device_name="SEL", device_type=DeviceType.SELECTOR, port=0):
+        """Initialize the queue selector."""
+        super().__init__(device_name, device_type, port)
 
-        # Current target information
-        self.next_id = ValueInteger("next_id", "Next target ID")
-        self.next_time = ValueTime("next_time", "Next target time")
-        self.current_target = ValueInteger("current_target", "Current target ID")
-        self.current_start = ValueTime("current_start", "Current target start time")
-        self.current_end = ValueTime("current_end", "Current target end time")
-
-        # Calibration settings
-        self.flat_sun_min = ValueDouble("flat_sun_min", "Minimum sun elevation for flats [deg]",
-                                       writable=True, initial=-15.0)
-        self.flat_sun_max = ValueDouble("flat_sun_max", "Maximum sun elevation for flats [deg]",
-                                       writable=True, initial=-8.0)
-
-        # Statistics
-        self.targets_executed = ValueInteger("targets_executed", "Targets executed today", initial=0)
-        self.flats_executed = ValueInteger("flats_executed", "Flats executed today", initial=0)
-        self.darks_executed = ValueInteger("darks_executed", "Darks executed today", initial=0)
-
-        # System status
-        self.sun_elevation = ValueDouble("sun_elevation", "Current sun elevation [deg]")
-        self.queue_size = ValueInteger("queue_size", "Scheduler queue size")
-        self.last_update = ValueTime("last_update", "Last queue update")
-
-        # GRB grace tracking
-        self.grb_grace_active = ValueBool("grb_grace_active", "GRB grace period active")
-        self.grb_grace_until = ValueTime("grb_grace_until", "GRB grace period end")
+        # RTS2 values for monitoring
+        self.queue_size = ValueInteger("queue_size", "Number of targets in scheduler queue", initial=0)
+        self.current_queue = ValueString("current_queue", "Currently active queue name", initial="none")
+        self.next_target = ValueString("next_target", "Next target to observe", initial="none")
+        self.sun_elevation = ValueDouble("sun_elevation", "Current sun elevation (degrees)", initial=0.0)
+        self.grb_grace_active = ValueBool("grb_grace_active", "GRB grace period active", initial=False)
+        self.grb_grace_until = ValueTime("grb_grace_until", "GRB grace period end time", initial=0.0)
+        self.last_update = ValueTime("last_update", "Last selector update time", initial=time.time())
 
     def start(self):
-        """Start the queue selector."""
+        """Start the selector daemon."""
         super().start()
 
         # Test database connection
         if not self._test_database():
-            self.set_state(self.STATE_IDLE | self.ERROR_HW, "Database connection failed")
-            return
+            raise RuntimeError("Cannot connect to RTS2 database")
 
-        # Register interest in system state from centrald
-        self.network.register_state_interest("centrald", self._on_system_state_changed)
+        # Monitor centrald for system state
+        self.network.register_state_interest(
+            device_name="centrald",
+            state_callback=self._on_system_state_changed
+        )
 
         # Start selector thread
         self.running = True
-        self.selector_thread = threading.Thread(
-            target=self._selector_loop,
-            name="QueueSelector",
-            daemon=True
-        )
+        self.selector_thread = threading.Thread(target=self._selector_loop, daemon=True)
         self.selector_thread.start()
 
-        self.set_ready("Queue selector ready")
         logging.info("Queue selector started")
 
     def stop(self):
-        """Stop the queue selector."""
+        """Stop the selector daemon."""
         self.running = False
         if self.selector_thread and self.selector_thread.is_alive():
             self.selector_thread.join(timeout=5.0)
@@ -388,141 +290,92 @@ class QueueSelector(Device, DeviceConfig):
 
         while self.running:
             try:
-                current_time = time.time()
+                # Only run when system is ready
+                if not self.system_ready:
+                    time.sleep(self.update_interval)
+                    continue
 
                 # Check for GRB grace period
+                current_time = time.time()
                 if current_time < self.grb_grace_end:
-                    logging.debug(f"GRB grace period active for {self.grb_grace_end - current_time:.0f}s")
-                    time.sleep(min(10.0, self.grb_grace_end - current_time))
+                    logging.debug("In GRB grace period, skipping target selection")
+                    time.sleep(self.update_interval)
                     continue
 
-                # Get current executor target
-                executor_target = self._get_executor_target()
+                # Get next target to execute
+                target = self._select_next_target()
 
-                # Check for external intervention (GRB)
-                if executor_target and executor_target != self.last_issued_target:
-                    logging.info(f"External target detected: {executor_target}, setting grace period")
-                    self.grb_grace_end = current_time + self.grb_grace_period
-                    continue
+                if target:
+                    self._execute_target(target)
+                else:
+                    logging.debug("No target selected")
 
-                # Determine what to execute
-                target_id, target_type = self._select_next_target()
-
-                if target_id:
-                    # Execute target with proper timing
-                    if self._execute_target(target_id, target_type):
-                        self.last_issued_target = target_id
-
-                        # Update statistics
-                        if target_type == "flat":
-                            self.flats_executed.value += 1
-                        elif target_type == "dark":
-                            self.darks_executed.value += 1
-                        else:
-                            self.targets_executed.value += 1
-
-                # Sleep until next check
-                time.sleep(min(self.update_interval, 60.0))
+                time.sleep(self.update_interval)
 
             except Exception as e:
                 logging.error(f"Error in selector loop: {e}")
-                time.sleep(10.0)  # Back off on error
+                time.sleep(self.update_interval)
 
-    def _get_executor_target(self) -> Optional[int]:
-        """Get current target from executor."""
-        try:
-            # Find executor connection
-            for conn in self.network.connection_manager.connections.values():
-                if (hasattr(conn, 'remote_device_type') and
-                    conn.remote_device_type == DeviceType.EXECUTOR and
-                    conn.state == ConnectionState.AUTH_OK):
+        logging.info("Selector loop stopped")
 
-                    # Request current target (would need executor value monitoring)
-                    # For now, return None - this would need executor integration
-                    return None
-            return None
-        except Exception as e:
-            logging.warning(f"Error getting executor target: {e}")
-            return None
+    def _select_next_target(self) -> Optional[ScheduledTarget]:
+        """Select next target based on queue priority and timing."""
 
-    def _select_next_target(self) -> Tuple[Optional[int], str]:
-        """Select next target to execute."""
-        current_time = time.time()
+        # 1. Check for calibrations first (flats during twilight, darks during day)
+        calib_target = self._select_calibration()
+        if calib_target:
+            return calib_target
 
-        # Check for calibrations first
-        if self._needs_calibrations():
-            cal_target = self._select_calibration()
-            if cal_target and cal_target != self.executor_current:
-                return cal_target, "calibration"
+        # 2. Check scheduler queue for time-scheduled targets
+        scheduler_target = self._get_next_scheduler_target()
+        if scheduler_target:
+            return scheduler_target
 
-        # If not enabled, only do calibrations
-        if not self.enabled.value:
-            return None, "disabled"
+        # 3. Check other queues in priority order
+        queue_priority = ['grb', 'manual', 'integral_targets', 'regular_targets',
+                         'longscript', 'longscript2', 'plan']
 
-        # Get next target from scheduler queue
-        scheduled_target = self._get_next_scheduled_target()
-        if not scheduled_target:
-            return None, "no_target"
-
-        target_time = scheduled_target.queue_start.timestamp()
-        target_id = scheduled_target.tar_id
-
-        # Don't re-select if executor is already observing this target
-        if target_id == self.executor_current:
-            return None, "already_observing"
-
-        # Determine timing and command type
-        if current_time >= target_time:
-            # Time to execute
-            if self.executor_is_idle:
-                return target_id, "execute_now"
-            else:
-                return target_id, "execute_next"
-        elif current_time >= target_time - self.time_slice:
-            # Pre-schedule window
-            if not self.executor_is_idle:
-                return target_id, "pre_schedule"
-
-        return None, "waiting"
-
-    def _needs_calibrations(self) -> bool:
-        """Check if calibrations are needed based on sun elevation."""
-        if not self.sun_calc:
-            return False
-
-        sun_alt = self.sun_calc.get_sun_elevation()
-
-        # Don't repeat calibrations if executor is already doing them
-        if self.executor_current in [self.TARGET_FLAT, self.TARGET_DARK]:
-            return False
-
-        # Flats during twilight
-        if self.flat_sun_min.value <= sun_alt <= self.flat_sun_max.value:
-            return True
-
-        # Darks when sun is well above horizon
-        if sun_alt > self.flat_sun_max.value:
-            return True
-
-        return False
-
-    def _select_calibration(self) -> Optional[int]:
-        """Select appropriate calibration target."""
-        if not self.sun_calc:
-            return None
-
-        sun_alt = self.sun_calc.get_sun_elevation()
-
-        if self.flat_sun_min.value <= sun_alt <= self.flat_sun_max.value:
-            logging.info(f"Selecting flats (sun elevation: {sun_alt:.1f}°)")
-            return self.TARGET_FLAT
-        elif sun_alt > self.flat_sun_max.value:
-            logging.info(f"Selecting darks (sun elevation: {sun_alt:.1f}°)")
-            return self.TARGET_DARK
+        for queue_name in queue_priority:
+            if queue_name in self.queue_name_to_id:
+                targets = self._get_queue_targets(queue_name, limit=1)
+                if targets:
+                    qid, tar_id, time_start, time_end, tar_name, tar_ra, tar_dec, queue_order = targets[0]
+                    return ScheduledTarget(
+                        qid=qid, tar_id=tar_id,
+                        queue_start=time_start or datetime.now(timezone.utc),
+                        queue_end=time_end,
+                        tar_name=tar_name or f"target_{tar_id}",
+                        tar_ra=tar_ra or 0.0, tar_dec=tar_dec or 0.0,
+                        queue_order=queue_order or 0
+                    )
 
         return None
 
-    def _get_next_scheduled_target(self) -> Optional[ScheduledTarget]:
+    def _select_calibration(self) -> Optional[ScheduledTarget]:
+        """Select calibration target based on sun elevation."""
+        sun_elev = self.sun_calc.get_sun_elevation()
+
+        # Flats during twilight (-8° to -4°)
+        if self.flat_sun_min <= sun_elev <= self.flat_sun_max:
+            logging.debug(f"Sun elevation {sun_elev:.1f}° - selecting flats")
+            return ScheduledTarget(
+                qid=0, tar_id=self.TARGET_FLAT,
+                queue_start=datetime.now(timezone.utc), queue_end=None,
+                tar_name="flat", tar_ra=0.0, tar_dec=0.0
+            )
+
+        # Darks during dark transition period (-12° to -8°)
+        if self.dark_sun_min <= sun_elev <= self.dark_sun_max:
+            logging.debug(f"Sun elevation {sun_elev:.1f}° - selecting darks")
+            return ScheduledTarget(
+                qid=0, tar_id=self.TARGET_DARK,
+                queue_start=datetime.now(timezone.utc), queue_end=None,
+                tar_name="dark", tar_ra=0.0, tar_dec=0.0
+            )
+
+        return None
+
+    def _get_next_scheduler_target(self) -> Optional[ScheduledTarget]:
         """Get next target from scheduler queue."""
         try:
             if not self.db_conn or self.db_conn.closed:
@@ -531,46 +384,46 @@ class QueueSelector(Device, DeviceConfig):
             cursor = self.db_conn.cursor()
 
             # Get scheduler queue ID
-            scheduler_queue_id = self.queue_ids.get('scheduler', 2)
+            scheduler_queue_id = self.queue_name_to_id.get('scheduler')
+            if scheduler_queue_id is None:
+                return None
 
-            # Query queues_targets table with correct column names
+            # Query queues_targets table - get next target scheduled for now or past
+            current_time = datetime.now(timezone.utc)
+
             query = """
                 SELECT qt.qid, qt.tar_id, qt.time_start, qt.time_end,
-                       t.tar_name, t.tar_ra, t.tar_dec
+                       t.tar_name, t.tar_ra, t.tar_dec, qt.queue_order
                 FROM queues_targets qt
                 JOIN targets t ON qt.tar_id = t.tar_id
                 WHERE qt.queue_id = %s
-                  AND qt.time_start IS NOT NULL
-                  AND qt.time_start > now() - interval '1 hour'
-                  AND qt.time_start < now() + interval '24 hours'
-                ORDER BY qt.time_start
+                  AND (qt.time_start IS NULL OR qt.time_start <= %s)
+                  AND qt.time_start > %s - interval '6 hours'
+                ORDER BY COALESCE(qt.time_start, %s), qt.queue_order
                 LIMIT 1
             """
 
-            cursor.execute(query, (scheduler_queue_id,))
+            cursor.execute(query, (scheduler_queue_id, current_time, current_time, current_time))
             row = cursor.fetchone()
 
             if row:
-                qid, tar_id, time_start, time_end, tar_name, tar_ra, tar_dec = row
+                qid, tar_id, time_start, time_end, tar_name, tar_ra, tar_dec, queue_order = row
 
-                # Update queue size
+                # Update queue size for monitoring
                 cursor.execute("""
                     SELECT COUNT(*) FROM queues_targets
-                    WHERE queue_id = %s
-                      AND time_start IS NOT NULL
-                      AND time_start > now()
-                """, (scheduler_queue_id,))
+                    WHERE queue_id = %s AND (time_start IS NULL OR time_start > %s)
+                """, (scheduler_queue_id, current_time))
                 count = cursor.fetchone()[0]
                 self.queue_size.value = count
 
                 return ScheduledTarget(
-                    qid=qid,
-                    tar_id=tar_id,
-                    queue_start=time_start,
+                    qid=qid, tar_id=tar_id,
+                    queue_start=time_start or current_time,
                     queue_end=time_end,
-                    tar_name=tar_name,
-                    tar_ra=tar_ra or 0.0,
-                    tar_dec=tar_dec or 0.0
+                    tar_name=tar_name or f"target_{tar_id}",
+                    tar_ra=tar_ra or 0.0, tar_dec=tar_dec or 0.0,
+                    queue_order=queue_order or 0
                 )
             else:
                 self.queue_size.value = 0
@@ -580,14 +433,14 @@ class QueueSelector(Device, DeviceConfig):
             logging.error(f"Error querying scheduler queue: {e}")
             return None
 
-    def _get_queue_targets(self, queue_name: str, limit: int = 10) -> list:
+    def _get_queue_targets(self, queue_name: str, limit: int = 10) -> List[Tuple]:
         """Get targets from specified queue."""
         try:
             if not self.db_conn or self.db_conn.closed:
                 self.db_conn = psycopg2.connect(**self.db_config)
 
             cursor = self.db_conn.cursor()
-            queue_id = self.queue_ids.get(queue_name)
+            queue_id = self.queue_name_to_id.get(queue_name)
 
             if queue_id is None:
                 logging.warning(f"Unknown queue name: {queue_name}")
@@ -599,7 +452,7 @@ class QueueSelector(Device, DeviceConfig):
                 FROM queues_targets qt
                 JOIN targets t ON qt.tar_id = t.tar_id
                 WHERE qt.queue_id = %s
-                ORDER BY COALESCE(qt.time_start, '1970-01-01'::timestamp), qt.queue_order
+                ORDER BY COALESCE(qt.time_start, '2000-01-01'::timestamp), qt.queue_order
                 LIMIT %s
             """
 
@@ -610,115 +463,98 @@ class QueueSelector(Device, DeviceConfig):
             logging.error(f"Error querying queue {queue_name}: {e}")
             return []
 
-    def _execute_target(self, target_id: int, target_type: str) -> bool:
+    def _execute_target(self, target: ScheduledTarget):
         """Execute target with appropriate timing."""
-        try:
-            # Find executor connection
-            executor_conn = None
-            for conn in self.network.connection_manager.connections.values():
-                if (hasattr(conn, 'remote_device_type') and
-                    conn.remote_device_type == DeviceType.EXECUTOR and
-                    conn.state == ConnectionState.AUTH_OK):
-                    executor_conn = conn
-                    break
+        current_time = datetime.now(timezone.utc)
 
-            if not executor_conn:
-                logging.warning("No executor connection available")
-                return False
+        # Skip if we just executed this target
+        if (target.tar_id == self.last_target_id and
+            current_time.timestamp() - self.last_command_time < 60.0):
+            return
 
-            # Determine command based on target type
-            if target_type in ["flat", "dark", "calibration"]:
-                cmd = f"now {target_id}"
-                logging.info(f"Executing {target_type}: {cmd}")
-            elif target_type == "execute_now":
-                cmd = f"now {target_id}"
-                logging.info(f"Executing target immediately: {cmd}")
-            elif target_type in ["execute_next", "pre_schedule"]:
-                cmd = f"next {target_id}"
-                logging.info(f"Scheduling target: {cmd}")
+        # Determine command timing
+        if target.queue_start and target.queue_start > current_time:
+            # Target is scheduled for future - check if we should issue 'next'
+            time_until_start = (target.queue_start - current_time).total_seconds()
+
+            if time_until_start <= self.time_slice:
+                # Issue 'next' command to prepare executor
+                command = f"next {target.tar_id}"
+                logging.info(f"Issuing 'next' for target {target.tar_id} ({target.tar_name}) "
+                           f"starting in {time_until_start:.0f}s")
             else:
-                logging.warning(f"Unknown target type: {target_type}")
-                return False
+                # Too early - don't issue command yet
+                return
+        else:
+            # Target should start now - issue 'now' command
+            command = f"now {target.tar_id}"
+            logging.info(f"Issuing 'now' for target {target.tar_id} ({target.tar_name})")
 
-            # Send command to executor
-            success = executor_conn.send_command(cmd, self._on_execute_result)
+        # Send command to executor
+        try:
+            if self._send_executor_command(command):
+                self.last_target_id = target.tar_id
+                self.last_command_time = current_time.timestamp()
+                self.next_target.value = target.tar_name
+                self.current_queue.value = "scheduler"  # or determine from queue_id
 
-            if success:
-                # Track what we issued
-                self.last_issued_target = target_id
-                self.next_id.value = target_id
-                self.next_time.value = time.time()
-
-                # Update statistics
-                if target_type in ["flat"]:
-                    self.flats_executed.value += 1
-                elif target_type in ["dark"]:
-                    self.darks_executed.value += 1
-                elif target_type not in ["pre_schedule"]:
-                    self.targets_executed.value += 1
-
-            return success
+                # Remove executed target from queue (if needed)
+                self._remove_executed_target(target)
 
         except Exception as e:
-            logging.error(f"Error executing target {target_id}: {e}")
+            logging.error(f"Error executing target {target.tar_id}: {e}")
+
+    def _send_executor_command(self, command: str) -> bool:
+        """Send command to executor device."""
+        try:
+            # Use RTS2 network to send command
+            response = self.network.send_command(self.executor_name, command)
+            logging.debug(f"Executor response: {response}")
+            return True
+        except Exception as e:
+            logging.error(f"Error sending command '{command}' to executor: {e}")
             return False
 
-    def _selector_loop(self):
-        """Main selector loop."""
-        logging.info("Selector loop started")
+    def _remove_executed_target(self, target: ScheduledTarget):
+        """Remove executed target from database queue."""
+        try:
+            if not self.db_conn or self.db_conn.closed:
+                self.db_conn = psycopg2.connect(**self.db_config)
 
-        while self.running:
-            try:
-                current_time = time.time()
+            cursor = self.db_conn.cursor()
 
-                # Check for GRB grace period
-                if current_time < self.grb_grace_end:
-                    logging.debug(f"GRB grace period active for {self.grb_grace_end - current_time:.0f}s")
-                    time.sleep(min(10.0, self.grb_grace_end - current_time))
-                    continue
+            # Check if queue has remove_after_execution flag
+            queue_id = self.queue_name_to_id.get('scheduler', 2)
+            cursor.execute("""
+                SELECT remove_after_execution FROM queues WHERE queue_id = %s
+            """, (queue_id,))
 
-                # Determine what to execute
-                target_id, target_type = self._select_next_target()
+            row = cursor.fetchone()
+            if row and row[0]:  # remove_after_execution is True
+                cursor.execute("DELETE FROM queues_targets WHERE qid = %s", (target.qid,))
+                self.db_conn.commit()
+                logging.debug(f"Removed executed target qid={target.qid} from queue")
 
-                if target_id and target_type not in ["waiting", "already_observing"]:
-                    self._execute_target(target_id, target_type)
+        except Exception as e:
+            logging.error(f"Error removing executed target: {e}")
 
-                # Sleep until next check
-                time.sleep(min(self.update_interval, 60.0))
+    def handle_grb_command(self, conn, params):
+        """Handle GRB command to set grace period."""
+        try:
+            # Set GRB grace period to avoid interfering with alert observations
+            self.grb_grace_end = time.time() + self.grb_grace_period
+            logging.info(f"GRB detected - setting grace period until {self.grb_grace_end}")
 
-            except Exception as e:
-                logging.error(f"Error in selector loop: {e}")
-                time.sleep(10.0)  # Back off on error
-
-    def _executor_is_observing(self, executor_conn) -> bool:
-        """Check if executor is currently observing."""
-        # This is simplified - in real implementation you'd check executor state
-        # For now, assume not observing
-        return False
-
-    def _on_execute_result(self, conn, success, code, message):
-        """Handle result from executor command."""
-        if success:
-            logging.info(f"Executor command successful: {message}")
-        else:
-            logging.warning(f"Executor command failed: {message}")
-
-    # Value change handlers
-    def on_enabled_changed(self, old_value, new_value):
-        """Handle enabled state change."""
-        logging.info(f"Selector {'enabled' if new_value else 'disabled'}")
-
-    def on_flat_sun_min_changed(self, old_value, new_value):
-        """Handle flat sun minimum change."""
-        logging.info(f"Flat sun minimum changed to {new_value}°")
-
-    def on_flat_sun_max_changed(self, old_value, new_value):
-        """Handle flat sun maximum change."""
-        logging.info(f"Flat sun maximum changed to {new_value}°")
+            self.network._send_ok_response(conn, f"GRB grace period set for {self.grb_grace_period}s")
+            return True
+        except Exception as e:
+            logging.error(f"Error in GRB command handler: {e}")
+            return False
 
 
 def main():
     """Main entry point for queue selector."""
+
     # Create application
     app = App(description='RTS2 Queue Selector')
 
@@ -731,14 +567,12 @@ def main():
     # Create device
     device = app.create_device(QueueSelector)
 
-    # Show config if debug enabled
-    if getattr(args, 'debug', False):
-        print("\nQueue Selector Configuration:")
-        print("=" * 50)
-        print(device.get_config_summary())
-        print("=" * 50)
+    # Register GRB command handler
+    device.network.command_registry.register_command("grb", device.handle_grb_command)
 
     logging.info("Starting RTS2 Queue Selector")
+    logging.info(f"Database: {device.db_config['database']} on {device.db_config['host']}")
+    logging.info(f"Queues: {list(device.queue_name_to_id.keys())}")
 
     # Run application
     try:
