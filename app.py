@@ -1,8 +1,12 @@
+import os
+import sys
 import argparse
 import logging
+import logging.handlers
 import time
 from typing import Dict, List, Optional, Type, Any
 from datetime import datetime, timezone
+from pathlib import Path
 
 from device import Device
 
@@ -125,42 +129,141 @@ class App:
 
     def _setup_rts2_logging(self):
         """
-        Set up RTS2-style logging after device configuration is processed.
+        Set up RTS2-style logging with multiple outputs after device configuration is processed.
 
-        The device configuration system has already set the log level,
-        now we apply the RTS2 formatter.
+        Outputs:
+        1. Console (always)
+        2. File (device config path OR fallback to /var/log or ~/log)
+        3. Syslog (system integration)
         """
         # Create RTS2 formatter
         formatter = RTS2LogFormatter()
 
+        # Syslog formatter (no timestamp - syslog adds it)
+        device_name = getattr(self.device, 'device_name', 'UNKNOWN') if self.device else 'UNKNOWN'
+        syslog_formatter = logging.Formatter(f'{device_name} %(levelname)s %(message)s')
+
         # Get current log level (set by device configuration)
         current_level = logging.getLogger().level
 
-        # Determine log file from device configuration if available
-        log_file = None
-        if self.device and hasattr(self.device, '_resolved_config'):
-            logging_config = self.device._resolved_config.get('logging', {})
-            log_file = logging_config.get('file')
-
-        # Create appropriate handler
-        if log_file:
-            handler = logging.FileHandler(log_file)
-        else:
-            handler = logging.StreamHandler()
-
-        handler.setFormatter(formatter)
-
-        # Configure root logger
-        root_logger = logging.getLogger()
-        root_logger.setLevel(current_level)
-
         # Remove any existing handlers to avoid duplicate logs
+        root_logger = logging.getLogger()
         for hdlr in root_logger.handlers[:]:
             root_logger.removeHandler(hdlr)
 
-        root_logger.addHandler(handler)
+        root_logger.setLevel(current_level)
 
-        logging.info(f"RTS2 logging configured (level: {logging.getLevelName(current_level)})")
+        handlers_added = []
+
+        # 1. CONSOLE HANDLER (always present for development)
+        try:
+            console_handler = logging.StreamHandler(sys.stdout)
+            console_handler.setFormatter(formatter)
+            console_handler.setLevel(current_level)
+            root_logger.addHandler(console_handler)
+            handlers_added.append("console")
+        except Exception as e:
+            print(f"Warning: Could not setup console handler: {e}", file=sys.stderr)
+
+        # 2. FILE HANDLER with smart fallback
+        log_file = None
+
+        # First try device configuration
+        if self.device and hasattr(self.device, '_resolved_config'):
+            logging_config = self.device._resolved_config.get('logging', {})
+            config_file = logging_config.get('file')
+            if config_file:
+                try:
+                    # Test if we can write to the configured path
+                    with open(config_file, 'a') as f:
+                        pass
+                    log_file = config_file
+                except (PermissionError, OSError):
+                    print(f"Warning: Cannot write to configured log file {config_file}, using fallback", file=sys.stderr)
+
+        # Fallback file path logic
+        if not log_file:
+            # Try system log directory first
+            try:
+                system_log_dir = Path("/var/log")
+                if system_log_dir.exists() and os.access(system_log_dir, os.W_OK):
+                    log_file = system_log_dir / "rts2-debug.log"
+                    # Test write access
+                    with open(log_file, 'a') as f:
+                        pass
+            except (PermissionError, OSError):
+                log_file = None
+
+            # Fall back to user home directory
+            if not log_file:
+                try:
+                    home_dir = Path.home()
+                    user_log_dir = home_dir / "log"
+                    user_log_dir.mkdir(exist_ok=True)
+                    log_file = user_log_dir / "rts2-debug.log"
+                except OSError:
+                    log_file = None
+
+        # Create file handler if we have a path
+        if log_file:
+            try:
+                # Use rotating file handler to prevent huge log files
+                file_handler = logging.handlers.RotatingFileHandler(
+                    log_file,
+                    maxBytes=10*1024*1024,  # 10MB max file size
+                    backupCount=5,          # Keep 5 backup files
+                    encoding='utf-8'
+                )
+                file_handler.setFormatter(formatter)
+                file_handler.setLevel(current_level)
+                root_logger.addHandler(file_handler)
+                handlers_added.append(f"file({log_file})")
+            except Exception as e:
+                print(f"Warning: Could not setup file handler: {e}", file=sys.stderr)
+
+        # 3. SYSLOG HANDLER for system integration
+        try:
+            # Try different syslog paths
+            syslog_paths = [
+                '/dev/log',        # Most Linux systems
+                '/var/run/syslog', # Some systems
+                ('localhost', 514) # UDP fallback
+            ]
+
+            syslog_handler = None
+            for path in syslog_paths:
+                try:
+                    if isinstance(path, tuple):
+                        syslog_handler = logging.handlers.SysLogHandler(address=path)
+                    else:
+                        syslog_handler = logging.handlers.SysLogHandler(address=path)
+                    break
+                except (OSError, ConnectionRefusedError):
+                    continue
+
+            if syslog_handler:
+                syslog_handler.setFormatter(syslog_formatter)
+                syslog_handler.setLevel(current_level)
+                # Use local0 facility for custom applications
+                syslog_handler.facility = logging.handlers.SysLogHandler.LOG_LOCAL0
+                root_logger.addHandler(syslog_handler)
+                handlers_added.append("syslog")
+
+        except Exception as e:
+            print(f"Warning: Could not setup syslog handler: {e}", file=sys.stderr)
+
+        # Configure noisy module loggers
+        logging.getLogger('kafka').setLevel(logging.WARNING)
+        logging.getLogger('gcn_kafka').setLevel(logging.INFO)
+        logging.getLogger('psycopg2').setLevel(logging.WARNING)
+        logging.getLogger('urllib3').setLevel(logging.WARNING)
+
+        # Log successful setup
+        if handlers_added:
+            logging.info(f"RTS2 logging configured: {', '.join(handlers_added)} (level: {logging.getLevelName(current_level)})")
+        else:
+            logging.warning("No logging handlers could be configured!")
+
 
     def run(self):
         """Run the application main loop."""
