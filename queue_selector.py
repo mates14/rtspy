@@ -538,25 +538,12 @@ class QueueSelector(Device, DeviceConfig):
         except Exception as e:
             logging.error(f"Error removing executed target: {e}")
 
-    def handle_grb_command(self, conn, params):
-        """Handle GRB command to set grace period."""
-        try:
-            # Set GRB grace period to avoid interfering with alert observations
-            self.grb_grace_end = time.time() + self.grb_grace_period
-            logging.info(f"GRB detected - setting grace period until {self.grb_grace_end}")
-
-            self.network._send_ok_response(conn, f"GRB grace period set for {self.grb_grace_period}s")
-            return True
-        except Exception as e:
-            logging.error(f"Error in GRB command handler: {e}")
-            return False
-
 
 def main():
-    """Main entry point for queue selector."""
+    """Main entry point."""
 
     # Create application
-    app = App(description='RTS2 Queue Selector')
+    app = App(description='RTS2 Queue Selector Daemon')
 
     # Register device options
     app.register_device_options(QueueSelector)
@@ -566,9 +553,6 @@ def main():
 
     # Create device
     device = app.create_device(QueueSelector)
-
-    # Register GRB command handler
-    device.network.command_registry.register_command("grb", device.handle_grb_command)
 
     logging.info("Starting RTS2 Queue Selector")
     logging.info(f"Database: {device.db_config['database']} on {device.db_config['host']}")
