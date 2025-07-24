@@ -30,6 +30,8 @@ class GrbTarget:
     trigger_num: int = 0
     fluence: float = float('nan')
     peak_flux: float = float('nan')
+    source_name: str = ""           # Known source name (if any)
+    significance: float = float('nan')  # Detection significance in sigma
 
 class VoEventParser:
     """
@@ -47,7 +49,7 @@ class VoEventParser:
     # Common parameter name mappings across missions
     PARAM_MAPPINGS = {
         # Trigger/Event ID variants
-        'trigger_id': ['TrigID', 'GraceID', 'EventID', 'trigger_id', 'event_id'],
+        'trigger_id': ['TrigID', 'GraceID', 'EventID', 'trigger_id', 'event_id', 'Burst_Id'],
         'sequence_num': ['Pkt_Ser_Num', 'Sequence_Num', 'sequence_num', 'seq_num'],
         'packet_type': ['Packet_Type', 'PacketType', 'packet_type'],
 
@@ -68,6 +70,12 @@ class VoEventParser:
         # Mission-specific but commonly used
         'importance': ['Importance', 'importance', 'significance'],
         'false_alarm': ['FAR', 'FalseAlarmRate', 'false_alarm_rate'],
+
+        # Add SVOM-specific mappings
+        'source_name': ['Source_Name', 'source_name'],
+        'catalog_id': ['Onboard_Catalog_Id', 'catalog_id'],
+        'slew_status': ['Slew_Status', 'slew_status'],
+        'trigger_type': ['Trigger_Type', 'trigger_type'],
     }
 
     def __init__(self):
@@ -421,7 +429,7 @@ class VoEventParser:
                     try:
                         # Fermi reliability parameter
                         reliability = float(value)
-                        # Could store this in grb_target if needed
+                        grb_target.significance = reliability * 10  # Convert to rough sigma equivalent
                     except (ValueError, TypeError):
                         pass
                 elif name == 'Trigger_ID':
@@ -444,9 +452,7 @@ class VoEventParser:
                         grb_target.grb_id = str(value)
                 elif name == 'RATE_SIGNIF':
                     try:
-                        # Swift significance
-                        significance = float(value)
-                        # Could store this in grb_target if needed
+                        grb_target.significance = float(value)
                     except (ValueError, TypeError):
                         pass
 
@@ -480,9 +486,69 @@ class VoEventParser:
             logging.warning(f"Error in IceCube-specific parsing: {e}")
 
     def _parse_svom_specific(self, root: ET.Element, grb_target: 'GrbTarget') -> None:
-        """Parse SVOM-specific parameters."""
-        # SVOM-specific parsing logic would go here
-        pass
+        """Parse SVOM parameters and properly classify for universal filtering."""
+        try:
+            # Extract all parameters
+            svom_params = {}
+            for param in root.findall('.//Param'):
+                name = param.get('name', '')
+                value = param.get('value', '')
+                if name and value:
+                    svom_params[name] = value
+
+            # Extract Burst_Id (CRITICAL FIX)
+            if 'Burst_Id' in svom_params and not grb_target.grb_id:
+                grb_target.grb_id = svom_params['Burst_Id']
+
+            # Extract source name if it's a catalog detection
+            grb_target.source_name = svom_params.get('Source_Name', '')
+
+            # Extract significance for filtering
+            if 'SNR' in svom_params:
+                try:
+                    grb_target.significance = float(svom_params['SNR'])
+                except (ValueError, TypeError):
+                    pass
+
+            # Classify as GRB or non-GRB based on SVOM's assessment
+            packet_type = svom_params.get('Packet_Type', '')
+            slew_status = svom_params.get('Slew_Status', '')
+
+            if grb_target.source_name:
+                # Known catalog source → not interesting
+                grb_target.is_grb = False
+                logging.debug(f"SVOM: {grb_target.grb_id} identified as catalog source {grb_target.source_name}")
+
+            elif packet_type == '204' or slew_status == 'accepted':
+                # SVOM decided to slew → GRB candidate
+                grb_target.is_grb = True
+                logging.debug(f"SVOM: {grb_target.grb_id} approved for slewing")
+
+            elif packet_type in ['209', '210']:
+                # MXT follow-up → confirmed GRB
+                grb_target.is_grb = True
+                logging.debug(f"SVOM: {grb_target.grb_id} has MXT follow-up data")
+
+            elif packet_type == '205' or slew_status == 'not-requested':
+                # SVOM chose not to slew
+                if grb_target.source_name:
+                    # Known source
+                    grb_target.is_grb = False
+                else:
+                    # Could be operational constraint → still interesting for us
+                    grb_target.is_grb = True
+                    logging.debug(f"SVOM: {grb_target.grb_id} not slewed but unknown source → potential constraint case")
+
+            elif packet_type == '201':
+                # GRM trigger only → assume interesting
+                grb_target.is_grb = True
+
+            else:
+                # Default: assume interesting until proven otherwise
+                grb_target.is_grb = True
+
+        except Exception as e:
+            logging.warning(f"Error in SVOM-specific parsing: {e}")
 
     def _parse_lvc_specific(self, root: ET.Element, grb_target: 'GrbTarget') -> None:
         """Parse LIGO-Virgo-KAGRA gravitational wave parameters."""

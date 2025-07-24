@@ -656,6 +656,15 @@ class GrbDaemon(Device, DeviceConfig):
             self._update_mission_statistics(grb_info.mission, grb_info)
             self._update_recent_grbs(grb_info)
 
+            # UNIVERSAL FILTERING based on properly-populated grb_info fields
+            skip_reason = self._should_skip_target(grb_info)
+            if skip_reason:
+                logging.info(f"{grb_info.mission} {grb_info.grb_id}: {skip_reason} - skipping target creation")
+                return
+
+            # Only proceed for targets we actually want to observe
+            logging.info(f"{grb_info.mission} {grb_info.grb_id}: creating target for follow-up")
+
             # Add to database with proper error handling
             db_start_time = time.time()
             target_id = self._add_grb_to_database(grb_info)
@@ -664,8 +673,6 @@ class GrbDaemon(Device, DeviceConfig):
 
             if target_id:
                 grb_info.target_id = target_id
-
-                # Store GRB information
                 self.grb_targets[target_id] = grb_info
                 self.current_grb = grb_info
 
@@ -673,18 +680,8 @@ class GrbDaemon(Device, DeviceConfig):
                     self.grbs_processed.value += 1
                     self.grbs_today.value += 1
 
-                # Only trigger observations for valid coordinates
-                if not self._is_valid_coordinates(grb_info.ra, grb_info.dec):
-                    logging.debug(f"Skipping observation trigger for {grb_info.grb_id} - no valid coordinates")
-                    return
-
-                # Check visibility if filtering enabled
-                if not self._check_visibility_constraints(grb_info):
-                    logging.debug(f"Transient {grb_info.grb_id} not visible, skipping observation")
-                    return
-
-                # Trigger observation if enabled
-                if self.grb_enabled.value and grb_info.is_grb:
+                # Trigger observation (filtering already done, executor handles constraints)
+                if self.grb_enabled.value:
                     self._trigger_grb_observation(target_id)
                     with self._stats_lock:
                         self.observations_triggered.value += 1
@@ -697,6 +694,40 @@ class GrbDaemon(Device, DeviceConfig):
             self._log_error("grb_processing", str(e))
             logging.error(f"Error processing transient: {e}")
             logging.exception("Detailed error:")
+
+    def _should_skip_target(self, grb_info: 'GrbTarget') -> Optional[str]:
+        """
+        Universal target filtering based on telescope observability.
+
+        Mission parsers must properly populate grb_info fields for this to work.
+
+        Returns:
+            String reason for skipping, or None if target should be created
+        """
+
+        # Skip if no coordinates (can't observe what you can't point to)
+        if not self._is_valid_coordinates(grb_info.ra, grb_info.dec):
+            return "no valid coordinates"
+
+        # Skip if error box too large for our telescope capabilities
+        if not math.isnan(grb_info.error_box) and grb_info.error_box > 15.0:
+            return f"error box too large ({grb_info.error_box:.1f}°)"
+
+        # Skip known sources (already studied, not scientifically interesting)
+        if hasattr(grb_info, 'source_name') and grb_info.source_name:
+            return f"known source '{grb_info.source_name}'"
+
+        # Skip if marked as definitely not a GRB/transient of interest
+        if not grb_info.is_grb:
+            return "not classified as transient of interest"
+
+        # Skip very low significance detections (mission should set this appropriately)
+#        if (hasattr(grb_info, 'significance') and
+#            not math.isnan(grb_info.significance) and grb_info.significance < 5.0):
+#            return f"low significance ({grb_info.significance:.1f}σ)"
+
+        # If we get here, it's worth creating a target
+        return None
 
     def _sanitize_db_row(self, row):
         """
