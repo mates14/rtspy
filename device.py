@@ -212,7 +212,7 @@ class Device(DeviceConfig):
     def _on_centrald_connected(self, conn_id):
         """Called when a centrald connection is established and authenticated."""
         # Now we can send our status and metadata
-        logging.debug("Connected to centrald, sending device status")
+        logging.info("Connected to centrald")
 
         # Send state after connection
         # This should match the C++ behavior
