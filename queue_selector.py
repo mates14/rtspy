@@ -179,6 +179,10 @@ class QueueSelector(Device, DeviceConfig):
         self.system_state = 0
         self.system_ready = False
 
+        # Executor state tracking
+        self.executor_current = -1  # What executor is actually observing
+        self.executor_is_idle = True
+
         # Threading
         self.running = False
         self.selector_thread = None
@@ -188,6 +192,28 @@ class QueueSelector(Device, DeviceConfig):
 
         # Database connection
         self.db_conn = None
+
+    def _on_executor_current_changed(self, value_data):
+        """Handle executor current target change."""
+        try:
+            old_current = self.executor_current
+            self.executor_current = int(value_data) if value_data != "-1" else -1
+            self.executor_is_idle = (self.executor_current == -1)
+
+            # Detect external intervention
+            if (self.executor_current != -1 and
+                self.executor_current != self.last_issued_target and
+                old_current != self.executor_current):
+
+                logging.info(f"External target detected: {self.executor_current} (we issued: {self.last_issued_target})")
+                self.grb_grace_end = time.time() + self.grb_grace_period
+
+            logging.debug(f"Executor current: {self.executor_current} (idle: {self.executor_is_idle})")
+
+        except (ValueError, TypeError):
+            logging.warning(f"Invalid executor current value: {value_data}")
+            self.executor_current = -1
+            self.executor_is_idle = True
 
     def apply_config(self, config: Dict[str, Any]):
         """Apply selector configuration."""
@@ -426,26 +452,38 @@ class QueueSelector(Device, DeviceConfig):
         # Check for calibrations first
         if self._needs_calibrations():
             cal_target = self._select_calibration()
-            if cal_target:
+            if cal_target and cal_target != self.executor_current:
                 return cal_target, "calibration"
 
-        # If not enabled or queue only mode, only do calibrations
+        # If not enabled, only do calibrations
         if not self.enabled.value:
             return None, "disabled"
 
         # Get next target from scheduler queue
         scheduled_target = self._get_next_scheduled_target()
-        if scheduled_target:
-            target_time = scheduled_target.queue_start.timestamp()
+        if not scheduled_target:
+            return None, "no_target"
 
-            # Check if it's time to execute
-            if current_time >= target_time:
-                return scheduled_target.tar_id, "scheduled"
-            elif current_time >= target_time - self.time_slice:
-                # Pre-schedule with 'next' command
-                return scheduled_target.tar_id, "pre_scheduled"
+        target_time = scheduled_target.queue_start.timestamp()
+        target_id = scheduled_target.tar_id
 
-        return None, "no_target"
+        # Don't re-select if executor is already observing this target
+        if target_id == self.executor_current:
+            return None, "already_observing"
+
+        # Determine timing and command type
+        if current_time >= target_time:
+            # Time to execute
+            if self.executor_is_idle:
+                return target_id, "execute_now"
+            else:
+                return target_id, "execute_next"
+        elif current_time >= target_time - self.time_slice:
+            # Pre-schedule window
+            if not self.executor_is_idle:
+                return target_id, "pre_schedule"
+
+        return None, "waiting"
 
     def _needs_calibrations(self) -> bool:
         """Check if calibrations are needed based on sun elevation."""
@@ -453,6 +491,10 @@ class QueueSelector(Device, DeviceConfig):
             return False
 
         sun_alt = self.sun_calc.get_sun_elevation()
+
+        # Don't repeat calibrations if executor is already doing them
+        if self.executor_current in [self.TARGET_FLAT, self.TARGET_DARK]:
+            return False
 
         # Flats during twilight
         if self.flat_sun_min.value <= sun_alt <= self.flat_sun_max.value:
@@ -584,45 +626,69 @@ class QueueSelector(Device, DeviceConfig):
                 logging.warning("No executor connection available")
                 return False
 
-            # Check if executor is observing
-            is_observing = self._executor_is_observing(executor_conn)
-
-            # Determine command based on state and timing
-            if target_type in ["flat", "dark"]:
-                # Calibrations execute immediately
+            # Determine command based on target type
+            if target_type in ["flat", "dark", "calibration"]:
                 cmd = f"now {target_id}"
                 logging.info(f"Executing {target_type}: {cmd}")
-            elif target_type == "pre_scheduled" and is_observing:
-                # Pre-schedule with 'next' command
+            elif target_type == "execute_now":
+                cmd = f"now {target_id}"
+                logging.info(f"Executing target immediately: {cmd}")
+            elif target_type in ["execute_next", "pre_schedule"]:
                 cmd = f"next {target_id}"
-                logging.info(f"Pre-scheduling target: {cmd}")
-            elif target_type == "scheduled":
-                if is_observing:
-                    cmd = f"next {target_id}"
-                    logging.info(f"Scheduling target: {cmd}")
-                else:
-                    cmd = f"now {target_id}"
-                    logging.info(f"Executing target immediately: {cmd}")
+                logging.info(f"Scheduling target: {cmd}")
             else:
+                logging.warning(f"Unknown target type: {target_type}")
                 return False
 
             # Send command to executor
             success = executor_conn.send_command(cmd, self._on_execute_result)
 
             if success:
-                # Update tracking values
+                # Track what we issued
+                self.last_issued_target = target_id
                 self.next_id.value = target_id
                 self.next_time.value = time.time()
 
-                if target_type not in ["pre_scheduled"]:
-                    self.current_target.value = target_id
-                    self.current_start.value = time.time()
+                # Update statistics
+                if target_type in ["flat"]:
+                    self.flats_executed.value += 1
+                elif target_type in ["dark"]:
+                    self.darks_executed.value += 1
+                elif target_type not in ["pre_schedule"]:
+                    self.targets_executed.value += 1
 
             return success
 
         except Exception as e:
             logging.error(f"Error executing target {target_id}: {e}")
             return False
+
+    def _selector_loop(self):
+        """Main selector loop."""
+        logging.info("Selector loop started")
+
+        while self.running:
+            try:
+                current_time = time.time()
+
+                # Check for GRB grace period
+                if current_time < self.grb_grace_end:
+                    logging.debug(f"GRB grace period active for {self.grb_grace_end - current_time:.0f}s")
+                    time.sleep(min(10.0, self.grb_grace_end - current_time))
+                    continue
+
+                # Determine what to execute
+                target_id, target_type = self._select_next_target()
+
+                if target_id and target_type not in ["waiting", "already_observing"]:
+                    self._execute_target(target_id, target_type)
+
+                # Sleep until next check
+                time.sleep(min(self.update_interval, 60.0))
+
+            except Exception as e:
+                logging.error(f"Error in selector loop: {e}")
+                time.sleep(10.0)  # Back off on error
 
     def _executor_is_observing(self, executor_conn) -> bool:
         """Check if executor is currently observing."""
