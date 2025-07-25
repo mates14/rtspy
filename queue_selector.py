@@ -6,17 +6,18 @@ RTS2 Queue Selector Daemon
 A simplified queue-based target selector that:
 1. Reads scheduled targets from the RTS2 PostgreSQL database
 2. Executes targets from queues in proper time order
-3. Handles calibrations (flats/darks) at appropriate times
+3. Handles calibrations during DUSK/DAWN system states
 4. Respects GRB grace periods to avoid interrupting alert observations
 
 This replaces the complex C++ selector with a simple queue executor.
 """
 
 import time
-import math
 import logging
 import threading
 import psycopg2
+import configparser
+import os
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Optional, Dict, List, Tuple
@@ -25,7 +26,7 @@ from device import Device
 from config import DeviceConfig
 from app import App
 from value import ValueDouble, ValueInteger, ValueBool, ValueTime, ValueString
-from constants import DeviceType
+from constants import DeviceType, CentralState
 
 
 @dataclass
@@ -40,6 +41,7 @@ class ScheduledTarget:
     tar_dec: float
     queue_order: int = 0
 
+
 class QueueSelector(Device, DeviceConfig):
     """
     Queue-based target selector for RTS2.
@@ -49,20 +51,20 @@ class QueueSelector(Device, DeviceConfig):
     """
 
     # Target type constants (from C++ RTS2)
-    TARGET_FLAT = 2
+    TARGET_FLAT = 2  # Calibration script (handles both flats and darks internally)
 
     def setup_config(self, config):
         """Register selector-specific configuration."""
 
         # Database configuration (can override rts2.ini)
         config.add_argument('--db-host', default=None,
-                          help='Database host', section='database')
+                          help='Database host (overrides rts2.ini)', section='database')
         config.add_argument('--db-name', default=None,
-                          help='Database name', section='database')
+                          help='Database name (overrides rts2.ini)', section='database')
         config.add_argument('--db-user', default=None,
-                          help='Database user', section='database')
+                          help='Database user (overrides rts2.ini)', section='database')
         config.add_argument('--db-password', default=None,
-                          help='Database password', section='database')
+                          help='Database password (overrides rts2.ini)', section='database')
 
         # Queue names (mapped to queue IDs in database)
         config.add_argument('--add-queue', action='append', dest='queue_names',
@@ -111,7 +113,6 @@ class QueueSelector(Device, DeviceConfig):
         self.db_conn = None
         self.selector_thread = None
         self.running = False
-        self.grb_grace_end = 0.0
 
         # System state tracking
         self.system_state = 0
@@ -120,6 +121,7 @@ class QueueSelector(Device, DeviceConfig):
         # Last selected target
         self.last_target_id = None
         self.last_command_time = 0.0
+        self.expected_executor_target = None  # Target we told executor to run
 
     def __init__(self, device_name="SEL", device_type=DeviceType.SELECTOR, port=0):
         """Initialize the queue selector."""
@@ -148,6 +150,13 @@ class QueueSelector(Device, DeviceConfig):
             state_callback=self._on_system_state_changed
         )
 
+        # Monitor executor current target for external activity detection
+        self.network.register_interest_in_value(
+            device_name=self.executor_name,
+            value_name="current",
+            callback=self._on_executor_current_changed
+        )
+
         # Start selector thread
         self.running = True
         self.selector_thread = threading.Thread(target=self._selector_loop, daemon=True)
@@ -170,42 +179,14 @@ class QueueSelector(Device, DeviceConfig):
         """Update device information."""
         super().info()
 
-        # Update system state description
-        state_desc = self._get_system_state_description()
-        self.system_state_desc.value = state_desc
-
         # Update last update time
         self.last_update.value = time.time()
 
-        # Update GRB grace status
+        # Ensure GRB grace status is consistent (safety check)
         current_time = time.time()
-        if current_time < self.grb_grace_end:
-            self.grb_grace_active.value = True
-            self.grb_grace_until.value = self.grb_grace_end
-        else:
-            self.grb_grace_active.value = False
-
-    def _get_system_state_description(self) -> str:
-        """Get human-readable system state description."""
-        state = self.system_state & 0xFF  # Base state
-        weather = self.system_state & 0x80000000  # Weather bit
-
-        # RTS2 system states
-        states = {
-            0x01: "OFF", 0x02: "STANDBY", 0x03: "ON",
-            0x10: "DUSK", 0x20: "NIGHT", 0x40: "DAWN", 0x80: "DAY"
-        }
-
-        base_state = states.get(state & 0x0F, f"UNKNOWN({state & 0x0F:x})")
-        period_state = states.get(state & 0xF0, "")
-
-        description = base_state
-        if period_state:
-            description += f"_{period_state}"
-        if weather:
-            description += "_BAD_WEATHER"
-
-        return description
+        expected_active = current_time < self.grb_grace_until.value
+        if self.grb_grace_active.value != expected_active:
+            self.grb_grace_active.value = expected_active
 
     def _test_database(self) -> bool:
         """Test database connection."""
@@ -226,29 +207,65 @@ class QueueSelector(Device, DeviceConfig):
         old_state = self.system_state
         self.system_state = state
 
-        # Check if system is ready for observations
-        base_state = state & 0x0F
-        period_state = state & 0xF0
-        weather_ok = not (state & 0x80000000)
+        # Extract state components using proper RTS2 masks
+        period = state & CentralState.PERIOD_MASK
+        onoff = state & CentralState.ONOFF_MASK
 
-        # System ready for science observations: ON + NIGHT + good weather
-        self.system_ready = (base_state == 0x03 and period_state == 0x20 and weather_ok)
+        # System ready for science observations: ON + NIGHT
+        # (centrald automatically changes ON→STANDBY when weather is bad)
+        self.system_ready = (onoff == CentralState.ON and period == CentralState.NIGHT)
+
+        # Update system state description immediately
+        state_desc = self._get_system_state_description()
+        self.system_state_desc.value = state_desc
 
         if old_state != state:
-            state_desc = self._get_system_state_description()
             logging.info(f"System state: 0x{state:08x} ({state_desc}) "
                         f"{'ready for science' if self.system_ready else 'calibrations/standby'}")
 
     def _is_calibration_time(self) -> bool:
         """Check if current system state calls for calibrations."""
-        base_state = self.system_state & 0x0F
-        period_state = self.system_state & 0xF0
-        weather_ok = not (self.system_state & 0x80000000)
+        period = self.system_state & CentralState.PERIOD_MASK
+        onoff = self.system_state & CentralState.ONOFF_MASK
 
-        # Calibrations during ON + DUSK or ON + DAWN with good weather
-        return (base_state == 0x03 and
-                (period_state == 0x10 or period_state == 0x40) and
-                weather_ok)
+        # Calibrations during ON + (DUSK or DAWN)
+        # (centrald handles weather by changing ON→STANDBY automatically)
+        return (onoff == CentralState.ON and
+                (period == CentralState.DUSK or period == CentralState.DAWN))
+
+    def _get_system_state_description(self) -> str:
+        """Get human-readable system state description."""
+        period = self.system_state & CentralState.PERIOD_MASK
+        onoff = self.system_state & CentralState.ONOFF_MASK
+        weather = self.system_state & 0x80000000  # Weather bit
+
+        # Map period states
+        period_names = {
+            CentralState.DAY: "DAY",
+            CentralState.EVENING: "EVENING",
+            CentralState.DUSK: "DUSK",
+            CentralState.NIGHT: "NIGHT",
+            CentralState.DAWN: "DAWN",
+            CentralState.MORNING: "MORNING",
+            CentralState.UNKNOWN: "UNKNOWN"
+        }
+
+        # Map on/off states
+        onoff_names = {
+            CentralState.ON: "ON",
+            CentralState.STANDBY: "STANDBY",
+            CentralState.SOFT_OFF: "SOFT_OFF",
+            CentralState.HARD_OFF: "HARD_OFF"
+        }
+
+        period_name = period_names.get(period, f"UNKNOWN_PERIOD({period:x})")
+        onoff_name = onoff_names.get(onoff, f"UNKNOWN_ONOFF({onoff:x})")
+
+        description = f"{onoff_name}_{period_name}"
+        if weather:
+            description += "_BAD_WEATHER"
+
+        return description
 
     def _selector_loop(self):
         """Main selector loop."""
@@ -257,16 +274,23 @@ class QueueSelector(Device, DeviceConfig):
         while self.running:
             try:
                 # Only run when system is ready
-                if not self.system_ready:
+                if not self.system_ready and not self._is_calibration_time():
+                    # Clear target info when system not active
+                    if self.next_target.value != "none":
+                        self.next_target.value = "none"
+                        self.current_queue.value = "none"
                     time.sleep(self.update_interval)
                     continue
 
                 # Check for GRB grace period
-                current_time = time.time()
-                if current_time < self.grb_grace_end:
+                if self._detect_external_activity():
                     logging.debug("In GRB grace period, skipping target selection")
                     time.sleep(self.update_interval)
                     continue
+                else:
+                    # Grace period expired, update status immediately
+                    if self.grb_grace_active.value:
+                        self.grb_grace_active.value = False
 
                 # Get next target to execute
                 target = self._select_next_target()
@@ -274,6 +298,10 @@ class QueueSelector(Device, DeviceConfig):
                 if target:
                     self._execute_target(target)
                 else:
+                    # No target selected - update values immediately
+                    if self.next_target.value != "none":
+                        self.next_target.value = "none"
+                        self.current_queue.value = "none"
                     logging.debug("No target selected")
 
                 time.sleep(self.update_interval)
@@ -287,7 +315,7 @@ class QueueSelector(Device, DeviceConfig):
     def _select_next_target(self) -> Optional[ScheduledTarget]:
         """Select next target based on queue priority and timing."""
 
-        # 1. Check for calibrations first (flats during twilight, darks during day)
+        # 1. Check for calibrations first (during DUSK/DAWN)
         calib_target = self._select_calibration()
         if calib_target:
             return calib_target
@@ -323,10 +351,10 @@ class QueueSelector(Device, DeviceConfig):
             return None
 
         # Determine period for logging
-        period_state = self.system_state & 0xF0
-        period = "dusk" if period_state == 0x10 else "dawn"
+        period = self.system_state & CentralState.PERIOD_MASK
+        period_name = "dusk" if period == CentralState.DUSK else "dawn"
 
-        logging.debug(f"System state indicates {period} - selecting calibrations")
+        logging.debug(f"System state indicates {period_name} - selecting calibrations")
 
         return ScheduledTarget(
             qid=0, tar_id=self.TARGET_FLAT,
@@ -431,6 +459,26 @@ class QueueSelector(Device, DeviceConfig):
             current_time.timestamp() - self.last_command_time < 60.0):
             return
 
+        # Determine which queue provided this target and update immediately
+        if target.tar_id == self.TARGET_FLAT:
+            self.current_queue.value = "calibration"
+        elif target.qid == 0:
+            self.current_queue.value = "manual"
+        else:
+            # Determine queue from target source
+            for queue_name, queue_id in self.queue_name_to_id.items():
+                if queue_id == 1:  # Manual queue check could be more sophisticated
+                    self.current_queue.value = "manual"
+                    break
+                elif queue_id == 2:  # Scheduler queue
+                    self.current_queue.value = "scheduler"
+                    break
+            else:
+                self.current_queue.value = "unknown"
+
+        # Update next target immediately
+        self.next_target.value = target.tar_name
+
         # Determine command timing
         if target.queue_start and target.queue_start > current_time:
             # Target is scheduled for future - check if we should issue 'next'
@@ -454,8 +502,6 @@ class QueueSelector(Device, DeviceConfig):
             if self._send_executor_command(command):
                 self.last_target_id = target.tar_id
                 self.last_command_time = current_time.timestamp()
-                self.next_target.value = target.tar_name
-                self.current_queue.value = "scheduler"  # or determine from queue_id
 
                 # Remove executed target from queue (if needed)
                 self._remove_executed_target(target)
@@ -466,6 +512,13 @@ class QueueSelector(Device, DeviceConfig):
     def _send_executor_command(self, command: str) -> bool:
         """Send command to executor device."""
         try:
+            # Extract target ID from command for tracking
+            parts = command.split()
+            if len(parts) >= 2 and parts[0] in ['next', 'now']:
+                target_id = int(parts[1])
+                self.expected_executor_target = target_id
+                logging.debug(f"Setting expected executor target to {target_id}")
+
             # Use RTS2 network to send command
             response = self.network.send_command(self.executor_name, command)
             logging.debug(f"Executor response: {response}")
@@ -496,6 +549,43 @@ class QueueSelector(Device, DeviceConfig):
 
         except Exception as e:
             logging.error(f"Error removing executed target: {e}")
+
+    def _on_executor_current_changed(self, value_data):
+        """Handle executor current target changes to detect external activity."""
+        try:
+            # Parse current target ID from executor
+            current_target = int(value_data) if value_data and value_data != "-1" else None
+
+            # Check if this is external activity
+            # We consider it "our" activity if current target is either:
+            # 1. The target we just sent as "next" (expected_executor_target)
+            # 2. The target we sent previously (last_target_id) - might still be running
+            our_targets = {self.expected_executor_target, self.last_target_id}
+            our_targets.discard(None)  # Remove None values
+
+            if current_target is not None and current_target not in our_targets:
+                # Executor is running a target we didn't tell it to run
+                logging.info(f"External activity detected: executor running target {current_target}, "
+                            f"our targets: {our_targets}")
+                self._set_grb_grace_period()
+            else:
+                logging.debug(f"Executor current target: {current_target} (expected: {our_targets})")
+
+        except (ValueError, TypeError) as e:
+            logging.debug(f"Could not parse executor current target '{value_data}': {e}")
+
+    def _detect_external_activity(self) -> bool:
+        """Check if we're in a grace period due to external activity."""
+        current_time = time.time()
+        return current_time < self.grb_grace_until.value
+
+    def _set_grb_grace_period(self):
+        """Set GRB grace period when external activity detected."""
+        grace_end = time.time() + self.grb_grace_period
+        self.grb_grace_until.value = grace_end
+        self.grb_grace_active.value = True  # Update immediately
+        logging.info(f"External activity detected - setting grace period until {grace_end}")
+        logging.info(f"Grace period: {self.grb_grace_period}s")
 
 
 def main():
