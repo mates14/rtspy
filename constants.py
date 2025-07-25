@@ -1,5 +1,23 @@
 from enum import Enum, auto, IntEnum
 
+class CentralState:
+    PERIOD_MASK = 0x00F
+    DAY = 0x000
+    EVENING = 0x001
+    DUSK = 0x002
+    NIGHT = 0x003
+    DAWN = 0x004
+    MORNING = 0x005
+    UNKNOWN = 13
+
+    ONOFF_MASK = 0x030
+    ON = 0x000
+    STANDBY = 0x010
+    SOFT_OFF = 0x020
+// set when it is a real off state blocking all domes
+    HARD_OFF = 0x030
+
+
 class ConnectionState(IntEnum):
     """States for network connections (matching RTS2 C++ enum)."""
     UNKNOWN = 0
