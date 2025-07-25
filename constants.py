@@ -14,7 +14,7 @@ class CentralState:
     ON = 0x000
     STANDBY = 0x010
     SOFT_OFF = 0x020
-// set when it is a real off state blocking all domes
+# set when it is a real off state blocking all domes
     HARD_OFF = 0x030
 
 
