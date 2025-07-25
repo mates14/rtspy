@@ -40,56 +40,6 @@ class ScheduledTarget:
     tar_dec: float
     queue_order: int = 0
 
-
-class SunCalculator:
-    """Simple sun position calculator for calibration timing."""
-
-    def __init__(self, latitude: float, longitude: float):
-        self.latitude = math.radians(latitude)
-        self.longitude = math.radians(longitude)
-
-    def get_sun_elevation(self, dt: Optional[datetime] = None) -> float:
-        """Calculate sun elevation angle in degrees."""
-        if dt is None:
-            dt = datetime.now(timezone.utc)
-
-        # Julian day calculation
-        jd = self._julian_day(dt)
-
-        # Solar position calculation (simplified)
-        n = jd - 2451545.0
-        L = (280.460 + 0.9856474 * n) % 360
-        g = math.radians((357.528 + 0.9856003 * n) % 360)
-        lambda_sun = math.radians(L + 1.915 * math.sin(g) + 0.020 * math.sin(2 * g))
-
-        # Declination
-        delta = math.asin(0.39795 * math.cos(lambda_sun))
-
-        # Hour angle
-        gmst = (18.697374558 + 24.06570982441908 * (jd - 2451545.0)) % 24
-        lst = (gmst + self.longitude * 12 / math.pi) % 24
-        ha = math.radians(15 * (lst - math.degrees(lambda_sun) / 15))
-
-        # Elevation
-        elevation = math.asin(
-            math.sin(self.latitude) * math.sin(delta) +
-            math.cos(self.latitude) * math.cos(delta) * math.cos(ha)
-        )
-
-        return math.degrees(elevation)
-
-    def _julian_day(self, dt: datetime) -> float:
-        """Convert datetime to Julian day."""
-        a = (14 - dt.month) // 12
-        y = dt.year + 4800 - a
-        m = dt.month + 12 * a - 3
-
-        jdn = dt.day + (153 * m + 2) // 5 + 365 * y + y // 4 - y // 100 + y // 400 - 32045
-        jd = jdn + (dt.hour - 12) / 24.0 + dt.minute / 1440.0 + dt.second / 86400.0
-
-        return jd
-
-
 class QueueSelector(Device, DeviceConfig):
     """
     Queue-based target selector for RTS2.
@@ -100,40 +50,23 @@ class QueueSelector(Device, DeviceConfig):
 
     # Target type constants (from C++ RTS2)
     TARGET_FLAT = 2
-    TARGET_DARK = 3
 
     def setup_config(self, config):
         """Register selector-specific configuration."""
 
-        # Database configuration
-        config.add_argument('--db-host', default='localhost',
+        # Database configuration (can override rts2.ini)
+        config.add_argument('--db-host', default=None,
                           help='Database host', section='database')
-        config.add_argument('--db-name', default='stars',
+        config.add_argument('--db-name', default=None,
                           help='Database name', section='database')
-        config.add_argument('--db-user', default='mates',
+        config.add_argument('--db-user', default=None,
                           help='Database user', section='database')
-        config.add_argument('--db-password', default='pasewcic25',
+        config.add_argument('--db-password', default=None,
                           help='Database password', section='database')
 
         # Queue names (mapped to queue IDs in database)
         config.add_argument('--add-queue', action='append', dest='queue_names',
                           help='Add queue name (can be used multiple times)')
-
-        # Observatory location for sun calculations
-        config.add_argument('--latitude', type=float, default=50.0,
-                          help='Observatory latitude (degrees)', section='observatory')
-        config.add_argument('--longitude', type=float, default=14.0,
-                          help='Observatory longitude (degrees)', section='observatory')
-
-        # Calibration timing
-        config.add_argument('--flat-sun-min', type=float, default=-8.0,
-                          help='Minimum sun elevation for flats (degrees)', section='calibration')
-        config.add_argument('--flat-sun-max', type=float, default=-4.0,
-                          help='Maximum sun elevation for flats (degrees)', section='calibration')
-        config.add_argument('--dark-sun-min', type=float, default=-12.0,
-                          help='Minimum sun elevation for darks (degrees)', section='calibration')
-        config.add_argument('--dark-sun-max', type=float, default=-8.0,
-                          help='Maximum sun elevation for darks (degrees)', section='calibration')
 
         # Timing control
         config.add_argument('--time-slice', type=float, default=300.0,
@@ -151,12 +84,12 @@ class QueueSelector(Device, DeviceConfig):
         """Apply configuration and initialize selector."""
         super().apply_config(config)
 
-        # Database configuration
+        # Database configuration - command line overrides rts2.ini
         self.db_config = {
-            'host': config.get('db_host'),
-            'database': config.get('db_name'),
-            'user': config.get('db_user'),
-            'password': config.get('db_password')
+            'host': config.get('db_host', 'localhost'),
+            'database': config.get('db_name', 'stars'),
+            'user': config.get('db_user', 'mates'),
+            'password': config.get('db_password', 'pasewcic25')
         }
 
         # Queue name to ID mapping (default RTS2 queues)
@@ -167,13 +100,6 @@ class QueueSelector(Device, DeviceConfig):
         # Map queue names to IDs (0-based indexing as per RTS2 convention)
         self.queue_name_to_id = {name: idx for idx, name in enumerate(queue_names)}
         logging.info(f"Queue mapping: {self.queue_name_to_id}")
-
-        # Observatory and calibration settings
-        self.sun_calc = SunCalculator(config.get('latitude'), config.get('longitude'))
-        self.flat_sun_min = config.get('flat_sun_min')
-        self.flat_sun_max = config.get('flat_sun_max')
-        self.dark_sun_min = config.get('dark_sun_min')
-        self.dark_sun_max = config.get('dark_sun_max')
 
         # Timing settings
         self.time_slice = config.get('time_slice')
@@ -203,7 +129,7 @@ class QueueSelector(Device, DeviceConfig):
         self.queue_size = ValueInteger("queue_size", "Number of targets in scheduler queue", initial=0)
         self.current_queue = ValueString("current_queue", "Currently active queue name", initial="none")
         self.next_target = ValueString("next_target", "Next target to observe", initial="none")
-        self.sun_elevation = ValueDouble("sun_elevation", "Current sun elevation (degrees)", initial=0.0)
+        self.system_state_desc = ValueString("system_state", "Current system state description", initial="unknown")
         self.grb_grace_active = ValueBool("grb_grace_active", "GRB grace period active", initial=False)
         self.grb_grace_until = ValueTime("grb_grace_until", "GRB grace period end time", initial=0.0)
         self.last_update = ValueTime("last_update", "Last selector update time", initial=time.time())
@@ -244,9 +170,9 @@ class QueueSelector(Device, DeviceConfig):
         """Update device information."""
         super().info()
 
-        # Update sun elevation
-        if self.sun_calc:
-            self.sun_elevation.value = self.sun_calc.get_sun_elevation()
+        # Update system state description
+        state_desc = self._get_system_state_description()
+        self.system_state_desc.value = state_desc
 
         # Update last update time
         self.last_update.value = time.time()
@@ -258,6 +184,28 @@ class QueueSelector(Device, DeviceConfig):
             self.grb_grace_until.value = self.grb_grace_end
         else:
             self.grb_grace_active.value = False
+
+    def _get_system_state_description(self) -> str:
+        """Get human-readable system state description."""
+        state = self.system_state & 0xFF  # Base state
+        weather = self.system_state & 0x80000000  # Weather bit
+
+        # RTS2 system states
+        states = {
+            0x01: "OFF", 0x02: "STANDBY", 0x03: "ON",
+            0x10: "DUSK", 0x20: "NIGHT", 0x40: "DAWN", 0x80: "DAY"
+        }
+
+        base_state = states.get(state & 0x0F, f"UNKNOWN({state & 0x0F:x})")
+        period_state = states.get(state & 0xF0, "")
+
+        description = base_state
+        if period_state:
+            description += f"_{period_state}"
+        if weather:
+            description += "_BAD_WEATHER"
+
+        return description
 
     def _test_database(self) -> bool:
         """Test database connection."""
@@ -278,11 +226,29 @@ class QueueSelector(Device, DeviceConfig):
         old_state = self.system_state
         self.system_state = state
 
-        # Check if system is ready (ON + NIGHT = 0x03)
-        self.system_ready = (state & 0xFF) == 0x03
+        # Check if system is ready for observations
+        base_state = state & 0x0F
+        period_state = state & 0xF0
+        weather_ok = not (state & 0x80000000)
+
+        # System ready for science observations: ON + NIGHT + good weather
+        self.system_ready = (base_state == 0x03 and period_state == 0x20 and weather_ok)
 
         if old_state != state:
-            logging.info(f"System state: 0x{state:02x} ({'ready' if self.system_ready else 'not ready'})")
+            state_desc = self._get_system_state_description()
+            logging.info(f"System state: 0x{state:08x} ({state_desc}) "
+                        f"{'ready for science' if self.system_ready else 'calibrations/standby'}")
+
+    def _is_calibration_time(self) -> bool:
+        """Check if current system state calls for calibrations."""
+        base_state = self.system_state & 0x0F
+        period_state = self.system_state & 0xF0
+        weather_ok = not (self.system_state & 0x80000000)
+
+        # Calibrations during ON + DUSK or ON + DAWN with good weather
+        return (base_state == 0x03 and
+                (period_state == 0x10 or period_state == 0x40) and
+                weather_ok)
 
     def _selector_loop(self):
         """Main selector loop."""
@@ -352,28 +318,21 @@ class QueueSelector(Device, DeviceConfig):
         return None
 
     def _select_calibration(self) -> Optional[ScheduledTarget]:
-        """Select calibration target based on sun elevation."""
-        sun_elev = self.sun_calc.get_sun_elevation()
+        """Select calibration target during DUSK/DAWN system states."""
+        if not self._is_calibration_time():
+            return None
 
-        # Flats during twilight (-8° to -4°)
-        if self.flat_sun_min <= sun_elev <= self.flat_sun_max:
-            logging.debug(f"Sun elevation {sun_elev:.1f}° - selecting flats")
-            return ScheduledTarget(
-                qid=0, tar_id=self.TARGET_FLAT,
-                queue_start=datetime.now(timezone.utc), queue_end=None,
-                tar_name="flat", tar_ra=0.0, tar_dec=0.0
-            )
+        # Determine period for logging
+        period_state = self.system_state & 0xF0
+        period = "dusk" if period_state == 0x10 else "dawn"
 
-        # Darks during dark transition period (-12° to -8°)
-        if self.dark_sun_min <= sun_elev <= self.dark_sun_max:
-            logging.debug(f"Sun elevation {sun_elev:.1f}° - selecting darks")
-            return ScheduledTarget(
-                qid=0, tar_id=self.TARGET_DARK,
-                queue_start=datetime.now(timezone.utc), queue_end=None,
-                tar_name="dark", tar_ra=0.0, tar_dec=0.0
-            )
+        logging.debug(f"System state indicates {period} - selecting calibrations")
 
-        return None
+        return ScheduledTarget(
+            qid=0, tar_id=self.TARGET_FLAT,
+            queue_start=datetime.now(timezone.utc), queue_end=None,
+            tar_name="calibration", tar_ra=0.0, tar_dec=0.0
+        )
 
     def _get_next_scheduler_target(self) -> Optional[ScheduledTarget]:
         """Get next target from scheduler queue."""
