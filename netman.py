@@ -444,9 +444,15 @@ class NetworkManager:
             centrald_conn = self.connection_manager.get_associated_centrald_connection()
             if centrald_conn and hasattr(centrald_conn, 'auth_key') and centrald_conn.auth_key:
                 conn.registration_sent = True
-
+                # Find the target device's centrald_num from entities
+                target_centrald_num = 0  # default
+                if hasattr(conn, 'remote_device_name'):
+                    for entity in self.entities.values():
+                        if entity.get('name') == conn.remote_device_name:
+                            target_centrald_num = entity.get('centrald_num', 0)
+                            break
                 # Send auth command with our device ID and auth key from centrald
-                auth_cmd = f"auth {centrald_conn.device_id} {centrald_conn.centrald_num} {centrald_conn.auth_key}"
+                auth_cmd = f"auth {centrald_conn.device_id} {target_centrald_num} {centrald_conn.auth_key}"
                 conn.send_command(auth_cmd)
                 conn.update_state(ConnectionState.AUTH_PENDING, "Authentication sent to device")
             else:
