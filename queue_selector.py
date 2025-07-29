@@ -326,7 +326,7 @@ class QueueSelector(Device, DeviceConfig):
             return scheduler_target
 
         # 3. Check manual queue only (queue_id=1)
-        # Note: Other queues (grb, integral_targets, regular_targets, etc.) 
+        # Note: Other queues (grb, integral_targets, regular_targets, etc.)
         # are legacy and should not be processed by this selector
         if 'manual' in self.queue_name_to_id:
             targets = self._get_queue_targets('manual', limit=1)
@@ -375,6 +375,10 @@ class QueueSelector(Device, DeviceConfig):
             # Query queues_targets table - get next target scheduled for now or past
             current_time = datetime.now(timezone.utc)
 
+            # Look ahead to find targets that will be due within a reasonable window
+            # This allows the execution logic to decide between 'next' and 'now'
+            lookahead_window = timedelta(seconds=self.time_slice + 300)  # time_slice + 5 minutes buffer
+
             query = """
                 SELECT qt.qid, qt.tar_id, qt.time_start, qt.time_end,
                        t.tar_name, t.tar_ra, t.tar_dec, qt.queue_order
@@ -387,7 +391,9 @@ class QueueSelector(Device, DeviceConfig):
                 LIMIT 1
             """
 
-            cursor.execute(query, (scheduler_queue_id, current_time, current_time, current_time))
+            # Use lookahead window instead of just current_time
+            lookahead_time = current_time + lookahead_window
+            cursor.execute(query, (scheduler_queue_id, lookahead_time, current_time, current_time))
             row = cursor.fetchone()
 
             if row:
@@ -474,29 +480,12 @@ class QueueSelector(Device, DeviceConfig):
             current_time.timestamp() - self.last_command_time < 60.0):
             return
 
-        # Determine which queue provided this target and update immediately
-        if target.tar_id == self.TARGET_FLAT:
-            self.current_queue.value = "calibration"
-        elif target.qid == 0:
-            self.current_queue.value = "manual"
-        else:
-            # Determine queue from target source
-            for queue_name, queue_id in self.queue_name_to_id.items():
-                if queue_id == 1:  # Manual queue check could be more sophisticated
-                    self.current_queue.value = "manual"
-                    break
-                elif queue_id == 2:  # Scheduler queue
-                    self.current_queue.value = "scheduler"
-                    break
-            else:
-                self.current_queue.value = "unknown"
-
-        # Update next target immediately
-        self.next_target.value = target.tar_name
+        # Update queue status immediately
+        self._update_target_status(target)
 
         # Determine command timing
         if target.queue_start and target.queue_start > current_time:
-            # Target is scheduled for future - check if we should issue 'next'
+            # Target is scheduled for future
             time_until_start = (target.queue_start - current_time).total_seconds()
 
             if time_until_start <= self.time_slice:
@@ -506,11 +495,18 @@ class QueueSelector(Device, DeviceConfig):
                            f"starting in {time_until_start:.0f}s")
             else:
                 # Too early - don't issue command yet
+                logging.debug(f"Target {target.tar_id} not ready yet, {time_until_start:.0f}s until start")
                 return
         else:
-            # Target should start now - issue 'now' command
-            command = f"now {target.tar_id}"
-            logging.info(f"Issuing 'now' for target {target.tar_id} ({target.tar_name})")
+            # Target should start now (overdue or no specific time)
+            if target.queue_start:
+                delay = (current_time - target.queue_start).total_seconds()
+                command = f"now {target.tar_id}"
+                logging.info(f"Issuing 'now' for target {target.tar_id} ({target.tar_name}) "
+                           f"(delayed by {delay:.0f}s)")
+            else:
+                command = f"now {target.tar_id}"
+                logging.info(f"Issuing 'now' for target {target.tar_id} ({target.tar_name})")
 
         # Send command to executor
         try:
@@ -518,11 +514,32 @@ class QueueSelector(Device, DeviceConfig):
                 self.last_target_id = target.tar_id
                 self.last_command_time = current_time.timestamp()
 
-                # Remove executed target from queue (if needed)
-                self._remove_executed_target(target)
+                # Only remove from queue after 'now' commands, not 'next'
+                if command.startswith("now"):
+                    self._remove_executed_target(target)
 
         except Exception as e:
             logging.error(f"Error executing target {target.tar_id}: {e}")
+
+    def _update_target_status(self, target: ScheduledTarget):
+        """Update status values for monitoring."""
+        if target.tar_id == self.TARGET_FLAT:
+            self.current_queue.value = "calibration"
+        elif target.qid == 0:
+            self.current_queue.value = "manual"
+        else:
+            # Determine queue from target source
+            for queue_name, queue_id in self.queue_name_to_id.items():
+                if queue_id == 1:
+                    self.current_queue.value = "manual"
+                    break
+                elif queue_id == 2:
+                    self.current_queue.value = "scheduler"
+                    break
+            else:
+                self.current_queue.value = "unknown"
+
+        self.next_target.value = target.tar_name
 
     def _send_executor_command(self, command: str) -> bool:
         """Send command to executor device."""
