@@ -367,8 +367,6 @@ class QueueSelector(Device, DeviceConfig):
         try:
             if not self.db_conn or self.db_conn.closed:
                 self.db_conn = psycopg2.connect(**self.db_config)
-                self.db_conn.set_session(timezone='UTC')
-
             cursor = self.db_conn.cursor()
 
             # Get scheduler queue ID
@@ -396,6 +394,12 @@ class QueueSelector(Device, DeviceConfig):
 
             if row:
                 qid, tar_id, time_start, time_end, tar_name, tar_ra, tar_dec, queue_order = row
+
+                # Ensure database datetimes are timezone-aware (assume UTC)
+                if time_start and time_start.tzinfo is None:
+                    time_start = time_start.replace(tzinfo=timezone.utc)
+                if time_end and time_end.tzinfo is None:
+                    time_end = time_end.replace(tzinfo=timezone.utc)
 
                 # Update queue size for monitoring
                 cursor.execute("""
@@ -426,7 +430,6 @@ class QueueSelector(Device, DeviceConfig):
         try:
             if not self.db_conn or self.db_conn.closed:
                 self.db_conn = psycopg2.connect(**self.db_config)
-                self.db_conn.set_session(timezone='UTC')
 
             cursor = self.db_conn.cursor()
             queue_id = self.queue_name_to_id.get(queue_name)
@@ -446,7 +449,19 @@ class QueueSelector(Device, DeviceConfig):
             """
 
             cursor.execute(query, (queue_id, limit))
-            return cursor.fetchall()
+            rows = cursor.fetchall()
+
+            # Convert timezone-naive datetimes to UTC timezone-aware
+            result = []
+            for row in rows:
+                qid, tar_id, time_start, time_end, tar_name, tar_ra, tar_dec, queue_order = row
+                if time_start and time_start.tzinfo is None:
+                    time_start = time_start.replace(tzinfo=timezone.utc)
+                if time_end and time_end.tzinfo is None:
+                    time_end = time_end.replace(tzinfo=timezone.utc)
+                result.append((qid, tar_id, time_start, time_end, tar_name, tar_ra, tar_dec, queue_order))
+
+            return result
 
         except Exception as e:
             logging.error(f"Error querying queue {queue_name}: {e}")
@@ -524,10 +539,8 @@ class QueueSelector(Device, DeviceConfig):
             # Find executor connection (same pattern as grbd.py)
             executor_conn = None
             for conn in self.network.connection_manager.connections.values():
-                logging.info(f"{conn}")
-                #if (hasattr(conn, 'remote_device_type') and
-                #    conn.remote_device_type == DeviceType.EXECUTOR and
-                if (hasattr(conn, 'remote_device_name') and conn.remote_device_name == self.executor_name: # and conn.state == ConnectionState.AUTH_OK):
+                if (hasattr(conn, 'remote_device_name') and conn.remote_device_name == self.executor_name): # and conn.state == ConnectionState.AUTH_OK):
+                    logging.info(f"{conn}")
                     executor_conn = conn
                     break
 
