@@ -519,10 +519,23 @@ class QueueSelector(Device, DeviceConfig):
                 self.expected_executor_target = target_id
                 logging.debug(f"Setting expected executor target to {target_id}")
 
-            # Use RTS2 network to send command
-            response = self.network.send_command(self.executor_name, command)
-            logging.debug(f"Executor response: {response}")
-            return True
+            # Find executor connection (same pattern as grbd.py)
+            executor_conn = None
+            for conn in self.network.connection_manager.connections.values():
+                if (hasattr(conn, 'remote_device_type') and
+                    conn.remote_device_type == DeviceType.EXECUTOR and
+                    conn.state == ConnectionState.AUTH_OK):
+                    executor_conn = conn
+                    break
+
+            if executor_conn:
+                success = executor_conn.send_command(command)
+                logging.debug(f"Successfully sent command '{command}' to executor")
+                return success
+            else:
+                logging.warning(f"No authenticated executor connection found")
+                return False
+
         except Exception as e:
             logging.error(f"Error sending command '{command}' to executor: {e}")
             return False
