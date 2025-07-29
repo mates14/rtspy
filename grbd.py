@@ -210,6 +210,8 @@ class GrbDaemon(Device, DeviceConfig):
         config.add_argument('--not-visible', action='store_true', default=True, help='Record GRBs not visible from current location')
         config.add_argument('--only-visible-tonight', action='store_true', help='Record only GRBs visible during current night')
         config.add_argument('--min-grb-altitude', type=float, default=0.0, help='Minimum GRB altitude to consider as visible (degrees)')
+        config.add_argument('--max-errorbox', type=float, default=15.0,
+                          help='Maximum error box size to accept for follow-up (degrees)')
 
     def __init__(self, device_name="GRBD", port=0):
         """Initialize GRB daemon."""
@@ -262,6 +264,7 @@ class GrbDaemon(Device, DeviceConfig):
         self.record_not_visible.value = config.get('not_visible', True)
 #        self.record_only_visible_tonight.value = config.get('only_visible_tonight', False)
         self.min_altitude.value = config.get('min_altitude', 0.0)
+        self.max_errorbox.value = config.get('max_errorbox', 15.0)
 
     def _create_values(self):
         """Create RTS2 values for comprehensive monitoring and control."""
@@ -273,6 +276,7 @@ class GrbDaemon(Device, DeviceConfig):
         self.only_visible_tonight = ValueBool("only_visible_tonight", "Record only GRBs visible tonight", writable=True)
         self.min_altitude = ValueDouble("min_altitude", "Minimum GRB altitude for visibility", writable=True)
         self.queue_name = ValueString("queue_name", "Queue for triggers", writable=True)
+        self.max_errorbox = ValueDouble("max_errorbox", "Maximum error box size for follow-up (degrees)", writable=True, initial=15.0)
 
         # === CONNECTION STATUS ===
         self.gcn_connected = ValueBool("gcn_connected", "GCN Kafka connection status")
@@ -710,8 +714,8 @@ class GrbDaemon(Device, DeviceConfig):
             return "no valid coordinates"
 
         # Skip if error box too large for our telescope capabilities
-        if not math.isnan(grb_info.error_box) and grb_info.error_box > 15.0:
-            return f"error box too large ({grb_info.error_box:.1f}°)"
+        if not math.isnan(grb_info.error_box) and grb_info.error_box > self.max_errorbox.value:
+            return f"error box too large ({grb_info.error_box:.1f}° > {self.max_errorbox.value:.1f}°)"
 
         # Skip known sources (already studied, not scientifically interesting)
         if hasattr(grb_info, 'source_name') and grb_info.source_name:
@@ -1643,6 +1647,12 @@ class GrbDaemon(Device, DeviceConfig):
         """Handle changes to minimum GRB altitude."""
 #        self.min_altitude = new_value
         logging.info(f"Minimum GRB altitude set to: {self.min_altitude.value} degrees")
+
+    def on_max_errorbox_changed(self, old_value, new_value):
+        """Handle maximum error box size changes."""
+        logging.info(f"Maximum error box size changed from {old_value:.1f}° to {new_value:.1f}°")
+        if not math.isnan(old_value) and old_value != new_value:
+            logging.info(f"New limit will affect future GRB filtering")
 
 
 # Additional command handlers for RTS2 integration
