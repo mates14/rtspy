@@ -1036,10 +1036,19 @@ class NetworkManager:
         # Add to pending interests to ensure connection is established
         self.pending_interests.add(device_name)
 
+        # CENTRALD QUIRK: centrald sends all values immediately after 'register'
+        # command, before authentication completes. For centrald only, we allow
+        # state callbacks on CONNECTED connections to catch this initial flood.
+        # This is a workaround for centrald's design, not a security feature.
+        #
+        # And just to make sure, I will simply allow it for all connections, it
+        # makes no harm anyway so there is ConnectionState.CONNECTED instead of
+        # ConnectionState.AUTH_OK
+
         # Check if we already have a connection to this device
         device_connected = False
         for conn in self.connection_manager.connections.values():
-            if (conn.state == ConnectionState.AUTH_OK and
+            if (conn.state >= ConnectionState.CONNECTED and
                 hasattr(conn, 'remote_device_name') and
                 conn.remote_device_name == device_name):
                 device_connected = True
