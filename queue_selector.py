@@ -18,7 +18,7 @@ import threading
 import psycopg2
 import configparser
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass
 from typing import Optional, Dict, List, Tuple
 
