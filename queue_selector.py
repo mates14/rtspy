@@ -325,23 +325,21 @@ class QueueSelector(Device, DeviceConfig):
         if scheduler_target:
             return scheduler_target
 
-        # 3. Check other queues in priority order
-        queue_priority = ['grb', 'manual', 'integral_targets', 'regular_targets',
-                         'longscript', 'longscript2', 'plan']
-
-        for queue_name in queue_priority:
-            if queue_name in self.queue_name_to_id:
-                targets = self._get_queue_targets(queue_name, limit=1)
-                if targets:
-                    qid, tar_id, time_start, time_end, tar_name, tar_ra, tar_dec, queue_order = targets[0]
-                    return ScheduledTarget(
-                        qid=qid, tar_id=tar_id,
-                        queue_start=time_start or datetime.now(timezone.utc),
-                        queue_end=time_end,
-                        tar_name=tar_name or f"target_{tar_id}",
-                        tar_ra=tar_ra or 0.0, tar_dec=tar_dec or 0.0,
-                        queue_order=queue_order or 0
-                    )
+        # 3. Check manual queue only (queue_id=1)
+        # Note: Other queues (grb, integral_targets, regular_targets, etc.) 
+        # are legacy and should not be processed by this selector
+        if 'manual' in self.queue_name_to_id:
+            targets = self._get_queue_targets('manual', limit=1)
+            if targets:
+                qid, tar_id, time_start, time_end, tar_name, tar_ra, tar_dec, queue_order = targets[0]
+                return ScheduledTarget(
+                    qid=qid, tar_id=tar_id,
+                    queue_start=time_start or datetime.now(timezone.utc),
+                    queue_end=time_end,
+                    tar_name=tar_name or f"target_{tar_id}",
+                    tar_ra=tar_ra or 0.0, tar_dec=tar_dec or 0.0,
+                    queue_order=queue_order or 0
+                )
 
         return None
 
