@@ -367,6 +367,7 @@ class QueueSelector(Device, DeviceConfig):
         try:
             if not self.db_conn or self.db_conn.closed:
                 self.db_conn = psycopg2.connect(**self.db_config)
+                self.db_conn.set_session(timezone='UTC')
 
             cursor = self.db_conn.cursor()
 
@@ -425,6 +426,7 @@ class QueueSelector(Device, DeviceConfig):
         try:
             if not self.db_conn or self.db_conn.closed:
                 self.db_conn = psycopg2.connect(**self.db_config)
+                self.db_conn.set_session(timezone='UTC')
 
             cursor = self.db_conn.cursor()
             queue_id = self.queue_name_to_id.get(queue_name)
@@ -545,6 +547,7 @@ class QueueSelector(Device, DeviceConfig):
         try:
             if not self.db_conn or self.db_conn.closed:
                 self.db_conn = psycopg2.connect(**self.db_config)
+                self.db_conn.set_session(timezone='UTC')
 
             cursor = self.db_conn.cursor()
 
