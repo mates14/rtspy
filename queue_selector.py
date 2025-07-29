@@ -26,7 +26,7 @@ from device import Device
 from config import DeviceConfig
 from app import App
 from value import ValueDouble, ValueInteger, ValueBool, ValueTime, ValueString
-from constants import DeviceType, CentralState
+from constants import DeviceType, CentralState, ConnectionState
 
 
 @dataclass
