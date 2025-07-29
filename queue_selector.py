@@ -524,9 +524,10 @@ class QueueSelector(Device, DeviceConfig):
             # Find executor connection (same pattern as grbd.py)
             executor_conn = None
             for conn in self.network.connection_manager.connections.values():
+                logging.info(f"{conn}")
                 #if (hasattr(conn, 'remote_device_type') and
                 #    conn.remote_device_type == DeviceType.EXECUTOR and
-                if (hasattr(conn, 'remote_device_name') and conn.remote_device_name == self.executor_name and conn.state == ConnectionState.AUTH_OK):
+                if (hasattr(conn, 'remote_device_name') and conn.remote_device_name == self.executor_name: # and conn.state == ConnectionState.AUTH_OK):
                     executor_conn = conn
                     break
 
