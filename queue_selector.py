@@ -127,6 +127,8 @@ class QueueSelector(Device, DeviceConfig):
         """Initialize the queue selector."""
         super().__init__(device_name, device_type, port)
 
+        self.executor_current_target = None
+
         # RTS2 values for monitoring
         self.queue_size = ValueInteger("queue_size", "Number of targets in scheduler queue", initial=0)
         self.current_queue = ValueString("current_queue", "Currently active queue name", initial="none")
@@ -499,6 +501,9 @@ class QueueSelector(Device, DeviceConfig):
                 return
         else:
             # Target should start now (overdue or no specific time)
+            if self.executor_current_target == target.tar_id:
+                logging.debug(f"Target {target.tar_id} already running, skipping 'now' command")
+                return
             if target.queue_start:
                 delay = (current_time - target.queue_start).total_seconds()
                 command = f"now {target.tar_id}"
@@ -599,7 +604,7 @@ class QueueSelector(Device, DeviceConfig):
         """Handle executor current target changes to detect external activity."""
         try:
             # Parse current target ID from executor
-            current_target = int(value_data) if value_data and value_data != "-1" else None
+            self.executor_current_target = int(value_data) if value_data and value_data != "-1" else None
 
             # Check if this is external activity
             # We consider it "our" activity if current target is either:
@@ -608,13 +613,13 @@ class QueueSelector(Device, DeviceConfig):
             our_targets = {self.expected_executor_target, self.last_target_id}
             our_targets.discard(None)  # Remove None values
 
-            if current_target is not None and current_target not in our_targets:
+            if self.executor_current_target is not None and self.executor_current_target not in our_targets:
                 # Executor is running a target we didn't tell it to run
-                logging.info(f"External activity detected: executor running target {current_target}, "
+                logging.info(f"External activity detected: executor running target {self.executor_current_target}, "
                             f"our targets: {our_targets}")
                 self._set_grb_grace_period()
             else:
-                logging.debug(f"Executor current target: {current_target} (expected: {our_targets})")
+                logging.debug(f"Executor current target: {self.executor_current_target} (expected: {our_targets})")
 
         except (ValueError, TypeError) as e:
             logging.debug(f"Could not parse executor current target '{value_data}': {e}")
