@@ -106,9 +106,9 @@ class DeviceConfigRegistry:
         # Network arguments
         self.add_argument('-P', '--port', type=int, default=0,
                          help='TCP/IP port for RTS2 communication', section='network')
-        self.add_argument('-c', '--centrald', default='localhost',
+        self.add_argument('-c', '--server', default='localhost',
                          help='Centrald hostname', section='network')
-        self.add_argument('-p', '--centrald-port', type=int, default=617,
+        self.add_argument('-p', '--server-port', type=int, default=617,
                          help='Centrald port', section='network')
         self.add_argument('--connection-timeout', type=float, default=300.0,
                          help='Connection timeout in seconds', section='network')
@@ -358,10 +358,10 @@ class DeviceConfig:
         
         # Apply network configuration
         if hasattr(self, 'network'):
-            if config.get('centrald'):
-                self.network.centrald_host = config['centrald']
-            if config.get('centrald_port'):
-                self.network.centrald_port = config['centrald_port']
+            if config.get('server'):
+                self.network.centrald_host = config['server']
+            if config.get('server_port'):
+                self.network.centrald_port = config['server_port']
             if config.get('port'):
                 self.network.port = config['port']
             if config.get('connection_timeout'):
