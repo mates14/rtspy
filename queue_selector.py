@@ -313,7 +313,7 @@ class QueueSelector(Device, DeviceConfig):
                 # Only run when system is ready
                 if not self.system_ready and not self._is_calibration_time():
 
-                    logging.debug(f"System not ready for observations - state: {state_desc}, "
+                    logging.debug(f"System not ready for observations, "
                              f"waiting for ON_NIGHT or ON_DUSK/ON_DAWN")
 
                     # Clear target info when system not active
