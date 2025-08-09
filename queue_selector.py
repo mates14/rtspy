@@ -53,6 +53,15 @@ class QueueSelector(Device, DeviceConfig):
     # Target type constants (from C++ RTS2)
     TARGET_FLAT = 2  # Calibration script (handles both flats and darks internally)
 
+    # Default configuration
+    DEFAULT_CONFIG = {
+        'time_slice': 300,           # Seconds before target start to issue 'next'
+        'grb_grace_period': 1200,    # Grace period duration (seconds)
+        'update_interval': 30,       # Selector loop interval (seconds)
+        'executor': 'EXEC',          # Executor device name
+    }
+
+
     def setup_config(self, config):
         """Register selector-specific configuration."""
 
@@ -123,6 +132,10 @@ class QueueSelector(Device, DeviceConfig):
         self.last_command_time = 0.0
         self.expected_executor_target = None  # Target we told executor to run
 
+        # Startup handling - ignore grace period for initial period
+        self.startup_time = None
+        self.startup_grace_period = 60.0  # Ignore external activity for 60s after startup
+
     def __init__(self, device_name="SEL", device_type=DeviceType.SELECTOR, port=0):
         """Initialize the queue selector."""
         super().__init__(device_name, device_type, port)
@@ -142,6 +155,10 @@ class QueueSelector(Device, DeviceConfig):
         """Start the selector daemon."""
         super().start()
 
+        # Record startup time to ignore initial grace period
+        self.startup_time = time.time()
+        logging.info(f"Selector starting - ignoring external activity for {self.startup_grace_period}s")
+
         # Test database connection
         if not self._test_database():
             raise RuntimeError("Cannot connect to RTS2 database")
@@ -155,7 +172,7 @@ class QueueSelector(Device, DeviceConfig):
         # Monitor executor current target for external activity detection
         self.network.register_interest_in_value(
             device_name=self.executor_name,
-            value_name="current",
+            value_name="current_sel",
             callback=self._on_executor_current_changed
         )
 
@@ -216,6 +233,9 @@ class QueueSelector(Device, DeviceConfig):
         # System ready for science observations: ON + NIGHT
         # (centrald automatically changes ON→STANDBY when weather is bad)
         self.system_ready = (onoff == CentralState.ON and period == CentralState.NIGHT)
+
+        if self.system_ready and old_state != self.system_state:
+            self.last_target_id = None  # Clear to force re-evaluation
 
         # Update system state description immediately
         state_desc = self._get_system_state_description()
@@ -363,55 +383,55 @@ class QueueSelector(Device, DeviceConfig):
         )
 
     def _get_next_scheduler_target(self) -> Optional[ScheduledTarget]:
-        """Get next target from scheduler queue."""
+        """Get next target from scheduler queue - focus only on present/future."""
         try:
             if not self.db_conn or self.db_conn.closed:
                 self.db_conn = psycopg2.connect(**self.db_config)
-            cursor = self.db_conn.cursor()
 
-            # Get scheduler queue ID
+            cursor = self.db_conn.cursor()
             scheduler_queue_id = self.queue_name_to_id.get('scheduler')
             if scheduler_queue_id is None:
                 return None
 
-            # Query queues_targets table - get next target scheduled for now or past
             current_time = datetime.now(timezone.utc)
+            time_slice_interval = f"{self.time_slice} seconds"
 
-            # Look ahead to find targets that will be due within a reasonable window
-            # This allows the execution logic to decide between 'next' and 'now'
-            lookahead_window = timedelta(seconds=self.time_slice + 300)  # time_slice + 5 minutes buffer
+            # First: Clean up truly overdue targets (older than time_slice)
+            cursor.execute(f"""
+                DELETE FROM queues_targets
+                WHERE queue_id = %s
+                  AND time_start IS NOT NULL
+                  AND time_start < %s - interval '{time_slice_interval}'
+            """, (scheduler_queue_id, current_time))
 
-            query = """
+            deleted_count = cursor.rowcount
+            if deleted_count > 0:
+                logging.info(f"Removed {deleted_count} overdue targets (>{self.time_slice}s old)")
+                self.db_conn.commit()
+
+            # Now: Get next target that's either future or slightly overdue (within time_slice)
+            query = f"""
                 SELECT qt.qid, qt.tar_id, qt.time_start, qt.time_end,
                        t.tar_name, t.tar_ra, t.tar_dec, qt.queue_order
                 FROM queues_targets qt
                 JOIN targets t ON qt.tar_id = t.tar_id
                 WHERE qt.queue_id = %s
-                  AND (qt.time_start IS NULL OR qt.time_start <= %s)
-                  AND qt.time_start > %s - interval '6 hours'
+                  AND (qt.time_start IS NULL OR qt.time_start >= %s - interval '{time_slice_interval}')
                 ORDER BY COALESCE(qt.time_start, %s), qt.queue_order
                 LIMIT 1
             """
 
-            # Use lookahead window instead of just current_time
-            lookahead_time = current_time + lookahead_window
-            cursor.execute(query, (scheduler_queue_id, lookahead_time, current_time, current_time))
+            cursor.execute(query, (scheduler_queue_id, current_time, current_time))
             row = cursor.fetchone()
 
             if row:
                 qid, tar_id, time_start, time_end, tar_name, tar_ra, tar_dec, queue_order = row
 
-                # Ensure database datetimes are timezone-aware (assume UTC)
-                if time_start and time_start.tzinfo is None:
-                    time_start = time_start.replace(tzinfo=timezone.utc)
-                if time_end and time_end.tzinfo is None:
-                    time_end = time_end.replace(tzinfo=timezone.utc)
-
                 # Update queue size for monitoring
                 cursor.execute("""
                     SELECT COUNT(*) FROM queues_targets
-                    WHERE queue_id = %s AND (time_start IS NULL OR time_start > %s)
-                """, (scheduler_queue_id, current_time))
+                    WHERE queue_id = %s
+                """, (scheduler_queue_id,))
                 count = cursor.fetchone()[0]
                 self.queue_size.value = count
 
@@ -560,7 +580,7 @@ class QueueSelector(Device, DeviceConfig):
             executor_conn = None
             for conn in self.network.connection_manager.connections.values():
                 if (hasattr(conn, 'remote_device_name') and conn.remote_device_name == self.executor_name): # and conn.state == ConnectionState.AUTH_OK):
-                    logging.info(f"{conn}")
+        #            logging.info(f"{conn}")
                     executor_conn = conn
                     break
 
@@ -577,32 +597,38 @@ class QueueSelector(Device, DeviceConfig):
             return False
 
     def _remove_executed_target(self, target: ScheduledTarget):
-        """Remove executed target from database queue."""
+        """Remove executed targets to prevent re-execution."""
         try:
             if not self.db_conn or self.db_conn.closed:
                 self.db_conn = psycopg2.connect(**self.db_config)
-                self.db_conn.set_session(timezone='UTC')
 
             cursor = self.db_conn.cursor()
 
-            # Check if queue has remove_after_execution flag
-            queue_id = self.queue_name_to_id.get('scheduler', 2)
+            # Remove the specific target from queue
             cursor.execute("""
-                SELECT remove_after_execution FROM queues WHERE queue_id = %s
-            """, (queue_id,))
+                DELETE FROM queues_targets
+                WHERE qid = %s
+            """, (target.qid,))
 
-            row = cursor.fetchone()
-            if row and row[0]:  # remove_after_execution is True
-                cursor.execute("DELETE FROM queues_targets WHERE qid = %s", (target.qid,))
-                self.db_conn.commit()
-                logging.debug(f"Removed executed target qid={target.qid} from queue")
+            rows_deleted = cursor.rowcount
+            self.db_conn.commit()
+
+            if rows_deleted > 0:
+                logging.info(f"Removed executed target {target.tar_id} from queue")
 
         except Exception as e:
-            logging.error(f"Error removing executed target: {e}")
+            logging.error(f"Error removing target {target.tar_id} from queue: {e}")
+            if self.db_conn:
+                self.db_conn.rollback()
 
     def _on_executor_current_changed(self, value_data):
         """Handle executor current target changes to detect external activity."""
         try:
+            # Check if we're still in startup grace period
+            if self.startup_time and time.time() - self.startup_time < self.startup_grace_period:
+                logging.debug(f"Ignoring executor target change during startup grace period: {value_data}")
+                return
+
             # Parse current target ID from executor
             self.executor_current_target = int(value_data) if value_data and value_data != "-1" else None
 
@@ -626,6 +652,9 @@ class QueueSelector(Device, DeviceConfig):
 
     def _detect_external_activity(self) -> bool:
         """Check if we're in a grace period due to external activity."""
+        # Don't apply grace period during startup
+        if self.startup_time and time.time() - self.startup_time < self.startup_grace_period:
+            return False
         current_time = time.time()
         return current_time < self.grb_grace_until.value
 
