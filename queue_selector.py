@@ -483,7 +483,7 @@ class QueueSelector(Device, DeviceConfig):
 
                 logging.info(f"Queue size for scheduler queue: {count}")
 
-                    target = ScheduledTarget(
+                target = ScheduledTarget(
                     qid=qid, tar_id=tar_id,
                     queue_start=time_start or current_time,
                     queue_end=time_end,
