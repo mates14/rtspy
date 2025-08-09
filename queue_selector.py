@@ -413,8 +413,15 @@ class QueueSelector(Device, DeviceConfig):
             if scheduler_queue_id is None:
                 return None
 
+            logging.info(f"Scheduler queue lookup: scheduler_queue_id = {scheduler_queue_id}")
+            logging.info(f"Available queues: {self.queue_name_to_id}")
+
             current_time = datetime.now(timezone.utc)
             time_slice_interval = f"{self.time_slice} seconds"
+
+            logging.info(f"Current time: {current_time}")
+            logging.info(f"Time slice: {self.time_slice} seconds")
+            logging.info(f"Looking for targets >= {current_time - timedelta(seconds=self.time_slice)}")
 
             # Now: Get next target that's either future or slightly overdue (within time_slice)
             query = f"""
@@ -428,11 +435,20 @@ class QueueSelector(Device, DeviceConfig):
                 LIMIT 1
             """
 
+            logging.info(f"Executing query: {query}")
+            logging.info(f"Query parameters: scheduler_queue_id={scheduler_queue_id}, current_time={current_time}")
+
             cursor.execute(query, (scheduler_queue_id, current_time, current_time))
             row = cursor.fetchone()
 
+            logging.info(f"Query returned row: {row}")
+
             if row:
                 qid, tar_id, time_start, time_end, tar_name, tar_ra, tar_dec, queue_order = row
+
+                logging.info(f"Raw database values: qid={qid}, tar_id={tar_id}")
+                logging.info(f"Raw time_start: {time_start} (type: {type(time_start)}, tzinfo: {getattr(time_start, 'tzinfo', 'N/A')})")
+                logging.info(f"Raw time_end: {time_end} (type: {type(time_end)}, tzinfo: {getattr(time_end, 'tzinfo', 'N/A')})")
 
                 if time_start and time_start.tzinfo is None:
                     time_start = time_start.replace(tzinfo=timezone.utc)
@@ -447,7 +463,9 @@ class QueueSelector(Device, DeviceConfig):
                 count = cursor.fetchone()[0]
                 self.queue_size.value = count
 
-                return ScheduledTarget(
+                logging.info(f"Queue size for scheduler queue: {count}")
+
+                    target = ScheduledTarget(
                     qid=qid, tar_id=tar_id,
                     queue_start=time_start or current_time,
                     queue_end=time_end,
@@ -455,7 +473,32 @@ class QueueSelector(Device, DeviceConfig):
                     tar_ra=tar_ra or 0.0, tar_dec=tar_dec or 0.0,
                     queue_order=queue_order or 0
                 )
+                    logging.info(f"Created ScheduledTarget: {target}")
+                    return target
+
             else:
+                cursor.execute("""
+                    SELECT COUNT(*), MIN(qt.time_start), MAX(qt.time_start)
+                    FROM queues_targets qt
+                    WHERE qt.queue_id = %s
+                """, (scheduler_queue_id,))
+                count, min_start, max_start = cursor.fetchone()
+
+                logging.info(f"No target selected. Total targets in scheduler queue: {count}")
+                if count > 0:
+                    logging.info(f"Scheduler queue time range: {min_start} to {max_start}")
+
+                    # Show targets that didn't match our criteria
+                    cursor.execute("""
+                        SELECT qt.qid, qt.tar_id, qt.time_start, t.tar_name
+                        FROM queues_targets qt
+                        JOIN targets t ON qt.tar_id = t.tar_id
+                        WHERE qt.queue_id = %s
+                        ORDER BY qt.time_start
+                        LIMIT 5
+                    """, (scheduler_queue_id,))
+                    targets = cursor.fetchall()
+                    logging.info(f"First 5 targets in scheduler queue: {targets}")
                 self.queue_size.value = 0
                 return None
 
