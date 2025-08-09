@@ -237,6 +237,13 @@ class QueueSelector(Device, DeviceConfig):
         if self.system_ready and old_state != self.system_state:
             self.last_target_id = None  # Clear to force re-evaluation
 
+        # Issue calibration on any state change TO calibration time
+        if old_state != state and (onoff == CentralState.ON and
+                                  (period == CentralState.DUSK or period == CentralState.DAWN)):
+            period_name = "dusk" if period == CentralState.DUSK else "dawn"
+            logging.info(f"State changed to {period_name} - issuing calibration")
+            self._send_executor_command("now 2")
+
         # Update system state description immediately
         state_desc = self._get_system_state_description()
         self.system_state_desc.value = state_desc
@@ -295,6 +302,9 @@ class QueueSelector(Device, DeviceConfig):
 
         while self.running:
             try:
+                # Clean up expired targets periodically
+                self._cleanup_expired_targets()
+
                 # Only run when system is ready
                 if not self.system_ready and not self._is_calibration_time():
                     # Clear target info when system not active
@@ -338,9 +348,7 @@ class QueueSelector(Device, DeviceConfig):
         """Select next target based on queue priority and timing."""
 
         # 1. Check for calibrations first (during DUSK/DAWN)
-        calib_target = self._select_calibration()
-        if calib_target:
-            return calib_target
+        # nothing
 
         # 2. Check scheduler queue for time-scheduled targets
         scheduler_target = self._get_next_scheduler_target()
@@ -365,22 +373,34 @@ class QueueSelector(Device, DeviceConfig):
 
         return None
 
-    def _select_calibration(self) -> Optional[ScheduledTarget]:
-        """Select calibration target during DUSK/DAWN system states."""
-        if not self._is_calibration_time():
-            return None
+    def _cleanup_expired_targets(self):
+        """Remove targets where both start and end times are in the past."""
+        try:
+            if not self.db_conn or self.db_conn.closed:
+                self.db_conn = psycopg2.connect(**self.db_config)
 
-        # Determine period for logging
-        period = self.system_state & CentralState.PERIOD_MASK
-        period_name = "dusk" if period == CentralState.DUSK else "dawn"
+            cursor = self.db_conn.cursor()
+            current_time = datetime.now(timezone.utc)
 
-        logging.debug(f"System state indicates {period_name} - selecting calibrations")
+            # Remove targets where BOTH start and end times are in the past
+            cursor.execute("""
+                DELETE FROM queues_targets
+                WHERE time_start IS NOT NULL
+                  AND time_end IS NOT NULL
+                  AND time_start < %s
+                  AND time_end < %s
+            """, (current_time, current_time))
 
-        return ScheduledTarget(
-            qid=0, tar_id=self.TARGET_FLAT,
-            queue_start=datetime.now(timezone.utc), queue_end=None,
-            tar_name="calibration", tar_ra=0.0, tar_dec=0.0
-        )
+            deleted_count = cursor.rowcount
+            self.db_conn.commit()
+
+            if deleted_count > 0:
+                logging.info(f"Cleaned up {deleted_count} expired targets")
+
+        except Exception as e:
+            logging.error(f"Error cleaning expired targets: {e}")
+            if self.db_conn:
+                self.db_conn.rollback()
 
     def _get_next_scheduler_target(self) -> Optional[ScheduledTarget]:
         """Get next target from scheduler queue - focus only on present/future."""
@@ -395,19 +415,6 @@ class QueueSelector(Device, DeviceConfig):
 
             current_time = datetime.now(timezone.utc)
             time_slice_interval = f"{self.time_slice} seconds"
-
-            # First: Clean up truly overdue targets (older than time_slice)
-            cursor.execute(f"""
-                DELETE FROM queues_targets
-                WHERE queue_id = %s
-                  AND time_start IS NOT NULL
-                  AND time_start < %s - interval '{time_slice_interval}'
-            """, (scheduler_queue_id, current_time))
-
-            deleted_count = cursor.rowcount
-            if deleted_count > 0:
-                logging.info(f"Removed {deleted_count} overdue targets (>{self.time_slice}s old)")
-                self.db_conn.commit()
 
             # Now: Get next target that's either future or slightly overdue (within time_slice)
             query = f"""
@@ -538,10 +545,6 @@ class QueueSelector(Device, DeviceConfig):
             if self._send_executor_command(command):
                 self.last_target_id = target.tar_id
                 self.last_command_time = current_time.timestamp()
-
-                # Only remove from queue after 'now' commands, not 'next'
-                if command.startswith("now"):
-                    self._remove_executed_target(target)
 
         except Exception as e:
             logging.error(f"Error executing target {target.tar_id}: {e}")
