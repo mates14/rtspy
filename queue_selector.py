@@ -151,10 +151,6 @@ class QueueSelector(Device, DeviceConfig):
         self.grb_grace_until = ValueTime("grb_grace_until", "GRB grace period end time", initial=0.0)
         self.last_update = ValueTime("last_update", "Last selector update time", initial=time.time())
 
-        logging.info(f"Initial system_state: 0x{self.system_state:08x}")
-        logging.info(f"Initial system_ready: {self.system_ready}")
-        logging.info(f"Initial calibration_time: {self._is_calibration_time()}")
-
     def start(self):
         """Start the selector daemon."""
         super().start()
