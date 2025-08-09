@@ -151,6 +151,10 @@ class QueueSelector(Device, DeviceConfig):
         self.grb_grace_until = ValueTime("grb_grace_until", "GRB grace period end time", initial=0.0)
         self.last_update = ValueTime("last_update", "Last selector update time", initial=time.time())
 
+        logging.info(f"Initial system_state: 0x{self.system_state:08x}")
+        logging.info(f"Initial system_ready: {self.system_ready}")
+        logging.info(f"Initial calibration_time: {self._is_calibration_time()}")
+
     def start(self):
         """Start the selector daemon."""
         super().start()
@@ -302,17 +306,28 @@ class QueueSelector(Device, DeviceConfig):
 
         while self.running:
             try:
+
+                logging.debug(f"Selector loop iteration - system_ready: {self.system_ready}, "
+                         f"system_state: 0x{self.system_state:08x}, "
+                         f"calibration_time: {self._is_calibration_time()}")
+
                 # Clean up expired targets periodically
                 self._cleanup_expired_targets()
 
                 # Only run when system is ready
                 if not self.system_ready and not self._is_calibration_time():
+
+                    logging.debug(f"System not ready for observations - state: {state_desc}, "
+                             f"waiting for ON_NIGHT or ON_DUSK/ON_DAWN")
+
                     # Clear target info when system not active
                     if self.next_target.value != "none":
                         self.next_target.value = "none"
                         self.current_queue.value = "none"
                     time.sleep(self.update_interval)
                     continue
+
+                logging.debug("System ready for target selection")
 
                 # Check for GRB grace period
                 if self._detect_external_activity():
@@ -324,10 +339,13 @@ class QueueSelector(Device, DeviceConfig):
                     if self.grb_grace_active.value:
                         self.grb_grace_active.value = False
 
+                logging.debug("Selecting next target...")
+
                 # Get next target to execute
                 target = self._select_next_target()
 
                 if target:
+                    logging.info(f"Selected target: {target}")
                     self._execute_target(target)
                 else:
                     # No target selected - update values immediately
