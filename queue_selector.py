@@ -501,53 +501,65 @@ class QueueSelector(Device, DeviceConfig):
             return []
 
     def _execute_target(self, target: ScheduledTarget):
-        """Execute target with appropriate timing."""
         current_time = datetime.now(timezone.utc)
-
-        # Skip if we just executed this target
-        if (target.tar_id == self.last_target_id and
-            current_time.timestamp() - self.last_command_time < 60.0):
+        
+        # Skip targets without proper timing
+        if not target.queue_start or not target.queue_end:
+            logging.debug(f"Skipping target {target.tar_id} - missing start/end times")
+            return
+        
+        # Find current target's end time if one is running
+        current_target_end = None
+        if self.executor_current_target:
+            current_target_end = self._get_target_end_time(self.executor_current_target)
+        
+        # Determine command timing
+        if current_target_end and current_target_end > current_time:
+            # Current target still running - check if we're in last timeslice
+            time_until_current_ends = (current_target_end - current_time).total_seconds()
+            
+            if time_until_current_ends <= self.time_slice:
+                # In last timeslice of current target - prepare next
+                command = f"next {target.tar_id}"
+                logging.info(f"Current target ending in {time_until_current_ends:.0f}s - "
+                            f"issuing 'next' for {target.tar_id}")
+            else:
+                # Current target still has time - don't change next yet
+                logging.debug(f"Current target has {time_until_current_ends:.0f}s left - waiting")
+                return
+                
+        elif target.queue_start <= current_time:
+            # New target should start now - force transition
+            command = f"now {target.tar_id}"
+            if target.queue_start < current_time:
+                delay = (current_time - target.queue_start).total_seconds()
+                logging.info(f"Issuing 'now' for {target.tar_id} (delayed by {delay:.0f}s)")
+            else:
+                logging.info(f"Issuing 'now' for {target.tar_id}")
+        else:
+            # Too early for next target
             return
 
-        # Update queue status immediately
-        self._update_target_status(target)
-
-        # Determine command timing
-        if target.queue_start and target.queue_start > current_time:
-            # Target is scheduled for future
-            time_until_start = (target.queue_start - current_time).total_seconds()
-
-            if time_until_start <= self.time_slice:
-                # Issue 'next' command to prepare executor
-                command = f"next {target.tar_id}"
-                logging.info(f"Issuing 'next' for target {target.tar_id} ({target.tar_name}) "
-                           f"starting in {time_until_start:.0f}s")
-            else:
-                # Too early - don't issue command yet
-                logging.debug(f"Target {target.tar_id} not ready yet, {time_until_start:.0f}s until start")
-                return
-        else:
-            # Target should start now (overdue or no specific time)
-            if self.executor_current_target == target.tar_id:
-                logging.debug(f"Target {target.tar_id} already running, skipping 'now' command")
-                return
-            if target.queue_start:
-                delay = (current_time - target.queue_start).total_seconds()
-                command = f"now {target.tar_id}"
-                logging.info(f"Issuing 'now' for target {target.tar_id} ({target.tar_name}) "
-                           f"(delayed by {delay:.0f}s)")
-            else:
-                command = f"now {target.tar_id}"
-                logging.info(f"Issuing 'now' for target {target.tar_id} ({target.tar_name})")
-
-        # Send command to executor
+    def _get_target_end_time(self, target_id: int) -> Optional[datetime]:
+        """Get end time for currently executing target."""
         try:
-            if self._send_executor_command(command):
-                self.last_target_id = target.tar_id
-                self.last_command_time = current_time.timestamp()
+            cursor = self.db_conn.cursor()
+            cursor.execute("""
+                SELECT time_end FROM queues_targets
+                WHERE tar_id = %s AND time_start IS NOT NULL AND time_end IS NOT NULL
+                ORDER BY time_start DESC LIMIT 1
+            """, (target_id,))
 
+            result = cursor.fetchone()
+            if result and result[0]:
+                end_time = result[0]
+                if end_time.tzinfo is None:
+                    end_time = end_time.replace(tzinfo=timezone.utc)
+                return end_time
         except Exception as e:
-            logging.error(f"Error executing target {target.tar_id}: {e}")
+            logging.error(f"Error getting end time for target {target_id}: {e}")
+
+        return None
 
     def _update_target_status(self, target: ScheduledTarget):
         """Update status values for monitoring."""
