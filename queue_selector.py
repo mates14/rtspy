@@ -434,6 +434,11 @@ class QueueSelector(Device, DeviceConfig):
             if row:
                 qid, tar_id, time_start, time_end, tar_name, tar_ra, tar_dec, queue_order = row
 
+                if time_start and time_start.tzinfo is None:
+                    time_start = time_start.replace(tzinfo=timezone.utc)
+                if time_end and time_end.tzinfo is None:
+                    time_end = time_end.replace(tzinfo=timezone.utc)
+
                 # Update queue size for monitoring
                 cursor.execute("""
                     SELECT COUNT(*) FROM queues_targets
