@@ -491,8 +491,8 @@ class QueueSelector(Device, DeviceConfig):
                     tar_ra=tar_ra or 0.0, tar_dec=tar_dec or 0.0,
                     queue_order=queue_order or 0
                 )
-                    logging.info(f"Created ScheduledTarget: {target}")
-                    return target
+                logging.info(f"Created ScheduledTarget: {target}")
+                return target
 
             else:
                 cursor.execute("""
