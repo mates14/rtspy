@@ -643,7 +643,7 @@ class QueueSelector(Device, DeviceConfig):
 
         self.next_target.value = target.tar_name
 
-    def _send_executor_command(self, command: str) -> bool:
+    def _ex_send_executor_command(self, command: str) -> bool:
         """Send command to executor device."""
         try:
             # Extract target ID from command for tracking
@@ -660,6 +660,49 @@ class QueueSelector(Device, DeviceConfig):
         #            logging.info(f"{conn}")
                     executor_conn = conn
                     break
+
+            if executor_conn:
+                success = executor_conn.send_command(command)
+                logging.debug(f"Successfully sent command '{command}' to executor")
+                return success
+            else:
+                logging.warning(f"No authenticated executor connection found")
+                return False
+
+        except Exception as e:
+            logging.error(f"Error sending command '{command}' to executor: {e}")
+            return False
+
+    def _send_executor_command(self, command: str) -> bool:
+        """Send command to executor device."""
+        try:
+            # Extract target ID from command for tracking
+            parts = command.split()
+            if len(parts) >= 2 and parts[0] in ['next', 'now']:
+                target_id = int(parts[1])
+                self.expected_executor_target = target_id
+                logging.debug(f"Setting expected executor target to {target_id}")
+
+            # Find executor connection using device type (more reliable than name)
+            from constants import DeviceType
+            from netman import ConnectionState
+            
+            executor_conn = None
+            for conn in self.network.connection_manager.connections.values():
+                if (hasattr(conn, 'remote_device_type') and
+                    conn.remote_device_type == DeviceType.EXECUTOR and
+                    conn.state == ConnectionState.AUTH_OK):
+                    executor_conn = conn
+                    break
+            
+            # Fallback: try finding by name if type search fails
+            if not executor_conn:
+                for conn in self.network.connection_manager.connections.values():
+                    if (hasattr(conn, 'remote_device_name') and 
+                        conn.remote_device_name == self.executor_name and
+                        conn.state == ConnectionState.AUTH_OK):
+                        executor_conn = conn
+                        break
 
             if executor_conn:
                 success = executor_conn.send_command(command)
