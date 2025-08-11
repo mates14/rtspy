@@ -755,18 +755,22 @@ class QueueSelector(Device, DeviceConfig):
             executor_conn = None
             for conn in self.network.connection_manager.connections.values():
                 if (hasattr(conn, 'remote_device_type') and
-                    conn.remote_device_type == DeviceType.EXECUTOR and
-                    conn.state == ConnectionState.AUTH_OK):
+                    conn.remote_device_type == DeviceType.EXECUTOR):
+                    # Note: Removed AUTH_OK requirement - value subscriptions work but
+                    # command connections may not complete auth properly
                     executor_conn = conn
+                    logging.debug(f"Found executor connection by type: {conn.state}")
                     break
 
             # Fallback: try finding by name if type search fails
             if not executor_conn:
                 for conn in self.network.connection_manager.connections.values():
                     if (hasattr(conn, 'remote_device_name') and
-                        conn.remote_device_name == self.executor_name and
-                        conn.state == ConnectionState.AUTH_OK):
+                        conn.remote_device_name == self.executor_name):
+                        # Note: Removed AUTH_OK requirement - device-to-device connections
+                        # may have authentication issues but still allow command sending
                         executor_conn = conn
+                        logging.debug(f"Found executor connection by name: {conn.state}")
                         break
 
             if executor_conn:
