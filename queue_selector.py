@@ -585,6 +585,8 @@ class QueueSelector(Device, DeviceConfig):
                 command = f"next {target.tar_id}"
                 logging.info(f"Current target ending in {time_until_current_ends:.0f}s - "
                             f"issuing 'next' for {target.tar_id}")
+                self._send_executor_command(command)
+                self._update_target_status(target)
             else:
                 # Current target still has time - don't change next yet
                 logging.debug(f"Current target has {time_until_current_ends:.0f}s left - waiting")
@@ -598,6 +600,8 @@ class QueueSelector(Device, DeviceConfig):
                 logging.info(f"Issuing 'now' for {target.tar_id} (delayed by {delay:.0f}s)")
             else:
                 logging.info(f"Issuing 'now' for {target.tar_id}")
+            self._send_executor_command(command)
+            self._update_target_status(target)
         else:
             # Too early for next target
             return
@@ -662,7 +666,7 @@ class QueueSelector(Device, DeviceConfig):
                     break
 
             if executor_conn:
-                success = executor_conn.send_command(command)
+                success = executor_conn.send_command(command, self._on_executor_command_result)
                 logging.debug(f"Successfully sent command '{command}' to executor")
                 return success
             else:
@@ -705,7 +709,7 @@ class QueueSelector(Device, DeviceConfig):
                         break
 
             if executor_conn:
-                success = executor_conn.send_command(command)
+                success = executor_conn.send_command(command, self._on_executor_command_result)
                 logging.debug(f"Successfully sent command '{command}' to executor")
                 return success
             else:
@@ -785,6 +789,13 @@ class QueueSelector(Device, DeviceConfig):
         self.grb_grace_active.value = True  # Update immediately
         logging.info(f"External activity detected - setting grace period until {grace_end}")
         logging.info(f"Grace period: {self.grb_grace_period}s")
+
+    def _on_executor_command_result(self, conn, success, code, message):
+        """Handle result from executor command."""
+        if success:
+            logging.info(f"Executor command successful: {message}")
+        else:
+            logging.warning(f"Executor command failed: {message}")
 
 
 def main():
