@@ -127,37 +127,39 @@ class QueueSelector(Device, DeviceConfig):
         self.system_state = 0
         self.system_ready = False
 
-        # Last selected target
-        self.last_target_id = None
+        # Command timing
         self.last_command_time = 0.0
-        self.expected_executor_target = None  # Target we told executor to run
 
-        # Startup handling - ignore grace period for initial period
+        # Startup handling
         self.startup_time = None
-        self.startup_grace_period = 60.0  # Ignore external activity for 60s after startup
+        self.startup_completed = False  # Track if initial evaluation is done
 
     def __init__(self, device_name="SEL", device_type=DeviceType.SELECTOR, port=0):
         """Initialize the queue selector."""
         super().__init__(device_name, device_type, port)
 
-        self.executor_current_target = None
-
-        # RTS2 values for monitoring
+        # RTS2 values for monitoring and control
+        self.enabled = ValueBool("enabled", "Enable/disable selector daemon", writable=True, initial=True)
         self.queue_size = ValueInteger("queue_size", "Number of targets in scheduler queue", initial=0)
-        self.current_queue = ValueString("current_queue", "Currently active queue name", initial="none")
-        self.next_target = ValueString("next_target", "Next target to observe", initial="none")
+        self.current_queue = ValueString("current_queue", "Currently active queue name", initial="")
+        self.next_target = ValueInteger("next_target", "Next target to observe", initial=-1)
         self.system_state_desc = ValueString("system_state", "Current system state description", initial="unknown")
         self.grb_grace_active = ValueBool("grb_grace_active", "GRB grace period active", initial=False)
         self.grb_grace_until = ValueTime("grb_grace_until", "GRB grace period end time", initial=0.0)
         self.last_update = ValueTime("last_update", "Last selector update time", initial=time.time())
 
+        # Executor state monitoring
+        self.executor_current_target = ValueInteger("executor_current_target", "Current target running on executor", initial=-1)
+        self.last_target_id = ValueInteger("last_target_id", "Last target we sent to executor", initial=-1)
+        self.expected_executor_target = ValueInteger("expected_executor_target", "Target we expect executor to run", initial=-1)
+
     def start(self):
         """Start the selector daemon."""
         super().start()
 
-        # Record startup time to ignore initial grace period
+        # Record startup time for initial evaluation
         self.startup_time = time.time()
-        logging.info(f"Selector starting - ignoring external activity for {self.startup_grace_period}s")
+        logging.info("Selector starting - will evaluate current situation on first loop")
 
         # Test database connection
         if not self._test_database():
@@ -235,7 +237,7 @@ class QueueSelector(Device, DeviceConfig):
         self.system_ready = (onoff == CentralState.ON and period == CentralState.NIGHT)
 
         if self.system_ready and old_state != self.system_state:
-            self.last_target_id = None  # Clear to force re-evaluation
+            self.last_target_id.value = -1  # Clear to force re-evaluation
 
         # Issue calibration on any state change TO calibration time
         if old_state != state and (onoff == CentralState.ON and
@@ -303,9 +305,20 @@ class QueueSelector(Device, DeviceConfig):
         while self.running:
             try:
 
-                logging.debug(f"Selector loop iteration - system_ready: {self.system_ready}, "
+                logging.debug(f"Selector loop iteration - enabled: {self.enabled.value}, "
+                         f"system_ready: {self.system_ready}, "
                          f"system_state: 0x{self.system_state:08x}, "
                          f"calibration_time: {self._is_calibration_time()}")
+
+                # Check if daemon is enabled
+                if not self.enabled.value:
+                    logging.debug("Selector daemon disabled - waiting")
+                    # Clear target info when disabled
+                    if self.next_target.value != -1:
+                        self.next_target.value = -1
+                        self.current_queue.value = ""
+                    time.sleep(self.update_interval)
+                    continue
 
                 # Clean up expired targets periodically
                 self._cleanup_expired_targets()
@@ -317,13 +330,19 @@ class QueueSelector(Device, DeviceConfig):
                              f"waiting for ON_NIGHT or ON_DUSK/ON_DAWN")
 
                     # Clear target info when system not active
-                    if self.next_target.value != "none":
-                        self.next_target.value = "none"
-                        self.current_queue.value = "none"
+                    if self.next_target.value != -1:
+                        self.next_target.value = -1
+                        self.current_queue.value = ""
                     time.sleep(self.update_interval)
                     continue
 
                 logging.debug("System ready for target selection")
+
+                # Handle startup evaluation first
+                if not self.startup_completed:
+                    self._perform_startup_evaluation()
+                    time.sleep(self.update_interval)
+                    continue
 
                 # Check for GRB grace period
                 if self._detect_external_activity():
@@ -345,9 +364,9 @@ class QueueSelector(Device, DeviceConfig):
                     self._execute_target(target)
                 else:
                     # No target selected - update values immediately
-                    if self.next_target.value != "none":
-                        self.next_target.value = "none"
-                        self.current_queue.value = "none"
+                    if self.next_target.value != -1:
+                        self.next_target.value = -1
+                        self.current_queue.value = ""
                     logging.debug("No target selected")
 
                 time.sleep(self.update_interval)
@@ -359,19 +378,55 @@ class QueueSelector(Device, DeviceConfig):
         logging.info("Selector loop stopped")
 
     def _select_next_target(self) -> Optional[ScheduledTarget]:
-        """Select next target based on queue priority and timing."""
+        """Select next target based on queue priority and timing (for NEXT command)."""
 
         # 1. Check for calibrations first (during DUSK/DAWN)
         # nothing
 
-        # 2. Check scheduler queue for time-scheduled targets
-        scheduler_target = self._get_next_scheduler_target()
+        # 2. Check scheduler queue for time-scheduled targets (NEXT mode)
+        scheduler_target = self._get_scheduler_target(mode="next")
         if scheduler_target:
             return scheduler_target
 
         # 3. Check manual queue only (queue_id=1)
         # Note: Other queues (grb, integral_targets, regular_targets, etc.)
         # are legacy and should not be processed by this selector
+        if 'manual' in self.queue_name_to_id:
+            targets = self._get_queue_targets('manual', limit=1)
+            if targets:
+                qid, tar_id, time_start, time_end, tar_name, tar_ra, tar_dec, queue_order = targets[0]
+                return ScheduledTarget(
+                    qid=qid, tar_id=tar_id,
+                    queue_start=time_start or datetime.now(timezone.utc),
+                    queue_end=time_end,
+                    tar_name=tar_name or f"target_{tar_id}",
+                    tar_ra=tar_ra or 0.0, tar_dec=tar_dec or 0.0,
+                    queue_order=queue_order or 0
+                )
+
+        return None
+
+    def _select_current_target(self) -> Optional[ScheduledTarget]:
+        """Select target that should be running RIGHT NOW (for NOW command)."""
+
+        # 1. Check for calibrations first (during DUSK/DAWN)
+        if self._is_calibration_time():
+            # Return calibration target
+            return ScheduledTarget(
+                qid=-1, tar_id=self.TARGET_FLAT,
+                queue_start=datetime.now(timezone.utc),
+                queue_end=None,
+                tar_name="calibration",
+                tar_ra=0.0, tar_dec=0.0
+            )
+
+        # 2. Check scheduler queue for currently active targets (NOW mode)
+        scheduler_target = self._get_scheduler_target(mode="now")
+        if scheduler_target:
+            return scheduler_target
+
+        # 3. Check manual queue for currently active targets
+        # For manual queue, we don't have time constraints - just return first target
         if 'manual' in self.queue_name_to_id:
             targets = self._get_queue_targets('manual', limit=1)
             if targets:
@@ -416,8 +471,13 @@ class QueueSelector(Device, DeviceConfig):
             if self.db_conn:
                 self.db_conn.rollback()
 
-    def _get_next_scheduler_target(self) -> Optional[ScheduledTarget]:
-        """Get next target from scheduler queue - focus only on present/future."""
+    def _get_scheduler_target(self, mode="next") -> Optional[ScheduledTarget]:
+        """Get target from scheduler queue.
+
+        Args:
+            mode: "next" for upcoming targets (within time_slice window)
+                  "now" for currently active targets (start <= now <= end)
+        """
         try:
             if not self.db_conn or self.db_conn.closed:
                 self.db_conn = psycopg2.connect(**self.db_config)
@@ -427,57 +487,67 @@ class QueueSelector(Device, DeviceConfig):
             if scheduler_queue_id is None:
                 return None
 
-            logging.info(f"Scheduler queue lookup: scheduler_queue_id = {scheduler_queue_id}")
-            logging.info(f"Available queues: {self.queue_name_to_id}")
+            logging.debug(f"Scheduler queue lookup ({mode}): scheduler_queue_id = {scheduler_queue_id}")
 
             current_time = datetime.now(timezone.utc)
-            time_slice_interval = f"{self.time_slice} seconds"
 
-            logging.info(f"Current time: {current_time}")
-            logging.info(f"Time slice: {self.time_slice} seconds")
-            logging.info(f"Looking for targets >= {current_time - timedelta(seconds=self.time_slice)}")
+            if mode == "next":
+                # Get next target that's either future or slightly overdue (within time_slice)
+                time_slice_interval = f"{self.time_slice} seconds"
+                logging.debug(f"Looking for NEXT targets >= {current_time - timedelta(seconds=self.time_slice)}")
 
-            # Now: Get next target that's either future or slightly overdue (within time_slice)
-            query = f"""
-                SELECT qt.qid, qt.tar_id, qt.time_start, qt.time_end,
-                       t.tar_name, t.tar_ra, t.tar_dec, qt.queue_order
-                FROM queues_targets qt
-                JOIN targets t ON qt.tar_id = t.tar_id
-                WHERE qt.queue_id = %s
-                  AND (qt.time_start IS NULL OR qt.time_start >= %s - interval '{time_slice_interval}')
-                ORDER BY COALESCE(qt.time_start, %s), qt.queue_order
-                LIMIT 1
-            """
+                query = f"""
+                    SELECT qt.qid, qt.tar_id, qt.time_start, qt.time_end,
+                           t.tar_name, t.tar_ra, t.tar_dec, qt.queue_order
+                    FROM queues_targets qt
+                    JOIN targets t ON qt.tar_id = t.tar_id
+                    WHERE qt.queue_id = %s
+                      AND (qt.time_start IS NULL OR qt.time_start >= %s - interval '{time_slice_interval}')
+                    ORDER BY COALESCE(qt.time_start, %s), qt.queue_order
+                    LIMIT 1
+                """
+                query_params = (scheduler_queue_id, current_time, current_time)
 
-            logging.info(f"Executing query: {query}")
-            logging.info(f"Query parameters: scheduler_queue_id={scheduler_queue_id}, current_time={current_time}")
+            elif mode == "now":
+                # Get target that should be running RIGHT NOW
+                logging.debug(f"Looking for NOW targets: start <= {current_time} <= end")
 
-            cursor.execute(query, (scheduler_queue_id, current_time, current_time))
+                query = """
+                    SELECT qt.qid, qt.tar_id, qt.time_start, qt.time_end,
+                           t.tar_name, t.tar_ra, t.tar_dec, qt.queue_order
+                    FROM queues_targets qt
+                    JOIN targets t ON qt.tar_id = t.tar_id
+                    WHERE qt.queue_id = %s
+                      AND (qt.time_start IS NULL OR qt.time_start <= %s)
+                      AND (qt.time_end IS NULL OR qt.time_end >= %s)
+                    ORDER BY qt.queue_order, qt.time_start
+                    LIMIT 1
+                """
+                query_params = (scheduler_queue_id, current_time, current_time)
+            else:
+                logging.error(f"Unknown mode: {mode}")
+                return None
+
+            cursor.execute(query, query_params)
             row = cursor.fetchone()
-
-            logging.info(f"Query returned row: {row}")
 
             if row:
                 qid, tar_id, time_start, time_end, tar_name, tar_ra, tar_dec, queue_order = row
 
-                logging.info(f"Raw database values: qid={qid}, tar_id={tar_id}")
-                logging.info(f"Raw time_start: {time_start} (type: {type(time_start)}, tzinfo: {getattr(time_start, 'tzinfo', 'N/A')})")
-                logging.info(f"Raw time_end: {time_end} (type: {type(time_end)}, tzinfo: {getattr(time_end, 'tzinfo', 'N/A')})")
-
+                # Ensure timezone awareness
                 if time_start and time_start.tzinfo is None:
                     time_start = time_start.replace(tzinfo=timezone.utc)
                 if time_end and time_end.tzinfo is None:
                     time_end = time_end.replace(tzinfo=timezone.utc)
 
-                # Update queue size for monitoring
-                cursor.execute("""
-                    SELECT COUNT(*) FROM queues_targets
-                    WHERE queue_id = %s
-                """, (scheduler_queue_id,))
-                count = cursor.fetchone()[0]
-                self.queue_size.value = count
-
-                logging.info(f"Queue size for scheduler queue: {count}")
+                # Update queue size for monitoring (only for "next" mode to avoid spam)
+                if mode == "next":
+                    cursor.execute("""
+                        SELECT COUNT(*) FROM queues_targets
+                        WHERE queue_id = %s
+                    """, (scheduler_queue_id,))
+                    count = cursor.fetchone()[0]
+                    self.queue_size.value = count
 
                 target = ScheduledTarget(
                     qid=qid, tar_id=tar_id,
@@ -487,37 +557,28 @@ class QueueSelector(Device, DeviceConfig):
                     tar_ra=tar_ra or 0.0, tar_dec=tar_dec or 0.0,
                     queue_order=queue_order or 0
                 )
-                logging.info(f"Created ScheduledTarget: {target}")
+                logging.debug(f"Found {mode} target: {target.tar_id} ({target.tar_name})")
                 return target
 
             else:
-                cursor.execute("""
-                    SELECT COUNT(*), MIN(qt.time_start), MAX(qt.time_start)
-                    FROM queues_targets qt
-                    WHERE qt.queue_id = %s
-                """, (scheduler_queue_id,))
-                count, min_start, max_start = cursor.fetchone()
-
-                logging.info(f"No target selected. Total targets in scheduler queue: {count}")
-                if count > 0:
-                    logging.info(f"Scheduler queue time range: {min_start} to {max_start}")
-
-                    # Show targets that didn't match our criteria
+                if mode == "next":
+                    # Only show detailed debug info for "next" mode
                     cursor.execute("""
-                        SELECT qt.qid, qt.tar_id, qt.time_start, t.tar_name
+                        SELECT COUNT(*), MIN(qt.time_start), MAX(qt.time_start)
                         FROM queues_targets qt
-                        JOIN targets t ON qt.tar_id = t.tar_id
                         WHERE qt.queue_id = %s
-                        ORDER BY qt.time_start
-                        LIMIT 5
                     """, (scheduler_queue_id,))
-                    targets = cursor.fetchall()
-                    logging.info(f"First 5 targets in scheduler queue: {targets}")
-                self.queue_size.value = 0
+                    count, min_start, max_start = cursor.fetchone()
+
+                    if count > 0:
+                        logging.debug(f"No {mode} target found. Total in scheduler queue: {count} (range: {min_start} to {max_start})")
+
+                    self.queue_size.value = 0
+
                 return None
 
         except Exception as e:
-            logging.error(f"Error querying scheduler queue: {e}")
+            logging.error(f"Error querying scheduler queue ({mode}): {e}")
             return None
 
     def _get_queue_targets(self, queue_name: str, limit: int = 10) -> List[Tuple]:
@@ -564,22 +625,22 @@ class QueueSelector(Device, DeviceConfig):
 
     def _execute_target(self, target: ScheduledTarget):
         current_time = datetime.now(timezone.utc)
-        
+
         # Skip targets without proper timing
         if not target.queue_start or not target.queue_end:
             logging.debug(f"Skipping target {target.tar_id} - missing start/end times")
             return
-        
+
         # Find current target's end time if one is running
         current_target_end = None
-        if self.executor_current_target:
-            current_target_end = self._get_target_end_time(self.executor_current_target)
-        
+        if self.executor_current_target.value != -1:
+            current_target_end = self._get_target_end_time(self.executor_current_target.value)
+
         # Determine command timing
         if current_target_end and current_target_end > current_time:
             # Current target still running - check if we're in last timeslice
             time_until_current_ends = (current_target_end - current_time).total_seconds()
-            
+
             if time_until_current_ends <= self.time_slice:
                 # In last timeslice of current target - prepare next
                 command = f"next {target.tar_id}"
@@ -591,7 +652,7 @@ class QueueSelector(Device, DeviceConfig):
                 # Current target still has time - don't change next yet
                 logging.debug(f"Current target has {time_until_current_ends:.0f}s left - waiting")
                 return
-                
+
         elif target.queue_start <= current_time:
             # New target should start now - force transition
             command = f"now {target.tar_id}"
@@ -645,7 +706,7 @@ class QueueSelector(Device, DeviceConfig):
             else:
                 self.current_queue.value = "unknown"
 
-        self.next_target.value = target.tar_name
+        self.next_target.value = target.tar_id
 
     def _ex_send_executor_command(self, command: str) -> bool:
         """Send command to executor device."""
@@ -654,7 +715,7 @@ class QueueSelector(Device, DeviceConfig):
             parts = command.split()
             if len(parts) >= 2 and parts[0] in ['next', 'now']:
                 target_id = int(parts[1])
-                self.expected_executor_target = target_id
+                self.expected_executor_target.value = target_id
                 logging.debug(f"Setting expected executor target to {target_id}")
 
             # Find executor connection (same pattern as grbd.py)
@@ -684,13 +745,13 @@ class QueueSelector(Device, DeviceConfig):
             parts = command.split()
             if len(parts) >= 2 and parts[0] in ['next', 'now']:
                 target_id = int(parts[1])
-                self.expected_executor_target = target_id
+                self.expected_executor_target.value = target_id
                 logging.debug(f"Setting expected executor target to {target_id}")
 
             # Find executor connection using device type (more reliable than name)
             from constants import DeviceType
             from netman import ConnectionState
-            
+
             executor_conn = None
             for conn in self.network.connection_manager.connections.values():
                 if (hasattr(conn, 'remote_device_type') and
@@ -698,11 +759,11 @@ class QueueSelector(Device, DeviceConfig):
                     conn.state == ConnectionState.AUTH_OK):
                     executor_conn = conn
                     break
-            
+
             # Fallback: try finding by name if type search fails
             if not executor_conn:
                 for conn in self.network.connection_manager.connections.values():
-                    if (hasattr(conn, 'remote_device_name') and 
+                    if (hasattr(conn, 'remote_device_name') and
                         conn.remote_device_name == self.executor_name and
                         conn.state == ConnectionState.AUTH_OK):
                         executor_conn = conn
@@ -748,37 +809,36 @@ class QueueSelector(Device, DeviceConfig):
     def _on_executor_current_changed(self, value_data):
         """Handle executor current target changes to detect external activity."""
         try:
-            # Check if we're still in startup grace period
-            if self.startup_time and time.time() - self.startup_time < self.startup_grace_period:
-                logging.debug(f"Ignoring executor target change during startup grace period: {value_data}")
+            # Always update executor current target (no startup blocking)
+            old_target = self.executor_current_target.value
+            self.executor_current_target.value = int(value_data) if value_data and value_data != "-1" else -1
+
+            logging.debug(f"Executor target changed: {old_target} -> {self.executor_current_target.value}")
+
+            # Skip external activity detection during startup
+            if not self.startup_completed:
                 return
 
-            # Parse current target ID from executor
-            self.executor_current_target = int(value_data) if value_data and value_data != "-1" else None
-
-            # Check if this is external activity
+            # Check if this is external activity (only after startup)
             # We consider it "our" activity if current target is either:
             # 1. The target we just sent as "next" (expected_executor_target)
             # 2. The target we sent previously (last_target_id) - might still be running
-            our_targets = {self.expected_executor_target, self.last_target_id}
-            our_targets.discard(None)  # Remove None values
+            our_targets = {self.expected_executor_target.value, self.last_target_id.value}
+            our_targets.discard(-1)  # Remove -1 values
 
-            if self.executor_current_target is not None and self.executor_current_target not in our_targets:
+            if self.executor_current_target.value != -1 and self.executor_current_target.value not in our_targets:
                 # Executor is running a target we didn't tell it to run
-                logging.info(f"External activity detected: executor running target {self.executor_current_target}, "
+                logging.info(f"External activity detected: executor running target {self.executor_current_target.value}, "
                             f"our targets: {our_targets}")
                 self._set_grb_grace_period()
             else:
-                logging.debug(f"Executor current target: {self.executor_current_target} (expected: {our_targets})")
+                logging.debug(f"Executor current target: {self.executor_current_target.value} (expected: {our_targets})")
 
         except (ValueError, TypeError) as e:
             logging.debug(f"Could not parse executor current target '{value_data}': {e}")
 
     def _detect_external_activity(self) -> bool:
         """Check if we're in a grace period due to external activity."""
-        # Don't apply grace period during startup
-        if self.startup_time and time.time() - self.startup_time < self.startup_grace_period:
-            return False
         current_time = time.time()
         return current_time < self.grb_grace_until.value
 
@@ -789,6 +849,46 @@ class QueueSelector(Device, DeviceConfig):
         self.grb_grace_active.value = True  # Update immediately
         logging.info(f"External activity detected - setting grace period until {grace_end}")
         logging.info(f"Grace period: {self.grb_grace_period}s")
+
+    def _perform_startup_evaluation(self):
+        """Perform initial evaluation at startup - only handle NOW commands."""
+        logging.info("Performing startup evaluation...")
+
+        if self.executor_current_target.value != -1:
+            logging.info(f"Executor currently running target {self.executor_current_target.value}")
+        else:
+            logging.info("Executor not currently running any target")
+
+        # Get what should be running RIGHT NOW
+        target_to_run = self._select_current_target()
+
+        if not target_to_run:
+            logging.info("No target should be running now - startup complete")
+            self.startup_completed = True
+            return
+
+        # Check if correct target is already running
+        if self.executor_current_target.value == target_to_run.tar_id:
+            logging.info(f"Correct target {self.executor_current_target.value} already running - startup complete")
+            self.last_target_id.value = self.executor_current_target.value
+            self.expected_executor_target.value = self.executor_current_target.value
+            self._update_target_status(target_to_run)
+            self.startup_completed = True
+            return
+
+        # Wrong target running or nothing running - take immediate action
+        if self.executor_current_target.value != -1:
+            logging.info(f"Wrong target {self.executor_current_target.value} running, should be {target_to_run.tar_id} - issuing 'now'")
+        else:
+            logging.info(f"Nothing running, should be {target_to_run.tar_id} - issuing 'now'")
+
+        # Issue NOW command only (never NEXT during startup)
+        command = f"now {target_to_run.tar_id}"
+        logging.info(f"Startup action: {command}")
+        self._send_executor_command(command)
+        self._update_target_status(target_to_run)
+
+        self.startup_completed = True
 
     def _on_executor_command_result(self, conn, success, code, message):
         """Handle result from executor command."""
