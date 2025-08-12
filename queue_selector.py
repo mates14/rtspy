@@ -356,20 +356,29 @@ class QueueSelector(Device, DeviceConfig):
 
                 logging.debug("Selecting next target...")
 
-                # Get next target to execute
-                target = self._select_next_target()
+                # Get next target to execute with timing information
+                target, time_until_action = self._select_next_target()
 
                 if target:
                     logging.info(f"Selected target: {target}")
                     self._execute_target(target)
+
+                    # Calculate sleep time - use time_until_action if available and reasonable
+                    if time_until_action is not None and 0 < time_until_action <= 3600:  # Max 1 hour
+                        sleep_time = min(self.update_interval, time_until_action)
+                        logging.debug(f"Next action needed in {time_until_action:.1f}s, sleeping for {sleep_time:.1f}s")
+                    else:
+                        sleep_time = self.update_interval
+                        logging.debug(f"Using standard sleep interval: {sleep_time:.1f}s")
                 else:
                     # No target selected - update values immediately
                     if self.next_target.value != -1:
                         self.next_target.value = -1
                         self.current_queue.value = ""
                     logging.debug("No target selected")
+                    sleep_time = self.update_interval
 
-                time.sleep(self.update_interval)
+                time.sleep(sleep_time)
 
             except Exception as e:
                 logging.error(f"Error in selector loop: {e}")
@@ -377,16 +386,21 @@ class QueueSelector(Device, DeviceConfig):
 
         logging.info("Selector loop stopped")
 
-    def _select_next_target(self) -> Optional[ScheduledTarget]:
-        """Select next target based on queue priority and timing (for NEXT command)."""
+    def _select_next_target(self) -> Tuple[Optional[ScheduledTarget], Optional[float]]:
+        """Select next target based on queue priority and timing (for NEXT command).
+
+        Returns:
+            Tuple of (target, time_until_action) where time_until_action is seconds
+            until we should take action on this target, or None if no target found.
+        """
 
         # 1. Check for calibrations first (during DUSK/DAWN)
         # nothing
 
         # 2. Check scheduler queue for time-scheduled targets (NEXT mode)
-        scheduler_target = self._get_scheduler_target(mode="next")
+        scheduler_target, time_until_action = self._get_scheduler_target(mode="next")
         if scheduler_target:
-            return scheduler_target
+            return scheduler_target, time_until_action
 
         # 3. Check manual queue only (queue_id=1)
         # Note: Other queues (grb, integral_targets, regular_targets, etc.)
@@ -395,7 +409,7 @@ class QueueSelector(Device, DeviceConfig):
             targets = self._get_queue_targets('manual', limit=1)
             if targets:
                 qid, tar_id, time_start, time_end, tar_name, tar_ra, tar_dec, queue_order = targets[0]
-                return ScheduledTarget(
+                target = ScheduledTarget(
                     qid=qid, tar_id=tar_id,
                     queue_start=time_start or datetime.now(timezone.utc),
                     queue_end=time_end,
@@ -403,8 +417,10 @@ class QueueSelector(Device, DeviceConfig):
                     tar_ra=tar_ra or 0.0, tar_dec=tar_dec or 0.0,
                     queue_order=queue_order or 0
                 )
+                # Manual queue targets should start immediately
+                return target, 0
 
-        return None
+        return None, None
 
     def _select_current_target(self) -> Optional[ScheduledTarget]:
         """Select target that should be running RIGHT NOW (for NOW command)."""
@@ -421,7 +437,7 @@ class QueueSelector(Device, DeviceConfig):
             )
 
         # 2. Check scheduler queue for currently active targets (NOW mode)
-        scheduler_target = self._get_scheduler_target(mode="now")
+        scheduler_target, _ = self._get_scheduler_target(mode="now")
         if scheduler_target:
             return scheduler_target
 
@@ -471,12 +487,16 @@ class QueueSelector(Device, DeviceConfig):
             if self.db_conn:
                 self.db_conn.rollback()
 
-    def _get_scheduler_target(self, mode="next") -> Optional[ScheduledTarget]:
+    def _get_scheduler_target(self, mode="next") -> Tuple[Optional[ScheduledTarget], Optional[float]]:
         """Get target from scheduler queue.
 
         Args:
             mode: "next" for upcoming targets (within time_slice window)
                   "now" for currently active targets (start <= now <= end)
+
+        Returns:
+            Tuple of (target, time_until_action) where time_until_action is seconds
+            until we should take action on this target, or None if no target found.
         """
         try:
             if not self.db_conn or self.db_conn.closed:
@@ -558,7 +578,22 @@ class QueueSelector(Device, DeviceConfig):
                     queue_order=queue_order or 0
                 )
                 logging.debug(f"Found {mode} target: {target.tar_id} ({target.tar_name})")
-                return target
+
+                # Calculate time until action needed
+                time_until_action = None
+                if mode == "next":
+                    # For next mode, we need to issue command when current target is within time_slice of ending
+                    # But we don't know current target end time here, so return None for now
+                    # The main logic will handle this in _execute_target
+                    time_until_action = None
+                elif mode == "now":
+                    # For now mode, action needed when target should start
+                    if target.queue_start and target.queue_start > current_time:
+                        time_until_action = (target.queue_start - current_time).total_seconds()
+                    else:
+                        time_until_action = 0  # Should start now or is overdue
+
+                return target, time_until_action
 
             else:
                 if mode == "next":
@@ -575,11 +610,11 @@ class QueueSelector(Device, DeviceConfig):
 
                     self.queue_size.value = 0
 
-                return None
+                return None, None
 
         except Exception as e:
             logging.error(f"Error querying scheduler queue ({mode}): {e}")
-            return None
+            return None, None
 
     def _get_queue_targets(self, queue_name: str, limit: int = 10) -> List[Tuple]:
         """Get targets from specified queue."""
@@ -631,10 +666,20 @@ class QueueSelector(Device, DeviceConfig):
             logging.debug(f"Skipping target {target.tar_id} - missing start/end times")
             return
 
+        # Check if desired target is already running - no action needed
+        if self.executor_current_target.value == target.tar_id:
+            logging.debug(f"Target {target.tar_id} already running - no action needed")
+            self._update_target_status(target)  # Update status for monitoring
+            return
+
         # Find current target's end time if one is running
         current_target_end = None
         if self.executor_current_target.value != -1:
             current_target_end = self._get_target_end_time(self.executor_current_target.value)
+
+        logging.debug(f"Execute target logic: current={self.executor_current_target.value}, "
+                     f"desired={target.tar_id}, current_end={current_target_end}, "
+                     f"target_start={target.queue_start}")
 
         # Determine command timing
         if current_target_end and current_target_end > current_time:
@@ -644,13 +689,13 @@ class QueueSelector(Device, DeviceConfig):
             if time_until_current_ends <= self.time_slice:
                 # In last timeslice of current target - prepare next
                 command = f"next {target.tar_id}"
-                logging.info(f"Current target ending in {time_until_current_ends:.0f}s - "
+                logging.info(f"Current target {self.executor_current_target.value} ending in {time_until_current_ends:.0f}s - "
                             f"issuing 'next' for {target.tar_id}")
                 self._send_executor_command(command)
                 self._update_target_status(target)
             else:
                 # Current target still has time - don't change next yet
-                logging.debug(f"Current target has {time_until_current_ends:.0f}s left - waiting")
+                logging.debug(f"Current target {self.executor_current_target.value} has {time_until_current_ends:.0f}s left - waiting")
                 return
 
         elif target.queue_start <= current_time:
