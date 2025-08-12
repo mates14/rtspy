@@ -932,7 +932,7 @@ class NetworkManager:
 
     def _complete_device_authorization(self, conn, success, status_code, status_msg):
         """Handle device authentication response."""
-        if success and status_msg == "authorized":
+        if success and "authorized" in status_msg:
             logging.debug(f"Device authentication successful for {conn.name}")
             conn.update_state(ConnectionState.AUTH_OK, "Authorization complete")
         else:
