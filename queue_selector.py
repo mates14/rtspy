@@ -395,7 +395,16 @@ class QueueSelector(Device, DeviceConfig):
         """
 
         # 1. Check for calibrations first (during DUSK/DAWN)
-        # nothing
+        if self._is_calibration_time():
+            # Return calibration target with immediate action
+            calibration_target = ScheduledTarget(
+                qid=-1, tar_id=self.TARGET_FLAT,
+                queue_start=datetime.now(timezone.utc),
+                queue_end=None,
+                tar_name="calibration",
+                tar_ra=0.0, tar_dec=0.0
+            )
+            return calibration_target, 0  # Action needed immediately
 
         # 2. Check scheduler queue for time-scheduled targets (NEXT mode)
         scheduler_target, time_until_action = self._get_scheduler_target(mode="next")
