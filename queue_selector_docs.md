@@ -2,7 +2,9 @@
 
 ## Overview
 
-The RTS2 Queue Selector (`queue_selector.py`) is a simplified Python replacement for the original C++ `rts2-selector` daemon. It focuses exclusively on **queue execution** and **calibration management**, eliminating the complex target selection algorithms of the original implementation.
+The RTS2 Queue Selector (`queue_selector.py`) is a **production-ready** Python replacement for the original C++ `rts2-selector` daemon. It focuses exclusively on **queue execution** and **calibration management**, eliminating the complex target selection algorithms of the original implementation.
+
+**Status**: Production ready as of August 2025. Successfully deployed and tested in operational environments.
 
 ## Purpose
 
@@ -196,16 +198,61 @@ username = observer    # → config.get('db_user')
 --update-interval 30       # Selector loop interval (seconds)
 ```
 
-### Monitoring Values
+### Monitoring and Control Values
 
-The selector provides RTS2 monitoring values:
+The selector provides RTS2 monitoring values and control parameters:
 
+#### Read-Only Monitoring Values
 - `queue_size`: Number of targets in scheduler queue
 - `next_target`: Name of next target to observe
 - `system_state`: Current RTS2 system state description (ON_NIGHT, ON_DUSK, etc.)
-- `grb_grace_active`: Whether grace period is active
-- `grb_grace_until`: Grace period end time
+- `grb_grace_until`: Grace period end time (0.0 when inactive)
 - `last_update`: Last selector update timestamp
+- `executor_current_target`: Current target running on executor (-1 if none)
+- `last_target_id`: Last target sent to executor
+
+#### Writable Control Values
+- **`enabled`** (boolean): Master enable/disable for selector operation
+  - `true`: Normal operation (default)
+  - `false`: Selector stops sending commands to executor, allows manual control
+  - Use for maintenance, manual observations, or emergency situations
+
+- **`time_slice`** (integer): Advance notice time in seconds (default: 300)
+  - Controls when to send `next` command before target start time
+  - Larger values = more preparation time, but less flexibility
+  - Smaller values = tighter scheduling, but risk of gaps between targets
+
+- **`grb_grace_active`** (boolean): Manual grace period control  
+  - `false→true`: Immediately initiates 20-minute grace period with current target
+  - `true→false`: Immediately cancels active grace period, resumes normal operation
+  - Useful for debugging or manual override of automatic grace period detection
+  - Grace period prevents selector from interfering with external operations
+
+#### Runtime Control Examples
+
+Control the selector during operation using RTS2 commands:
+
+```bash
+# Disable selector for manual operations
+rts2-value SEL enabled false
+
+# Re-enable selector  
+rts2-value SEL enabled true
+
+# Adjust timing for faster target switching
+rts2-value SEL time_slice 180
+
+# Manually initiate grace period (debugging)
+rts2-value SEL grb_grace_active true
+
+# Cancel active grace period
+rts2-value SEL grb_grace_active false
+
+# Monitor current status
+rts2-value SEL enabled
+rts2-value SEL grb_grace_active  
+rts2-value SEL queue_size
+```
 
 ### Manual Queue Operations
 
@@ -238,11 +285,14 @@ rts2-queue-manual --target 1234 --at "2025-07-25 02:30:00"
 
 ### Enhanced Features
 - **Grace Period Management**: Automatic conflict avoidance with external commands
+- **Manual Control Interface**: Runtime control via writable RTS2 values (`enabled`, `time_slice`, `grb_grace_active`)
 - **Intelligent Timing**: Optimized `next`/`now` command timing for efficiency
+- **Robust Device Authentication**: Fixed device-to-device connection authentication for reliable operation
 - **Clean Architecture**: Separated concerns with clear responsibilities
 - **Python Implementation**: Modern codebase following rtspy patterns
 - **System-wide RTS2.ini Integration**: Unified configuration across all rtspy devices
 - **Automatic Calibration Timing**: Derived from existing RTS2 horizon settings
+- **Production Stability**: Extensively tested and debugged for operational deployment
 
 ## Operational Workflow
 
