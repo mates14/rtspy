@@ -143,15 +143,13 @@ class QueueSelector(Device, DeviceConfig):
 
         # RTS2 values for monitoring and control
         self.enabled = ValueBool("enabled", "Enable/disable selector daemon", writable=True, initial=True)
+        self.time_slice_value = ValueDouble("time_slice", "Time slice before target start to issue next command (seconds)", writable=True, initial=300.0)
         self.queue_size = ValueInteger("queue_size", "Number of targets in scheduler queue", initial=0)
         self.current_queue = ValueString("current_queue", "Currently active queue name", initial="")
         self.next_target = ValueInteger("next_target", "Next target to observe", initial=-1)
         self.system_state_desc = ValueString("system_state", "Current system state description", initial="unknown")
         self.grb_grace_active = ValueBool("grb_grace_active", "GRB grace period active", initial=False)
         self.grb_grace_until = ValueTime("grb_grace_until", "GRB grace period end time", initial=0.0)
-        self.last_update = ValueTime("last_update", "Last selector update time", initial=time.time())
-        self.time_slice_value = ValueDouble("time_slice", "Time slice before target start to issue next command (seconds)",
-                                           writable=True, initial=300.0)
 
         # Executor state monitoring
         self.executor_current_target = ValueInteger("executor_current_target", "Current target running on executor", initial=-1)
@@ -204,9 +202,6 @@ class QueueSelector(Device, DeviceConfig):
     def info(self):
         """Update device information."""
         super().info()
-
-        # Update last update time
-        self.last_update.value = time.time()
 
         # Ensure GRB grace status is consistent (safety check)
         current_time = time.time()
