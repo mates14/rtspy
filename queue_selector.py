@@ -151,8 +151,7 @@ class QueueSelector(Device, DeviceConfig):
         self.grb_grace_active = ValueBool("grb_grace_active", "GRB grace period active", writable=True, initial=False)
         self.grb_grace_until = ValueTime("grb_grace_until", "GRB grace period end time", initial=0.0)
 
-        # Set up callback for grace period control
-        self.grb_grace_active.set_change_callback(self._on_grb_grace_active_changed)
+        # Grace period control callback is handled automatically via on_grb_grace_active_changed method
 
         # Executor state monitoring
         self.executor_current_target = ValueInteger("executor_current_target", "Current target running on executor", initial=-1)
@@ -958,7 +957,7 @@ class QueueSelector(Device, DeviceConfig):
         else:
             logging.warning(f"Executor command failed: {message}")
 
-    def _on_grb_grace_active_changed(self, old_value, new_value):
+    def on_grb_grace_active_changed(self, old_value, new_value):
         """Handle external changes to grb_grace_active value."""
         current_time = time.time()
 
