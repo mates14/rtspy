@@ -118,6 +118,9 @@ class QueueSelector(Device, DeviceConfig):
         self.update_interval = config.get('update_interval')
         self.executor_name = config.get('executor')
 
+        # Initialize networked time_slice value with command-line config
+        self.time_slice_value.value = self.time_slice
+
         # Runtime state
         self.db_conn = None
         self.selector_thread = None
@@ -147,6 +150,8 @@ class QueueSelector(Device, DeviceConfig):
         self.grb_grace_active = ValueBool("grb_grace_active", "GRB grace period active", initial=False)
         self.grb_grace_until = ValueTime("grb_grace_until", "GRB grace period end time", initial=0.0)
         self.last_update = ValueTime("last_update", "Last selector update time", initial=time.time())
+        self.time_slice_value = ValueDouble("time_slice", "Time slice before target start to issue next command (seconds)",
+                                           writable=True, initial=300.0)
 
         # Executor state monitoring
         self.executor_current_target = ValueInteger("executor_current_target", "Current target running on executor", initial=-1)
@@ -522,8 +527,8 @@ class QueueSelector(Device, DeviceConfig):
 
             if mode == "next":
                 # Get next target that's either future or slightly overdue (within time_slice)
-                time_slice_interval = f"{self.time_slice} seconds"
-                logging.debug(f"Looking for NEXT targets >= {current_time - timedelta(seconds=self.time_slice)}")
+                time_slice_interval = f"{self.time_slice_value.value} seconds"
+                logging.debug(f"Looking for NEXT targets >= {current_time - timedelta(seconds=self.time_slice_value.value)}")
 
                 query = f"""
                     SELECT qt.qid, qt.tar_id, qt.time_start, qt.time_end,
@@ -695,7 +700,7 @@ class QueueSelector(Device, DeviceConfig):
             # Current target still running - check if we're in last timeslice
             time_until_current_ends = (current_target_end - current_time).total_seconds()
 
-            if time_until_current_ends <= self.time_slice:
+            if time_until_current_ends <= self.time_slice_value.value:
                 # In last timeslice of current target - prepare next
                 command = f"next {target.tar_id}"
                 logging.info(f"Current target {self.executor_current_target.value} ending in {time_until_current_ends:.0f}s - "
