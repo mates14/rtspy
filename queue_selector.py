@@ -148,8 +148,11 @@ class QueueSelector(Device, DeviceConfig):
         self.current_queue = ValueString("current_queue", "Currently active queue name", initial="")
         self.next_target = ValueInteger("next_target", "Next target to observe", initial=-1)
         self.system_state_desc = ValueString("system_state", "Current system state description", initial="unknown")
-        self.grb_grace_active = ValueBool("grb_grace_active", "GRB grace period active", initial=False)
+        self.grb_grace_active = ValueBool("grb_grace_active", "GRB grace period active", writable=True, initial=False)
         self.grb_grace_until = ValueTime("grb_grace_until", "GRB grace period end time", initial=0.0)
+
+        # Set up callback for grace period control
+        self.grb_grace_active.set_change_callback(self._on_grb_grace_active_changed)
 
         # Executor state monitoring
         self.executor_current_target = ValueInteger("executor_current_target", "Current target running on executor", initial=-1)
@@ -954,6 +957,26 @@ class QueueSelector(Device, DeviceConfig):
             logging.info(f"Executor command successful: {message}")
         else:
             logging.warning(f"Executor command failed: {message}")
+
+    def _on_grb_grace_active_changed(self, old_value, new_value):
+        """Handle external changes to grb_grace_active value."""
+        current_time = time.time()
+
+        if new_value and not old_value:
+            # false->true: Initiate grace period with current target
+            self.grb_grace_until.value = current_time + self.grb_grace_period
+            current_target = self.executor_current_target.value
+            if current_target != -1:
+                logging.info(f"Grace period manually initiated for current target {current_target} "
+                           f"(until {self.grb_grace_until.value}, {self.grb_grace_period}s duration)")
+            else:
+                logging.info(f"Grace period manually initiated (no current target, "
+                           f"until {self.grb_grace_until.value}, {self.grb_grace_period}s duration)")
+
+        elif not new_value and old_value:
+            # true->false: Remove grace period immediately
+            self.grb_grace_until.value = 0.0
+            logging.info("Grace period manually removed - selector will resume normal operation")
 
 
 def main():
