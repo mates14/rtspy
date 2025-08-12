@@ -23,8 +23,8 @@ class WatcherDevice(Device, DeviceConfig):
 
     def apply_config(self, config: Dict[str, Any]):
         """Process arguments for this device."""
-        self.watch_value = args.watch_value
-        self.watch_device = args.watch_device
+        self.watch_value = config.get('watch_value', "centrald.sun_alt")
+        self.watch_device = config.get('watch_device', "centrald")
 
     def __init__(self, device_name="WATCH", port=0):
         """Initialize the watcher device."""
@@ -49,16 +49,21 @@ class WatcherDevice(Device, DeviceConfig):
         logging.info("Connected to centrald")
         super()._on_centrald_connected(conn_id)
 
-    def _on_value_update(self, value_data):
+    def _on_value_update(self, context):
         """
         Handle value update from watched device.
 
         Args:
-            value_data: Value as string
+            context: Context dictionary with 'device', 'value', and 'data' keys
         """
         try:
+            # Extract data from context dictionary
+            device_name = context['device']
+            value_name = context['value']
+            value_data = context['data']
+
             # Parse value
-            logging.debug(f"Received value update: {value_data}")
+            logging.debug(f"Received value update: {device_name}.{value_name} = {value_data}")
 
             # Store the value
             try:

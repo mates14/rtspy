@@ -311,8 +311,13 @@ class ProtocolCommands:
             key = f"{conn.remote_device_name}.{value_name}"
 
             if hasattr(self.network_manager, 'value_interests') and key in self.network_manager.value_interests:
-                # Call the registered callback with the value
-                self.network_manager.value_interests[key](value_data)
+                # Call the registered callback with context dictionary
+                context = {
+                    'device': conn.remote_device_name,
+                    'value': value_name,
+                    'data': value_data
+                }
+                self.network_manager.value_interests[key](context)
 
         # Value commands don't expect response
         conn.command_in_progress = False

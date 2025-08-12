@@ -866,14 +866,19 @@ class QueueSelector(Device, DeviceConfig):
             if self.db_conn:
                 self.db_conn.rollback()
 
-    def _on_executor_current_changed(self, value_data):
+    def _on_executor_current_changed(self, context):
         """Handle executor current target changes to detect external activity."""
         try:
+            # Extract data from context dictionary
+            device_name = context['device']
+            value_name = context['value']
+            value_data = context['data']
+
             # Always update executor current target (no startup blocking)
             old_target = self.executor_current_target.value
             self.executor_current_target.value = int(value_data) if value_data and value_data != "-1" else -1
 
-            logging.debug(f"Executor target changed: {old_target} -> {self.executor_current_target.value}")
+            logging.debug(f"Executor target changed ({device_name}.{value_name}): {old_target} -> {self.executor_current_target.value}")
 
             # Skip external activity detection during startup
             if not self.startup_completed:
