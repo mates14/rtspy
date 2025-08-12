@@ -453,7 +453,7 @@ class NetworkManager:
                             break
                 # Send auth command with our device ID and auth key from centrald
                 auth_cmd = f"auth {centrald_conn.device_id} {target_centrald_num} {centrald_conn.auth_key}"
-                conn.send_command(auth_cmd)
+                conn.send_command(auth_cmd, self._complete_device_authorization)
                 conn.update_state(ConnectionState.AUTH_PENDING, "Authentication sent to device")
             else:
                 logging.error("Cannot authenticate to device: missing centrald connection or auth key")
@@ -929,6 +929,15 @@ class NetworkManager:
 
         # Use the connection's send_command method
         return conn.send_command(command, callback)
+
+    def _complete_device_authorization(self, conn, success, status_code, status_msg):
+        """Handle device authentication response."""
+        if success and status_msg == "authorized":
+            logging.debug(f"Device authentication successful for {conn.name}")
+            conn.update_state(ConnectionState.AUTH_OK, "Authorization complete")
+        else:
+            logging.error(f"Device authentication failed for {conn.name}: {status_code} {status_msg}")
+            conn.close()
 
     def _complete_client_authorization(self, conn):
         """Complete client authorization process."""
