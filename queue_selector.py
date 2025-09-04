@@ -408,28 +408,15 @@ class QueueSelector(Device, DeviceConfig):
             )
             return calibration_target, 0  # Action needed immediately
 
-        # 2. Check scheduler queue for time-scheduled targets (NEXT mode)
+        # 2. Check manual queue first (higher priority over scheduler)
+        manual_target, time_until_action = self._get_queue_target('manual', mode="next")
+        if manual_target:
+            return manual_target, time_until_action
+
+        # 3. Check scheduler queue for time-scheduled targets (NEXT mode)
         scheduler_target, time_until_action = self._get_scheduler_target(mode="next")
         if scheduler_target:
             return scheduler_target, time_until_action
-
-        # 3. Check manual queue only (queue_id=1)
-        # Note: Other queues (grb, integral_targets, regular_targets, etc.)
-        # are legacy and should not be processed by this selector
-        if 'manual' in self.queue_name_to_id:
-            targets = self._get_queue_targets('manual', limit=1)
-            if targets:
-                qid, tar_id, time_start, time_end, tar_name, tar_ra, tar_dec, queue_order = targets[0]
-                target = ScheduledTarget(
-                    qid=qid, tar_id=tar_id,
-                    queue_start=time_start or datetime.now(timezone.utc),
-                    queue_end=time_end,
-                    tar_name=tar_name or f"target_{tar_id}",
-                    tar_ra=tar_ra or 0.0, tar_dec=tar_dec or 0.0,
-                    queue_order=queue_order or 0
-                )
-                # Manual queue targets should start immediately
-                return target, 0
 
         return None, None
 
@@ -447,25 +434,15 @@ class QueueSelector(Device, DeviceConfig):
                 tar_ra=0.0, tar_dec=0.0
             )
 
-        # 2. Check scheduler queue for currently active targets (NOW mode)
+        # 2. Check manual queue first (higher priority over scheduler)
+        manual_target, _ = self._get_queue_target('manual', mode="now")
+        if manual_target:
+            return manual_target
+
+        # 3. Check scheduler queue for currently active targets (NOW mode)
         scheduler_target, _ = self._get_scheduler_target(mode="now")
         if scheduler_target:
             return scheduler_target
-
-        # 3. Check manual queue for currently active targets
-        # For manual queue, we don't have time constraints - just return first target
-        if 'manual' in self.queue_name_to_id:
-            targets = self._get_queue_targets('manual', limit=1)
-            if targets:
-                qid, tar_id, time_start, time_end, tar_name, tar_ra, tar_dec, queue_order = targets[0]
-                return ScheduledTarget(
-                    qid=qid, tar_id=tar_id,
-                    queue_start=time_start or datetime.now(timezone.utc),
-                    queue_end=time_end,
-                    tar_name=tar_name or f"target_{tar_id}",
-                    tar_ra=tar_ra or 0.0, tar_dec=tar_dec or 0.0,
-                    queue_order=queue_order or 0
-                )
 
         return None
 
@@ -498,10 +475,11 @@ class QueueSelector(Device, DeviceConfig):
             if self.db_conn:
                 self.db_conn.rollback()
 
-    def _get_scheduler_target(self, mode="next") -> Tuple[Optional[ScheduledTarget], Optional[float]]:
-        """Get target from scheduler queue.
+    def _get_queue_target(self, queue_name: str, mode="next") -> Tuple[Optional[ScheduledTarget], Optional[float]]:
+        """Get target from specified queue with timing logic.
 
         Args:
+            queue_name: Name of queue to check (e.g., 'scheduler', 'manual')
             mode: "next" for upcoming targets (within time_slice window)
                   "now" for currently active targets (start <= now <= end)
 
@@ -514,11 +492,11 @@ class QueueSelector(Device, DeviceConfig):
                 self.db_conn = psycopg2.connect(**self.db_config)
 
             cursor = self.db_conn.cursor()
-            scheduler_queue_id = self.queue_name_to_id.get('scheduler')
-            if scheduler_queue_id is None:
-                return None
+            queue_id = self.queue_name_to_id.get(queue_name)
+            if queue_id is None:
+                return None, None
 
-            logging.debug(f"Scheduler queue lookup ({mode}): scheduler_queue_id = {scheduler_queue_id}")
+            logging.debug(f"{queue_name} queue lookup ({mode}): queue_id = {queue_id}")
 
             current_time = datetime.now(timezone.utc)
 
@@ -537,7 +515,7 @@ class QueueSelector(Device, DeviceConfig):
                     ORDER BY COALESCE(qt.time_start, %s), qt.queue_order
                     LIMIT 1
                 """
-                query_params = (scheduler_queue_id, current_time, current_time)
+                query_params = (queue_id, current_time, current_time)
 
             elif mode == "now":
                 # Get target that should be running RIGHT NOW
@@ -554,10 +532,10 @@ class QueueSelector(Device, DeviceConfig):
                     ORDER BY qt.queue_order, qt.time_start
                     LIMIT 1
                 """
-                query_params = (scheduler_queue_id, current_time, current_time)
+                query_params = (queue_id, current_time, current_time)
             else:
                 logging.error(f"Unknown mode: {mode}")
-                return None
+                return None, None
 
             cursor.execute(query, query_params)
             row = cursor.fetchone()
@@ -571,12 +549,12 @@ class QueueSelector(Device, DeviceConfig):
                 if time_end and time_end.tzinfo is None:
                     time_end = time_end.replace(tzinfo=timezone.utc)
 
-                # Update queue size for monitoring (only for "next" mode to avoid spam)
-                if mode == "next":
+                # Update queue size for monitoring (only for scheduler queue and "next" mode)
+                if queue_name == 'scheduler' and mode == "next":
                     cursor.execute("""
                         SELECT COUNT(*) FROM queues_targets
                         WHERE queue_id = %s
-                    """, (scheduler_queue_id,))
+                    """, (queue_id,))
                     count = cursor.fetchone()[0]
                     self.queue_size.value = count
 
@@ -588,7 +566,7 @@ class QueueSelector(Device, DeviceConfig):
                     tar_ra=tar_ra or 0.0, tar_dec=tar_dec or 0.0,
                     queue_order=queue_order or 0
                 )
-                logging.debug(f"Found {mode} target: {target.tar_id} ({target.tar_name})")
+                logging.debug(f"Found {mode} target in {queue_name} queue: {target.tar_id} ({target.tar_name})")
 
                 # Calculate time until action needed
                 time_until_action = None
@@ -607,25 +585,29 @@ class QueueSelector(Device, DeviceConfig):
                 return target, time_until_action
 
             else:
-                if mode == "next":
-                    # Only show detailed debug info for "next" mode
+                if queue_name == 'scheduler' and mode == "next":
+                    # Only show detailed debug info for scheduler "next" mode
                     cursor.execute("""
                         SELECT COUNT(*), MIN(qt.time_start), MAX(qt.time_start)
                         FROM queues_targets qt
                         WHERE qt.queue_id = %s
-                    """, (scheduler_queue_id,))
+                    """, (queue_id,))
                     count, min_start, max_start = cursor.fetchone()
 
                     if count > 0:
-                        logging.debug(f"No {mode} target found. Total in scheduler queue: {count} (range: {min_start} to {max_start})")
+                        logging.debug(f"No {mode} target found. Total in {queue_name} queue: {count} (range: {min_start} to {max_start})")
 
                     self.queue_size.value = 0
 
                 return None, None
 
         except Exception as e:
-            logging.error(f"Error querying scheduler queue ({mode}): {e}")
+            logging.error(f"Error querying {queue_name} queue ({mode}): {e}")
             return None, None
+
+    def _get_scheduler_target(self, mode="next") -> Tuple[Optional[ScheduledTarget], Optional[float]]:
+        """Get target from scheduler queue (legacy wrapper for compatibility)."""
+        return self._get_queue_target('scheduler', mode)
 
     def _get_queue_targets(self, queue_name: str, limit: int = 10) -> List[Tuple]:
         """Get targets from specified queue."""
