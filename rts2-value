@@ -20,6 +20,7 @@ import time
 import logging
 import argparse
 import threading
+import os
 from typing import Optional, Any, List, Tuple, Dict
 
 from value import ValueString
@@ -39,7 +40,14 @@ class RTS2ValueClient(Device, DeviceConfig):
         config.add_argument('--timeout', type=int, default=10,
                           help='Connection timeout in seconds')
 
-    def __init__(self, device_name="VALUE_CLIENT", port=0):
+    def __init__(self, device_name=None, port=0):
+        # Generate unique client ID if none provided
+        if device_name is None:
+            import uuid
+            # Use a short UUID-based identifier for uniqueness across network
+            unique_id = str(uuid.uuid4())[:8]  # First 8 chars of UUID
+            device_name = f"value-{unique_id}"
+
         super().__init__(device_name, DeviceType.LOGD, port)
         self.collected_values = {}
         self.target_values = []
