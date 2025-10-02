@@ -408,17 +408,52 @@ class QueueSelector(Device, DeviceConfig):
             )
             return calibration_target, 0  # Action needed immediately
 
-        # 2. Check manual queue first (higher priority over scheduler)
+        # 2. Manual queue always has priority - if there are ANY manual targets,
+        # scheduler is completely ignored until all manual targets are done
         manual_target, time_until_action = self._get_queue_target('manual', mode="next")
         if manual_target:
             return manual_target, time_until_action
 
-        # 3. Check scheduler queue for time-scheduled targets (NEXT mode)
+        # Also check if we're currently within a manual target period
+        # If so, don't switch to scheduler even if manual queue is empty for "next"
+        if self._is_manual_period_active():
+            logging.debug("Within manual target period - blocking scheduler queue")
+            return None, None
+
+        # 3. Only check scheduler queue if manual queue has no targets and we're not in manual period
         scheduler_target, time_until_action = self._get_scheduler_target(mode="next")
         if scheduler_target:
             return scheduler_target, time_until_action
 
         return None, None
+
+    def _is_manual_period_active(self) -> bool:
+        """Check if we're currently within any manual target's time period."""
+        try:
+            if not self.db_conn or self.db_conn.closed:
+                self.db_conn = psycopg2.connect(**self.db_config)
+
+            cursor = self.db_conn.cursor()
+            queue_id = self.queue_name_to_id.get('manual')
+            if queue_id is None:
+                return False
+
+            current_time = datetime.now(timezone.utc)
+
+            # Check if current time falls within any manual target's time period
+            cursor.execute("""
+                SELECT COUNT(*) FROM queues_targets qt
+                WHERE qt.queue_id = %s
+                  AND (qt.time_start IS NULL OR qt.time_start <= %s)
+                  AND (qt.time_end IS NULL OR qt.time_end >= %s)
+            """, (queue_id, current_time, current_time))
+
+            count = cursor.fetchone()[0]
+            return count > 0
+
+        except Exception as e:
+            logging.error(f"Error checking manual period: {e}")
+            return False
 
     def _select_current_target(self) -> Optional[ScheduledTarget]:
         """Select target that should be running RIGHT NOW (for NOW command)."""
@@ -434,12 +469,17 @@ class QueueSelector(Device, DeviceConfig):
                 tar_ra=0.0, tar_dec=0.0
             )
 
-        # 2. Check manual queue first (higher priority over scheduler)
+        # 2. Manual queue always has priority - check for currently active manual targets
         manual_target, _ = self._get_queue_target('manual', mode="now")
         if manual_target:
             return manual_target
 
-        # 3. Check scheduler queue for currently active targets (NOW mode)
+        # If we're within a manual period but no manual target is "now", block scheduler
+        if self._is_manual_period_active():
+            logging.debug("Within manual target period - blocking scheduler queue (now mode)")
+            return None
+
+        # 3. Only check scheduler queue if no manual targets and not in manual period
         scheduler_target, _ = self._get_scheduler_target(mode="now")
         if scheduler_target:
             return scheduler_target
