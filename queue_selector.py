@@ -57,7 +57,7 @@ class QueueSelector(Device, DeviceConfig):
     DEFAULT_CONFIG = {
         'time_slice': 300,           # Seconds before target start to issue 'next'
         'grb_grace_period': 1200,    # Grace period duration (seconds)
-        'update_interval': 30,       # Selector loop interval (seconds)
+        'update_interval': 5,        # Selector loop interval (seconds)
         'executor': 'EXEC',          # Executor device name
     }
 
@@ -84,7 +84,7 @@ class QueueSelector(Device, DeviceConfig):
                           help='Time slice before target start to issue next command (seconds)')
         config.add_argument('--grb-grace-period', type=float, default=1200.0,
                           help='GRB grace period to avoid interruptions (seconds)')
-        config.add_argument('--update-interval', type=float, default=30.0,
+        config.add_argument('--update-interval', type=float, default=5.0,
                           help='Selector main loop interval (seconds)')
 
         # Executor device
@@ -343,7 +343,8 @@ class QueueSelector(Device, DeviceConfig):
                 # Handle startup evaluation first
                 if not self.startup_completed:
                     self._perform_startup_evaluation()
-                    time.sleep(self.update_interval)
+                    # Don't sleep after startup - if we sent a command, continue immediately
+                    # to normal operation. The next loop will handle subsequent actions.
                     continue
 
                 # Check for GRB grace period
