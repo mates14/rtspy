@@ -40,6 +40,7 @@ class ScheduledTarget:
     tar_ra: float
     tar_dec: float
     queue_order: int = 0
+    queue_name: str = "unknown"  # Which queue this target came from
 
 
 class QueueSelector(Device, DeviceConfig):
@@ -350,6 +351,8 @@ class QueueSelector(Device, DeviceConfig):
                 # Check for GRB grace period
                 if self._detect_external_activity():
                     logging.debug("In GRB grace period, skipping target selection")
+                    # Update current_queue to show we're in grace period
+                    self.current_queue.value = "grace"
                     time.sleep(self.update_interval)
                     continue
                 else:
@@ -416,7 +419,8 @@ class QueueSelector(Device, DeviceConfig):
                 queue_start=datetime.now(timezone.utc),
                 queue_end=None,
                 tar_name="calibration",
-                tar_ra=0.0, tar_dec=0.0
+                tar_ra=0.0, tar_dec=0.0,
+                queue_name="calibration"
             )
             return calibration_target, 0  # Action needed immediately
 
@@ -478,7 +482,8 @@ class QueueSelector(Device, DeviceConfig):
                 queue_start=datetime.now(timezone.utc),
                 queue_end=None,
                 tar_name="calibration",
-                tar_ra=0.0, tar_dec=0.0
+                tar_ra=0.0, tar_dec=0.0,
+                queue_name="calibration"
             )
 
         # 2. Manual queue always has priority - check for currently active manual targets
@@ -616,7 +621,8 @@ class QueueSelector(Device, DeviceConfig):
                     queue_end=time_end,
                     tar_name=tar_name or f"target_{tar_id}",
                     tar_ra=tar_ra or 0.0, tar_dec=tar_dec or 0.0,
-                    queue_order=queue_order or 0
+                    queue_order=queue_order or 0,
+                    queue_name=queue_name
                 )
                 logging.debug(f"Found {mode} target in {queue_name} queue: {target.tar_id} ({target.tar_name})")
 
@@ -780,22 +786,8 @@ class QueueSelector(Device, DeviceConfig):
 
     def _update_target_status(self, target: ScheduledTarget):
         """Update status values for monitoring."""
-        if target.tar_id == self.TARGET_FLAT:
-            self.current_queue.value = "calibration"
-        elif target.qid == 0:
-            self.current_queue.value = "manual"
-        else:
-            # Determine queue from target source
-            for queue_name, queue_id in self.queue_name_to_id.items():
-                if queue_id == 1:
-                    self.current_queue.value = "manual"
-                    break
-                elif queue_id == 2:
-                    self.current_queue.value = "scheduler"
-                    break
-            else:
-                self.current_queue.value = "unknown"
-
+        # Simply use the queue_name from the target
+        self.current_queue.value = target.queue_name
         self.next_target.value = target.tar_id
 
     def _ex_send_executor_command(self, command: str) -> bool:
