@@ -357,6 +357,17 @@ class QueueSelector(Device, DeviceConfig):
                     if self.grb_grace_active.value:
                         self.grb_grace_active.value = False
 
+                # First check if currently running target is correct (NOW mode)
+                current_target = self._select_current_target()
+                if current_target and self.executor_current_target.value != current_target.tar_id:
+                    # Wrong target running or no target running - issue NOW command
+                    logging.info(f"Current executor target {self.executor_current_target.value} != expected {current_target.tar_id} - issuing NOW")
+                    command = f"now {current_target.tar_id}"
+                    self._send_executor_command(command)
+                    self._update_target_status(current_target)
+                    time.sleep(self.update_interval)
+                    continue
+
                 logging.debug("Selecting next target...")
 
                 # Get next target to execute with timing information
