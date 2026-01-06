@@ -628,31 +628,44 @@ class GrbDaemon(Device, DeviceConfig):
         except (ValueError, TypeError):
             logging.warning(f"Could not parse state mask: {state_mask_value}")
 
-    def _on_executor_enabled_changed(self, value_change_info):
+    def _on_executor_enabled_changed(self, context):
         """
         Handle changes to EXEC.enabled value.
 
         Args:
-            value_change_info: Dict with keys: device, value_name, old_value, new_value
+            context: Dict with keys: device, value, data
         """
         try:
-            new_value = value_change_info.get('new_value')
-            old_value = value_change_info.get('old_value')
+            device = context.get('device')
+            value_name = context.get('value')
+            value_data = context.get('data')
+
+            # Parse the boolean value (RTS2 sends "1" for true, "0" for false)
+            try:
+                new_enabled = bool(int(value_data))
+            except (ValueError, TypeError):
+                logging.warning(f"Could not parse {device}.{value_name} value: {value_data}")
+                return
+
+            # Track old value for change detection
+            old_enabled = self.executor_enabled
 
             # Update internal state
-            self.executor_enabled = new_value
+            self.executor_enabled = new_enabled
             self.executor_connected = True  # If we're receiving values, we have a connection
 
             # Update status value
             self._update_executor_status()
 
             # Log significant changes
-            if old_value != new_value:
-                status = "enabled" if new_value else "disabled"
+            if old_enabled != new_enabled:
+                status = "enabled" if new_enabled else "disabled"
                 logging.info(f"Executor {self.executor_name} is now {status}")
+            else:
+                logging.debug(f"Executor {self.executor_name} enabled = {new_enabled}")
 
         except Exception as e:
-            logging.error(f"Error processing executor enabled change: {e}")
+            logging.error(f"Error processing executor enabled change: {e}", exc_info=True)
 
     def _update_executor_status(self):
         """Update the executor_status value based on current state."""
