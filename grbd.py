@@ -242,6 +242,11 @@ class GrbDaemon(Device, DeviceConfig):
         self.system_state = None
         self.trigger_ready = False
 
+        # Executor monitoring
+        self.executor_name = "EXEC"  # Can be made configurable if needed
+        self.executor_enabled = None  # Will be set when we receive EXEC.enabled value
+        self.executor_connected = False  # Track if we have a connection to EXEC
+
         # Set initial state
         self.set_state(self.STATE_IDLE, "GRB daemon initializing")
         # System state monitoring
@@ -283,6 +288,7 @@ class GrbDaemon(Device, DeviceConfig):
         self.gcn_client_id = ValueString("gcn_client_id", "GCN client ID")
         self.connection_time = ValueTime("connection_time", "Time of last GCN connection")
         self.last_heartbeat = ValueTime("last_heartbeat", "Last GCN heartbeat/activity")
+        self.executor_status = ValueString("executor_status", "Executor connection status (enabled/disabled/not-connected)", initial="not-connected")
 
         # === PACKET STATISTICS ===
         self.packets_received = ValueInteger("packets_received", "Total GCN packets received", initial=0)
@@ -526,6 +532,20 @@ class GrbDaemon(Device, DeviceConfig):
             if not math.isnan(self.current_grb.error_box):
                 self.last_target_errorbox.value = self.current_grb.error_box
 
+        # Check executor connection status
+        executor_conn_exists = False
+        for conn in self.network.connection_manager.connections.values():
+            if (hasattr(conn, 'remote_device_type') and
+                conn.remote_device_type == DeviceType.EXECUTOR and
+                conn.state == ConnectionState.AUTH_OK):
+                executor_conn_exists = True
+                break
+
+        # Update executor connection status if it changed
+        if executor_conn_exists != self.executor_connected:
+            self.executor_connected = executor_conn_exists
+            self._update_executor_status()
+
         # Update status message
         if self.gcn_connected.value:
             hours_since_packet = (current_time - self.last_packet_time) / 3600 if self.last_packet_time > 0 else 999
@@ -550,6 +570,14 @@ class GrbDaemon(Device, DeviceConfig):
         # Register interest in system state
         logging.info("Monitoring centrald system state for GRB readiness")
         self.network.register_state_interest("centrald", self._on_system_state_changed)
+
+        # Register interest in executor enabled state
+        logging.info(f"Monitoring {self.executor_name}.enabled for executor availability")
+        self.network.register_interest_in_value(
+            device_name=self.executor_name,
+            value_name="enabled",
+            callback=self._on_executor_enabled_changed
+        )
 
         # Validate configuration
         if not self.gcn_client_id.value or not self.gcn_client_secret:
@@ -599,6 +627,47 @@ class GrbDaemon(Device, DeviceConfig):
 
         except (ValueError, TypeError):
             logging.warning(f"Could not parse state mask: {state_mask_value}")
+
+    def _on_executor_enabled_changed(self, value_change_info):
+        """
+        Handle changes to EXEC.enabled value.
+
+        Args:
+            value_change_info: Dict with keys: device, value_name, old_value, new_value
+        """
+        try:
+            new_value = value_change_info.get('new_value')
+            old_value = value_change_info.get('old_value')
+
+            # Update internal state
+            self.executor_enabled = new_value
+            self.executor_connected = True  # If we're receiving values, we have a connection
+
+            # Update status value
+            self._update_executor_status()
+
+            # Log significant changes
+            if old_value != new_value:
+                status = "enabled" if new_value else "disabled"
+                logging.info(f"Executor {self.executor_name} is now {status}")
+
+        except Exception as e:
+            logging.error(f"Error processing executor enabled change: {e}")
+
+    def _update_executor_status(self):
+        """Update the executor_status value based on current state."""
+        if not self.executor_connected:
+            status = "not-connected"
+        elif self.executor_enabled is None:
+            status = "unknown"
+        elif self.executor_enabled:
+            status = "enabled"
+        else:
+            status = "disabled"
+
+        if self.executor_status.value != status:
+            self.executor_status.value = status
+            logging.debug(f"Executor status: {status}")
 
     def stop(self):
         """Stop the GRB daemon."""
@@ -1552,6 +1621,14 @@ class GrbDaemon(Device, DeviceConfig):
                 # Do not queue - let the scheduler handle it
                 return
 
+            # Check executor status before attempting to send command
+            if self.executor_status.value == "disabled":
+                logging.info(f"Executor is disabled, GRB {target_id} will be discovered by scheduler")
+                return
+            elif self.executor_status.value == "not-connected":
+                logging.warning(f"No executor connection available for GRB {target_id}, will be discovered by scheduler")
+                return
+
             # First try to find an executor connection
             executor_conn = None
             for conn in self.network.connection_manager.connections.values():
@@ -1565,14 +1642,14 @@ class GrbDaemon(Device, DeviceConfig):
                 # Send execute GRB command to executor
                 cmd = f"grb {target_id}" # or now <tar_id>
                 executor_conn.send_command(cmd, self._on_execute_grb_result)
-                logging.debug(f"Sent GRB execute command to executor: {cmd}")
+                logging.info(f"Sent GRB execute command to executor: grb {target_id}")
 
             #elif self.queue_name.value:
             #    # Queue GRB for selector
             #    self._queue_grb_observation(target_id)
 
             else:
-                logging.warning(f"No executor available and no queue specified for GRB {target_id}")
+                logging.warning(f"No executor connection found for GRB {target_id}, will be discovered by scheduler")
 
         except Exception as e:
             logging.error(f"Error triggering GRB observation: {e}")
