@@ -532,19 +532,7 @@ class GrbDaemon(Device, DeviceConfig):
             if not math.isnan(self.current_grb.error_box):
                 self.last_target_errorbox.value = self.current_grb.error_box
 
-        # Check executor connection status
-        executor_conn_exists = False
-        for conn in self.network.connection_manager.connections.values():
-            if (hasattr(conn, 'remote_device_type') and
-                conn.remote_device_type == DeviceType.EXECUTOR and
-                conn.state == ConnectionState.AUTH_OK):
-                executor_conn_exists = True
-                break
-
-        # Update executor connection status if it changed
-        if executor_conn_exists != self.executor_connected:
-            self.executor_connected = executor_conn_exists
-            self._update_executor_status()
+        # Executor connection status is now managed by callbacks
 
         # Update status message
         if self.gcn_connected.value:
@@ -577,6 +565,12 @@ class GrbDaemon(Device, DeviceConfig):
             device_name=self.executor_name,
             value_name="enabled",
             callback=self._on_executor_enabled_changed
+        )
+
+        # Register connection state callback for executor
+        self.network.register_connection_state_callback(
+            device_name=self.executor_name,
+            callback=self._on_executor_connection_changed
         )
 
         # Validate configuration
@@ -666,6 +660,24 @@ class GrbDaemon(Device, DeviceConfig):
 
         except Exception as e:
             logging.error(f"Error processing executor enabled change: {e}", exc_info=True)
+
+    def _on_executor_connection_changed(self, device_name, connected):
+        """
+        Handle executor connection state changes.
+
+        Args:
+            device_name: Name of the device (EXEC)
+            connected: True if connected, False if disconnected
+        """
+        try:
+            self.executor_connected = connected
+            self._update_executor_status()
+
+            status = "connected" if connected else "disconnected"
+            logging.info(f"Executor {device_name} {status}")
+
+        except Exception as e:
+            logging.error(f"Error processing executor connection change: {e}", exc_info=True)
 
     def _update_executor_status(self):
         """Update the executor_status value based on current state."""

@@ -80,6 +80,7 @@ class NetworkManager:
         # Interest tracking
         self.value_interests = {}  # "device_name.value_name" -> callback
         self.state_interests = {}  # device_name -> callback
+        self.connection_state_callbacks = {}  # device_name -> callback(device_name, connected: bool)
         self.pending_interests = set()  # Set of device names we're interested in
         self.device_connection_attempts = {}  # device_name -> (last_attempt_time, retry_count, last_error_logged_time)
         self.min_retry_interval = 5.0  # Start with 5 seconds
@@ -425,6 +426,15 @@ class NetworkManager:
         conn = self.connection_manager.get_connection(conn_id)
         if conn and hasattr(conn, 'remote_device_name') and conn.remote_device_name:
             device_name = conn.remote_device_name
+
+            # Notify connection state callbacks if this was an established connection
+            if ((conn.state == ConnectionState.AUTH_OK or conn.state == ConnectionState.AUTH_PENDING) and
+                device_name in self.connection_state_callbacks):
+                try:
+                    self.connection_state_callbacks[device_name](device_name, False)
+                except Exception as e:
+                    logging.error(f"Error in connection state callback for {device_name}: {e}")
+
             # Only reset if this was a successful connection that closed (not a failed connection attempt)
             # Check if connection was authenticated - that means it was established successfully
             if conn.state == ConnectionState.AUTH_OK or conn.state == ConnectionState.AUTH_PENDING:
@@ -985,6 +995,13 @@ class NetworkManager:
         if success and "authorized" in status_msg:
             logging.debug(f"Device authentication successful for {conn.name}")
             conn.update_state(ConnectionState.AUTH_OK, "Authorization complete")
+
+            # Notify connection state callbacks
+            if hasattr(conn, 'remote_device_name') and conn.remote_device_name in self.connection_state_callbacks:
+                try:
+                    self.connection_state_callbacks[conn.remote_device_name](conn.remote_device_name, True)
+                except Exception as e:
+                    logging.error(f"Error in connection state callback: {e}")
         else:
             logging.error(f"Device authentication failed for {conn.name}: {status_code} {status_msg}")
             conn.close()
@@ -1128,6 +1145,20 @@ class NetworkManager:
 
         if not device_connected:
             logging.info(f"No connection to {device_name} yet - waiting for centrald updates")
+
+    def register_connection_state_callback(self, device_name, callback):
+        """
+        Register callback for device connection state changes.
+
+        Args:
+            device_name: Name of the device to monitor
+            callback: Callback function(device_name, connected: bool)
+        """
+        self.connection_state_callbacks[device_name] = callback
+        logging.debug(f"Registered connection state callback for {device_name}")
+
+        # Add to pending interests to ensure connection is established
+        self.pending_interests.add(device_name)
 
     def handle_value_change_request(self, conn, value_name, value_data):
         """
