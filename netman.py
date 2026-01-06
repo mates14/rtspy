@@ -427,11 +427,16 @@ class NetworkManager:
         if conn and hasattr(conn, 'remote_device_name') and conn.remote_device_name:
             device_name = conn.remote_device_name
 
-            # Notify connection state callbacks if this was an established connection
-            if ((conn.state == ConnectionState.AUTH_OK or conn.state == ConnectionState.AUTH_PENDING) and
-                device_name in self.connection_state_callbacks):
+            # Track if this was an established connection
+            was_established = (conn.state == ConnectionState.AUTH_OK or
+                             conn.state == ConnectionState.AUTH_PENDING or
+                             conn.state == ConnectionState.CONNECTED)
+
+            # Notify connection state callbacks if there's one registered
+            if device_name in self.connection_state_callbacks and was_established:
                 try:
                     self.connection_state_callbacks[device_name](device_name, False)
+                    logging.debug(f"Notified callback of {device_name} disconnection")
                 except Exception as e:
                     logging.error(f"Error in connection state callback for {device_name}: {e}")
 
