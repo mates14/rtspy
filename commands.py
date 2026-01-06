@@ -462,10 +462,10 @@ class ProtocolCommands:
 
             logging.debug(f"Registered device: {device_name} (ID: {centrald_id}, type: {device_type})")
 
-            # If we're interested in this device, reset retry timestamp for immediate reconnection
+            # If we're interested in this device, reset retry state for immediate reconnection
             if device_name in self.network_manager.pending_interests:
-                self.network_manager.device_connection_attempts[device_name] = 0
-                logging.debug(f"Device {device_name} reappeared, resetting retry timestamp for immediate reconnection")
+                self.network_manager.device_connection_attempts[device_name] = (0, 0, 0)
+                logging.debug(f"Device {device_name} reappeared, resetting retry state for immediate reconnection")
 
         except Exception as e:
             logging.warning(f"Error processing device info: {e}")

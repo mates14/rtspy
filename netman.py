@@ -81,8 +81,9 @@ class NetworkManager:
         self.value_interests = {}  # "device_name.value_name" -> callback
         self.state_interests = {}  # device_name -> callback
         self.pending_interests = set()  # Set of device names we're interested in
-        self.connection_retry_interval = 30.0  # seconds between connection attempts
-        self.device_connection_attempts = {}  # device_name -> last_attempt_time
+        self.device_connection_attempts = {}  # device_name -> (last_attempt_time, retry_count, last_error_logged_time)
+        self.min_retry_interval = 5.0  # Start with 5 seconds
+        self.max_retry_interval = 300.0  # Cap at 5 minutes
 
         # Register standard command handlers
         self._register_command_handlers()
@@ -190,9 +191,14 @@ class NetworkManager:
                             break
 
                     if device_found and device_info:
-                        # Check if we've attempted to connect recently
-                        last_attempt = self.device_connection_attempts.get(device_name, 0)
-                        if current_time - last_attempt < self.connection_retry_interval:
+                        # Check if we've attempted to connect recently with exponential backoff
+                        attempt_info = self.device_connection_attempts.get(device_name, (0, 0, 0))
+                        last_attempt, retry_count, last_error_logged = attempt_info
+
+                        # Calculate retry interval with exponential backoff
+                        retry_interval = min(self.min_retry_interval * (2 ** retry_count), self.max_retry_interval)
+
+                        if current_time - last_attempt < retry_interval:
                             continue
 
                         # Try to connect to the device
@@ -201,7 +207,8 @@ class NetworkManager:
 
                         if host and port and centrald_conn.auth_key is not None:
                             logging.info(f"Establishing connection to device {device_name} at {host}:{port}")
-                            self.device_connection_attempts[device_name] = current_time
+                            # Update attempt time but keep retry count (will be reset on success or incremented on failure)
+                            self.device_connection_attempts[device_name] = (current_time, retry_count, last_error_logged)
 
                             # Connect to the device
                             self._connect_to_device(host, port, device_name)
@@ -418,10 +425,28 @@ class NetworkManager:
         conn = self.connection_manager.get_connection(conn_id)
         if conn and hasattr(conn, 'remote_device_name') and conn.remote_device_name:
             device_name = conn.remote_device_name
-            # Reset retry timestamp to allow immediate reconnection when device reappears
-            if device_name in self.device_connection_attempts:
-                self.device_connection_attempts[device_name] = 0
+            # Only reset if this was a successful connection that closed (not a failed connection attempt)
+            # Check if connection was authenticated - that means it was established successfully
+            if conn.state == ConnectionState.AUTH_OK or conn.state == ConnectionState.AUTH_PENDING:
+                # Reset retry count to allow immediate reconnection when device reappears
+                self.device_connection_attempts[device_name] = (0, 0, 0)
                 logging.info(f"Device {device_name} disconnected, ready for immediate reconnection")
+            else:
+                # Connection failed before auth - increment retry count for exponential backoff
+                attempt_info = self.device_connection_attempts.get(device_name, (0, 0, 0))
+                last_attempt, retry_count, last_error_logged = attempt_info
+                new_retry_count = retry_count + 1
+
+                # Calculate next retry interval for logging
+                next_retry_interval = min(self.min_retry_interval * (2 ** new_retry_count), self.max_retry_interval)
+
+                # Only log error if enough time has passed since last error log (avoid spam)
+                current_time = time.time()
+                if current_time - last_error_logged > 30.0 or last_error_logged == 0:
+                    logging.warning(f"Device {device_name} connection failed (retry #{new_retry_count}), next attempt in {next_retry_interval:.0f}s")
+                    last_error_logged = current_time
+
+                self.device_connection_attempts[device_name] = (time.time(), new_retry_count, last_error_logged)
 
         # Remove from connection manager
         self.connection_manager.remove_connection(conn_id)
@@ -431,12 +456,28 @@ class NetworkManager:
         # Check socket error status
         err = conn.socket.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
         if err != 0:
-            logging.error(f"Socket error connecting to {conn.name}: {os.strerror(err)}")
+            # Check retry count to determine log level
+            device_name = getattr(conn, 'remote_device_name', None)
+            if device_name and device_name in self.device_connection_attempts:
+                _, retry_count, last_error_logged = self.device_connection_attempts[device_name]
+                # Only log at ERROR level on first failure, subsequent failures logged in _on_connection_closed
+                if retry_count == 0:
+                    logging.error(f"Socket error connecting to {conn.name}: {os.strerror(err)}")
+                else:
+                    logging.debug(f"Socket error connecting to {conn.name}: {os.strerror(err)}")
+            else:
+                logging.error(f"Socket error connecting to {conn.name}: {os.strerror(err)}")
             conn.close()
             return
 
-        # Connection successful
+        # Connection successful - reset retry count for this device
         conn.update_state(ConnectionState.CONNECTED, "Connection established")
+
+        # Reset retry count since connection was successful
+        device_name = getattr(conn, 'remote_device_name', None)
+        if device_name and device_name in self.device_connection_attempts:
+            self.device_connection_attempts[device_name] = (0, 0, 0)
+            logging.debug(f"Connection to {device_name} established, reset retry count")
 
         # For centrald connections, send registration
         if conn.type == 'centrald' and not getattr(conn, 'registration_sent', False):
