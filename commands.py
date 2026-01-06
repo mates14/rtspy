@@ -434,6 +434,21 @@ class ProtocolCommands:
             port = int(parts[4])
             device_type = int(parts[5]) if len(parts) > 5 else -1
 
+            # Remove any existing entity with the same device name (device names must be unique)
+            # This handles the case where a device restarts with a new centrald_id
+            entity_id_to_remove = None
+            for eid, entity in self.network_manager.entities.items():
+                if (entity.get('entity_type') == 'DEVICE' and
+                    entity.get('name') == device_name and
+                    eid != centrald_id):
+                    entity_id_to_remove = eid
+                    old_port = entity.get('port', 'unknown')
+                    logging.debug(f"Removing stale entity for {device_name} (old ID: {eid}, old port: {old_port})")
+                    break
+
+            if entity_id_to_remove is not None:
+                del self.network_manager.entities[entity_id_to_remove]
+
             # Store in global registry
             self.network_manager.entities[centrald_id] = {
                 'name': device_name,
@@ -446,6 +461,11 @@ class ProtocolCommands:
             }
 
             logging.debug(f"Registered device: {device_name} (ID: {centrald_id}, type: {device_type})")
+
+            # If we're interested in this device, reset retry timestamp for immediate reconnection
+            if device_name in self.network_manager.pending_interests:
+                self.network_manager.device_connection_attempts[device_name] = 0
+                logging.debug(f"Device {device_name} reappeared, resetting retry timestamp for immediate reconnection")
 
         except Exception as e:
             logging.warning(f"Error processing device info: {e}")

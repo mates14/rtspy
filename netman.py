@@ -414,6 +414,15 @@ class NetworkManager:
 
     def _on_connection_closed(self, conn_id):
         """Handle a connection being closed."""
+        # Get connection info before removing it
+        conn = self.connection_manager.get_connection(conn_id)
+        if conn and hasattr(conn, 'remote_device_name') and conn.remote_device_name:
+            device_name = conn.remote_device_name
+            # Reset retry timestamp to allow immediate reconnection when device reappears
+            if device_name in self.device_connection_attempts:
+                self.device_connection_attempts[device_name] = 0
+                logging.info(f"Device {device_name} disconnected, ready for immediate reconnection")
+
         # Remove from connection manager
         self.connection_manager.remove_connection(conn_id)
 
