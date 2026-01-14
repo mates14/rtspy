@@ -32,6 +32,7 @@ class GrbTarget:
     peak_flux: float = float('nan')
     source_name: str = ""           # Known source name (if any)
     significance: float = float('nan')  # Detection significance in sigma
+    instrument: str = ""            # Instrument name (for SVOM: GRM, ECLAIRs, MXT)
 
 class VoEventParser:
     """
@@ -500,6 +501,11 @@ class VoEventParser:
             if 'Burst_Id' in svom_params and not grb_target.grb_id:
                 grb_target.grb_id = svom_params['Burst_Id']
 
+            # Extract instrument name (GRM, ECLAIRs, MXT)
+            if 'Instrument' in svom_params:
+                grb_target.instrument = svom_params['Instrument']
+                logging.debug(f"SVOM instrument: {grb_target.instrument}")
+
             # Extract source name if it's a catalog detection
             grb_target.source_name = svom_params.get('Source_Name', '')
 
@@ -509,6 +515,14 @@ class VoEventParser:
                     grb_target.significance = float(svom_params['SNR'])
                 except (ValueError, TypeError):
                     pass
+
+            # Handle GRM-specific error radius issue
+            # GRM triggers have -1.0 error radius, replace with documented precision
+            if grb_target.instrument == 'GRM' and (math.isnan(grb_target.error_box) or grb_target.error_box < 0):
+                # GRM triangulation precision is 15° x 15° according to SVOM documentation
+                # Source: https://www.svom.eu/en/grm-gamma-ray-burst-monitor-en/
+                grb_target.error_box = 15.0  # degrees (documented triangulation precision)
+                logging.debug(f"SVOM GRM: set default error box to {grb_target.error_box}° (triangulation precision)")
 
             # Classify as GRB or non-GRB based on SVOM's assessment
             packet_type = svom_params.get('Packet_Type', '')

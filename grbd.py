@@ -1140,12 +1140,24 @@ class GrbDaemon(Device, DeviceConfig):
 
         # Generate target name in RTS2 format
         grb_time = datetime.fromtimestamp(grb.detection_time)
+
+        # Calculate day fraction properly (not microseconds!)
+        seconds_in_day = grb_time.hour * 3600 + grb_time.minute * 60 + grb_time.second + grb_time.microsecond / 1e6
+        day_fraction = seconds_in_day / 86400.0
+        date_with_fraction = f"{grb_time.strftime('%y%m%d')}.{int(day_fraction * 1000):03d}"
+
         if grb.mission == 'ICECUBE':
-            target_name = f"IceCube {grb_time.strftime('%y%m%d.%f')[:-3]} trigger #{grb.grb_id}"
+            target_name = f"IceCube {date_with_fraction} trigger #{grb.grb_id}"
         elif grb.mission == 'EINSTEIN_PROBE':
-            target_name = f"EP {grb_time.strftime('%y%m%d.%f')[:-3]} trigger #{grb.grb_id}"
+            target_name = f"EP {date_with_fraction} trigger #{grb.grb_id}"
+        elif grb.mission == 'SVOM':
+            # Extract instrument name and format trigger ID
+            instrument = getattr(grb, 'instrument', 'SVOM')
+            # Extract last 2 digits from trigger ID (e.g., sb26011201 -> 01)
+            trigger_suffix = grb.grb_id[-2:] if len(grb.grb_id) >= 2 else grb.grb_id
+            target_name = f"GRB {date_with_fraction} (SVOM/{instrument} #{trigger_suffix})"
         else:
-            target_name = f"GRB {grb_time.strftime('%y%m%d.%f')[:-3]} GCN #{grb.grb_id}"
+            target_name = f"GRB {date_with_fraction} GCN #{grb.grb_id}"
 
         # Skip creation if invalid coordinates
         if not self._is_valid_coordinates(grb.ra, grb.dec):
