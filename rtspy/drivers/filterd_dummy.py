@@ -5,9 +5,9 @@ import logging
 import threading
 from typing import Optional,Dict,Any
 
-from value import ValueString, ValueDouble
-from filterd import Filterd
-from app import App
+from rtspy.core.value import ValueString, ValueDouble
+from rtspy.core.filterd import Filterd
+from rtspy.core.app import App
 
 class DummyFilter(Filterd):
     """Dummy filter wheel implementation for testing.
@@ -107,7 +107,8 @@ class DummyFilter(Filterd):
         return 0
 
 
-if __name__ == "__main__":
+def main():
+    """Entry point for rts2-filterd-dummy daemon."""
     # Create application
     app = App(description='Dummy Filter Wheel Driver')
 
@@ -129,5 +130,9 @@ if __name__ == "__main__":
 
     # Run application main loop
     app.run()
+
+
+if __name__ == "__main__":
+    main()
 
 

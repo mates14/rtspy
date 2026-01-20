@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Type, Any
 from datetime import datetime, timezone
 from pathlib import Path
 
-from device import Device
+from rtspy.core.device import Device
 
 # Custom formatter class to handle the specific format you want
 class RTS2LogFormatter(logging.Formatter):
@@ -56,7 +56,7 @@ class App:
             device_class: Device class that uses DeviceConfig
         """
         # Check if device class uses DeviceConfig
-        from config import DeviceConfig
+        from rtspy.core.config import DeviceConfig
         if not issubclass(device_class, DeviceConfig):
             raise RuntimeError(f"Device class {device_class.__name__} must inherit from DeviceConfig")
 
@@ -102,7 +102,7 @@ class App:
             Configured device instance
         """
         # Check if device class uses DeviceConfig
-        from config import DeviceConfig
+        from rtspy.core.config import DeviceConfig
         if not issubclass(device_class, DeviceConfig):
             raise RuntimeError(f"Device class {device_class.__name__} must inherit from DeviceConfig")
 

@@ -11,10 +11,10 @@ import fcntl
 import math
 from dataclasses import dataclass
 
-from value import ValueTime
-from netman import NetworkManager
-from config import DeviceConfig
-from constants import DeviceType
+from rtspy.core.value import ValueTime
+from rtspy.core.netman import NetworkManager
+from rtspy.core.config import DeviceConfig
+from rtspy.core.constants import DeviceType
 
 
 class Device(DeviceConfig):

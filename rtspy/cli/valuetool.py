@@ -23,11 +23,11 @@ import threading
 import os
 from typing import Optional, Any, List, Tuple, Dict
 
-from value import ValueString
-from device import Device
-from constants import DeviceType
-from config import DeviceConfig
-from app import App
+from rtspy.core.value import ValueString
+from rtspy.core.device import Device
+from rtspy.core.constants import DeviceType
+from rtspy.core.config import DeviceConfig
+from rtspy.core.app import App
 
 # Configure logging to be quiet by default
 logging.basicConfig(level=logging.WARNING, format='%(asctime)s %(name)s %(levelname)s: %(message)s')

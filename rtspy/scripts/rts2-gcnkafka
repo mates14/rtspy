@@ -1,18 +1,5 @@
 #!/bin/bash
 
-# rts2-queuer - Sample wrapper script for rtspy Python daemon
-#
-# This wrapper makes Python-based rtspy queue_selector.py compatible with 
-# the original C++ RTS2 daemon management system. It provides:
-#
-# - Proper lock file creation in /var/run/rts2_{device_name} with correct PID
-# - Integration with rts2-start/rts2-stop commands  
-# - Prevention of multiple instances for the same device
-# - Standard RTS2 daemon forking behavior
-#
-# The script extracts device name from -d parameter and manages the daemon
-# lifecycle to match native RTS2 component behavior.
-
 # Extract device name from -d parameter
 DEVICE_NAME=""
 ARGS=("$@")
@@ -29,8 +16,8 @@ if [[ -z "$DEVICE_NAME" ]]; then
 fi
 
 LOCK_FILE="/var/run/rts2_${DEVICE_NAME}"
-LOG_FILE="/home/mates/rtspy.log"
-PYTHON_SCRIPT="/home/mates/rtspy/queue_selector.py"
+LOG_FILE="${RTS2_LOG_FILE:-/home/mates/rtspy.log}"
+PYTHON_SCRIPT="rtspy-grbd"
 RUN_USER="mates"
 
 # Check if already running
@@ -56,7 +43,7 @@ SUDO_PID=$!
 sleep 0.5
 
 # Find the actual Python process PID (child of sudo)
-DAEMON_PID=$(pgrep -P "$SUDO_PID" -f "python.*$PYTHON_SCRIPT")
+DAEMON_PID=$(pgrep -P "$SUDO_PID" -f "$PYTHON_SCRIPT")
 
 if [[ -z "$DAEMON_PID" ]]; then
     echo "Error: Could not find Python daemon process" >&2

@@ -6,11 +6,11 @@ import logging
 import threading
 from typing import Dict, Any
 
-from value import ValueDouble, ValueInteger, ValueTime
-from device import Device
-from constants import DeviceType
-from config import DeviceConfig
-from app import App
+from rtspy.core.value import ValueDouble, ValueInteger, ValueTime
+from rtspy.core.device import Device
+from rtspy.core.constants import DeviceType
+from rtspy.core.config import DeviceConfig
+from rtspy.core.app import App
 
 
 class TemperatureSensor(Device, DeviceConfig):
@@ -128,7 +128,8 @@ class TemperatureSensor(Device, DeviceConfig):
         """Handle device state changes."""
         logging.info(f"State changed from {old_state:x} to {new_state:x}: {message}")
 
-if __name__ == "__main__":
+def main():
+    """Entry point for rts2-sensor-temp daemon."""
     # Create application
     app = App(description='Temperature Sensor Device')
 
@@ -150,4 +151,8 @@ if __name__ == "__main__":
 
     # Run application
     app.run()
+
+
+if __name__ == "__main__":
+    main()
 

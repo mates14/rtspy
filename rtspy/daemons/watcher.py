@@ -5,11 +5,11 @@ import logging
 import threading
 from typing import Optional, Any, Dict
 
-from value import ValueDouble, ValueString
-from device import Device
-from config import DeviceConfig
-from constants import DeviceType
-from app import App
+from rtspy.core.value import ValueDouble, ValueString
+from rtspy.core.device import Device
+from rtspy.core.config import DeviceConfig
+from rtspy.core.constants import DeviceType
+from rtspy.core.app import App
 
 class WatcherDevice(Device, DeviceConfig):
     """Simple device that watches state and values of another device."""
@@ -121,7 +121,8 @@ class WatcherDevice(Device, DeviceConfig):
         logging.info(f"Watcher device started, watching {self.watch_value} and {self.watch_device} state")
         self.set_ready("Watcher ready")
 
-if __name__ == "__main__":
+def main():
+    """Entry point for rts2-watcher daemon."""
     # Create application
     app = App(description='RTS2 Device Watcher')
 
@@ -136,3 +137,7 @@ if __name__ == "__main__":
 
     # Run application main loop
     app.run()
+
+
+if __name__ == "__main__":
+    main()

@@ -22,11 +22,11 @@ from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass
 from typing import Optional, Dict, List, Tuple
 
-from device import Device
-from config import DeviceConfig
-from app import App
-from value import ValueDouble, ValueInteger, ValueBool, ValueTime, ValueString
-from constants import DeviceType, CentralState, ConnectionState
+from rtspy.core.device import Device
+from rtspy.core.config import DeviceConfig
+from rtspy.core.app import App
+from rtspy.core.value import ValueDouble, ValueInteger, ValueBool, ValueTime, ValueString
+from rtspy.core.constants import DeviceType, CentralState, ConnectionState
 
 
 @dataclass

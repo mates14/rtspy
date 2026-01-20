@@ -89,14 +89,14 @@ import serial
 import math
 from typing import Dict, Any
 
-from device import Device
-from constants import DeviceType
-from value import (
+from rtspy.core.device import Device
+from rtspy.core.constants import DeviceType
+from rtspy.core.value import (
     ValueSelection, ValueInteger, ValueBool, ValueString, ValueTime, ValueDouble
 )
-from focusd import FocuserMixin
-from filterd import FilterMixin
-from app import App
+from rtspy.core.focusd import FocuserMixin
+from rtspy.core.filterd import FilterMixin
+from rtspy.core.app import App
 
 
 class SerialCommunicator:

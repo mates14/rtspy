@@ -1,0 +1,102 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rtspy"
+version = "0.1.0"
+description = "Python implementation of RTS2 (Remote Telescope System) device drivers and daemons"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "GNU General Public License v3.0"}
+authors = [
+    {name = "Martin Jelínek", email = "martin.jelinek@asu.cas.cz"},
+]
+maintainers = [
+    {name = "Martin Jelínek", email = "martin.jelinek@asu.cas.cz"},
+]
+keywords = [
+    "astronomy",
+    "observatory",
+    "rts2",
+    "telescope",
+    "robotics",
+    "grb",
+    "device-drivers",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Astronomy",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: POSIX :: Linux",
+]
+
+dependencies = [
+    "psycopg2-binary>=2.9.0",
+    "gcn-kafka>=0.3.0",
+    "astropy>=5.0",
+    "pyserial>=3.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+    "black",
+    "flake8",
+    "mypy",
+]
+
+[project.urls]
+Homepage = "https://github.com/MATES-Observatory/rtspy"
+Documentation = "https://github.com/MATES-Observatory/rtspy#readme"
+Repository = "https://github.com/MATES-Observatory/rtspy"
+Issues = "https://github.com/MATES-Observatory/rtspy/issues"
+
+[project.scripts]
+# Production daemons
+rtspy-grbd = "rtspy.daemons.grbd:main"
+rtspy-queue-selector = "rtspy.daemons.queue_selector:main"
+rtspy-watcher = "rtspy.daemons.watcher:main"
+
+# Hardware drivers
+rtspy-filterd-dummy = "rtspy.drivers.filterd_dummy:main"
+rtspy-filterd-ovis = "rtspy.drivers.filterd_ovis:main"
+rtspy-focusd-dummy = "rtspy.drivers.focusd_dummy:main"
+rtspy-sensor-temp = "rtspy.drivers.sensor_temp:main"
+
+# CLI utilities
+rtspy-value = "rtspy.cli.valuetool:main"
+rtspy-grbinfo = "rtspy.cli.grbinfo:main"
+rtspy-queuemanual = "rtspy.cli.queuemanual:main"
+
+# Legacy RTS2 compatibility wrappers (shell scripts)
+# rts2-gcnkafka and rts2-queuer are in rtspy/scripts/
+
+[tool.setuptools]
+packages = [
+    "rtspy",
+    "rtspy.core",
+    "rtspy.drivers",
+    "rtspy.daemons",
+    "rtspy.cli",
+]
+
+[tool.setuptools.package-data]
+rtspy = ["py.typed"]
+"rtspy.scripts" = ["*"]
+
+[tool.black]
+line-length = 100
+target-version = ['py310']
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]

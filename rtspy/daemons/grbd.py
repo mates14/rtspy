@@ -30,12 +30,12 @@ except ImportError:
     logging.warning("gcn-kafka not available. Install with: pip install gcn-kafka")
     GCN_KAFKA_AVAILABLE = False
 
-from constants import ConnectionState, DeviceType
-from device import Device
-from config import DeviceConfig
-from value import (ValueBool, ValueString, ValueInteger, ValueTime, ValueDouble, ValueRaDec)
-from app import App
-from voevent import VoEventParser, GrbTarget
+from rtspy.core.constants import ConnectionState, DeviceType
+from rtspy.core.device import Device
+from rtspy.core.config import DeviceConfig
+from rtspy.core.value import (ValueBool, ValueString, ValueInteger, ValueTime, ValueDouble, ValueRaDec)
+from rtspy.core.app import App
+from rtspy.core.voevent import VoEventParser, GrbTarget
 
 class GcnKafkaConsumer:
     """Handles GCN Kafka message consumption and parsing."""

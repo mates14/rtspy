@@ -10,9 +10,9 @@ import errno
 import math
 import fcntl
 
-from constants import ConnectionState, DeviceType, DevTypes
-from connection import Connection, ConnectionManager, QueuedCommand
-from commands import CommandRegistry, ProtocolCommands, AuthCommands
+from rtspy.core.constants import ConnectionState, DeviceType, DevTypes
+from rtspy.core.connection import Connection, ConnectionManager, QueuedCommand
+from rtspy.core.commands import CommandRegistry, ProtocolCommands, AuthCommands
 
 class NetworkManager:
     """

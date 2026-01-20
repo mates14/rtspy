@@ -18,13 +18,34 @@ The framework is designed to work seamlessly within existing RTS2 installations,
 
 ## Installation
 
+### From PyPI (when published)
+
+```bash
+pip install rtspy
+```
+
+### Development Installation
+
 ```bash
 # Clone the repository
 git clone https://github.com/yourusername/rts2-python.git
-cd rts2-python
+cd rtspy
 
-# Install dependencies
-pip install pyserial psycopg2-binary gcn-kafka
+# Install in development mode
+pip install -e .
+```
+
+### Legacy Installation (for existing deployments)
+
+If you need to use the old flat structure:
+
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/rts2-python.git
+cd rtspy
+
+# Install dependencies manually
+pip install psycopg2-binary gcn-kafka astropy pyserial
 ```
 
 ## Quick Start
@@ -32,8 +53,46 @@ pip install pyserial psycopg2-binary gcn-kafka
 Run the example dummy filter wheel to test the system:
 
 ```bash
-python filterd_dummy.py -d W0 -p 0 --filters "J:H:K:R:G:B"
+# After pip installation, use entry points:
+rtspy-filterd-dummy -d W0 -p 0 --filters "J:H:K:R:G:B"
+
+# Or in development mode without pip install:
+python rtspy/drivers/filterd_dummy.py -d W0 -p 0 --filters "J:H:K:R:G:B"
 ```
+
+## Available Entry Points
+
+After installation with pip, the following commands are available:
+
+**Production Daemons:**
+- `rtspy-grbd` - GRB detection daemon with GCN Kafka interface
+- `rtspy-queue-selector` - Queue-based target selector
+- `rtspy-watcher` - Device monitoring daemon
+
+**Test/Dummy Devices:**
+- `rtspy-filterd-dummy` - Simulated filter wheel
+- `rtspy-focusd-dummy` - Simulated focuser
+- `rtspy-sensor-temp` - Example temperature sensor
+
+**Hardware Drivers:**
+- `rtspy-filterd-ovis` - OVIS spectrograph filter wheel driver
+
+**CLI Utilities:**
+- `rtspy-value` - Get/set device values via network protocol
+- `rtspy-grbinfo` - Query GRB information from database
+- `rtspy-queuemanual` - Manual queue management
+
+**Legacy RTS2 Wrappers:**
+- `rts2-gcnkafka` - Daemon wrapper for rtspy-grbd (shell script in rtspy/scripts/)
+- `rts2-queuer` - Daemon wrapper for rtspy-queue-selector (shell script in rtspy/scripts/)
+
+All commands support `--help` for detailed usage information.
+
+## Experimental Code
+
+The `experimental/` directory contains work-in-progress components that are not included in the package:
+- `teld/` - Telescope drivers (incomplete)
+- `imgprocd*.py` - Image processing daemon variants (experimental)
 
 ## Architecture
 

@@ -16,10 +16,10 @@ import math
 from typing import Dict, Any, Optional, Callable
 from abc import ABC, abstractmethod
 
-from device import Device
-from config import DeviceConfig
-from constants import DeviceType
-from value import ValueDouble, ValueBool, ValueString, ValueInteger, ValueSelection
+from rtspy.core.device import Device
+from rtspy.core.config import DeviceConfig
+from rtspy.core.constants import DeviceType
+from rtspy.core.value import ValueDouble, ValueBool, ValueString, ValueInteger, ValueSelection
 
 
 class FocuserMixin(DeviceConfig):

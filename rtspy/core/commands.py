@@ -1,6 +1,6 @@
 import logging
 from typing import List, Any, Tuple
-from constants import ConnectionState, DevTypes
+from rtspy.core.constants import ConnectionState, DevTypes
 
 class CommandRegistry:
     """

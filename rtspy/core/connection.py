@@ -6,7 +6,7 @@ import queue
 from enum import IntEnum
 from typing import Dict, Any, Callable, Optional, Union, Tuple, List
 
-from constants import ConnectionState
+from rtspy.core.constants import ConnectionState
 
 class QueuedCommand:
     """Represents a command queued for execution."""
