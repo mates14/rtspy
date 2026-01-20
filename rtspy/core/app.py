@@ -23,7 +23,7 @@ class RTS2LogFormatter(logging.Formatter):
         }
 
         # Get the device name from the Device singleton if available
-        from device import Device
+        from rtspy.core.device import Device
         device = Device.get_instance()
         device_name = getattr(device, 'device_name', 'UNKNOWN') if device else 'UNKNOWN'
 

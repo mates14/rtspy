@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from functools import wraps
 import threading
 
-#from device import Device
+#from rtspy.core.device import Device
 
 # Keep the existing flags for compatibility
 class ValueType(IntFlag):
@@ -125,7 +125,7 @@ class Value(Generic[T]):
         self._callbacks = Callback()
 
         # Register with device for network and queuing
-        from device import Device
+        from rtspy.core.device import Device
         device = Device.get_instance()  # Singleton device
 
         # immediately register the value for network distribution
@@ -160,7 +160,7 @@ class Value(Generic[T]):
             True if value was set immediately, False if it was queued
         """
         # Get singleton device
-        from device import Device
+        from rtspy.core.device import Device
         device = Device.get_instance()
 
         # Check if we should queue (only for non-network updates)
@@ -221,7 +221,7 @@ class Value(Generic[T]):
             self._callbacks.trigger(self, old_value, new_value, from_client=True)
 
             # Get device instance to notify about value change
-            from device import Device
+            from rtspy.core.device import Device
             device = Device.get_instance()
             if device:
                 # Notify device about client-originated value change
@@ -821,7 +821,7 @@ class ValueSelection(Value[int]):
             self.changed()
 
             # Get device instance to notify about value change
-            from device import Device
+            from rtspy.core.device import Device
             device = Device.get_instance()
             if device:
                 # Notify device about client-originated value change

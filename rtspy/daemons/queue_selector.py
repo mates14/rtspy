@@ -831,8 +831,8 @@ class QueueSelector(Device, DeviceConfig):
                 logging.debug(f"Setting expected executor target to {target_id}")
 
             # Find executor connection using device type (more reliable than name)
-            from constants import DeviceType
-            from netman import ConnectionState
+            from rtspy.core.constants import DeviceType
+            from rtspy.core.netman import ConnectionState
 
             executor_conn = None
             for conn in self.network.connection_manager.connections.values():

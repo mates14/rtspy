@@ -766,7 +766,7 @@ class NetworkManager:
                 conn.send(msg)
 
                 # Handle selection values specially
-                from value import ValueSelection
+                from rtspy.core.value import ValueSelection
                 if isinstance(value, ValueSelection):
                     # First send empty selection to clear any existing values
                     conn.send(f"F \"{value.name}\"\n")
