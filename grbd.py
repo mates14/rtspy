@@ -352,7 +352,7 @@ class GrbDaemon(Device, DeviceConfig):
         # === PERFORMANCE METRICS ===
         self.processing_time_avg = ValueDouble("processing_time_avg", "Average message processing time [ms]")
         self.database_time_avg = ValueDouble("database_time_avg", "Average database operation time [ms]")
-        self.queue_size = ValueInteger("queue_size", "Current message queue size")
+        self.gcn_queue_size = ValueInteger("gcn_queue_size", "Current GCN message queue size")
 
         # === OPERATIONAL STATUS ===
         self.status_message = ValueString("status", "Current daemon status")
