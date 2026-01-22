@@ -70,10 +70,10 @@ rtspy-filterd-ovis = "rtspy.drivers.filterd_ovis:main"
 rtspy-focusd-dummy = "rtspy.drivers.focusd_dummy:main"
 rtspy-sensor-temp = "rtspy.drivers.sensor_temp:main"
 
-# CLI utilities
-rtspy-value = "rtspy.cli.valuetool:main"
-rtspy-grbinfo = "rtspy.cli.grbinfo:main"
-rtspy-queuemanual = "rtspy.cli.queuemanual:main"
+# CLI utilities (using rts2- prefix for ecosystem integration)
+rts2-value = "rtspy.cli.valuetool:main"
+rts2-grbinfo = "rtspy.cli.grbinfo:main"
+rts2-queue-manual = "rtspy.cli.queuemanual:main"
 
 # Legacy RTS2 compatibility wrappers (shell scripts)
 # rts2-gcnkafka and rts2-queuer are in rtspy/scripts/
