@@ -35,6 +35,27 @@ cd rtspy
 pip install -e .
 ```
 
+### Recommended Installation for Ubuntu/Debian Systems
+
+For better system stability, it's recommended to use system packages instead of pip auto-installing dependencies. This prevents conflicts with system-managed Python packages:
+
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/rts2-python.git
+cd rtspy
+
+# First, install dependencies via apt (preferred on Ubuntu/Debian)
+sudo apt install python3-psycopg2 python3-astropy python3-serial
+
+# Install rtspy without auto-installing dependencies
+pip install -e . --no-deps --break-system-packages
+
+# Install remaining dependencies not available via apt
+pip install gcn-kafka --break-system-packages
+```
+
+This approach prioritizes system packages, which are better integrated with your OS and less likely to cause version conflicts.
+
 ### Legacy Installation (for existing deployments)
 
 If you need to use the old flat structure:
@@ -78,13 +99,16 @@ After installation with pip, the following commands are available:
 - `rtspy-filterd-ovis` - OVIS spectrograph filter wheel driver
 
 **CLI Utilities:**
-- `rtspy-value` - Get/set device values via network protocol
-- `rtspy-grbinfo` - Query GRB information from database
-- `rtspy-queuemanual` - Manual queue management
+- `rts2-value` - Get/set device values via network protocol
+- `rts2-grbinfo` - Query GRB information from database
+- `rts2-queue-manual` - Manual queue management
 
-**Legacy RTS2 Wrappers:**
-- `rts2-gcnkafka` - Daemon wrapper for rtspy-grbd (shell script in rtspy/scripts/)
-- `rts2-queuer` - Daemon wrapper for rtspy-queue-selector (shell script in rtspy/scripts/)
+**RTS2 Ecosystem Integration (Shell Wrappers):**
+- `rts2-gcnkafka` - Daemon wrapper for rtspy-grbd
+- `rts2-queuer` - Daemon wrapper for rtspy-queue-selector
+- `rts2-filterd-ovis` - Daemon wrapper for rtspy-filterd-ovis
+
+These wrappers provide daemon management (forking, PID files) compatible with rts2-start/rts2-stop.
 
 All commands support `--help` for detailed usage information.
 
