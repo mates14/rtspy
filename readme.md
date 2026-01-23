@@ -45,16 +45,17 @@ git clone https://github.com/yourusername/rts2-python.git
 cd rtspy
 
 # First, install dependencies via apt (preferred on Ubuntu/Debian)
-sudo apt install python3-psycopg2 python3-astropy python3-serial
+sudo apt install python3-psycopg2 python3-astropy python3-serial \
+                 python3-certifi python3-confluent-kafka
 
 # Install rtspy without auto-installing dependencies
 pip install -e . --no-deps --break-system-packages
 
-# Install remaining dependencies not available via apt
+# Install remaining dependencies not available via apt (or if apt versions are too old)
 pip install gcn-kafka --break-system-packages
 ```
 
-This approach prioritizes system packages, which are better integrated with your OS and less likely to cause version conflicts.
+This approach prioritizes system packages, which are better integrated with your OS and less likely to cause version conflicts. Note that `confluent_kafka` in particular can cause issues when pip-installed, so using the apt package `python3-confluent-kafka` is highly recommended.
 
 ### Legacy Installation (for existing deployments)
 
