@@ -17,7 +17,7 @@ import argparse
 import logging
 import glob
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import asyncio
 
 from astropy.io import fits
@@ -114,7 +114,7 @@ class ImageValidator:
     """Validate FITS images before processing."""
     
     @staticmethod
-    def validate_fits(image_path: str) -> tuple[bool, str]:
+    def validate_fits(image_path: str) -> Tuple[bool, str]:
         """Validate a FITS file for processing readiness."""
         try:
             with fits.open(image_path) as hdul:

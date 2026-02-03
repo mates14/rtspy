@@ -7,7 +7,7 @@ name = "rtspy"
 version = "0.1.0"
 description = "Python implementation of RTS2 (Remote Telescope System) device drivers and daemons"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.8"
 license = {text = "GNU General Public License v3.0"}
 authors = [
     {name = "Martin Jelínek", email = "martin.jelinek@asu.cas.cz"},
