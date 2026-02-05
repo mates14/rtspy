@@ -331,9 +331,9 @@ class GrbDaemon(Device, DeviceConfig):
         self.last_swift_trigger = ValueString("last_swift_trigger", "Last Swift trigger ID")
         self.last_swift_coords = ValueRaDec("last_swift_coords", "Last Swift position")
 
-        self.last_maxi_time = ValueTime("last_maxi", "Time of last MAXI alert")
-        self.last_maxi_trigger = ValueString("last_maxi_trigger", "Last MAXI trigger ID")
-        self.last_maxi_coords = ValueRaDec("last_maxi_coords", "Last MAXI position")
+        self.last_svom_time = ValueTime("last_svom", "Time of last SVOM alert")
+        self.last_svom_trigger = ValueString("last_svom_trigger", "Last SVOM trigger ID")
+        self.last_svom_coords = ValueRaDec("last_svom_coords", "Last SVOM position")
 
         self.last_icecube_time = ValueTime("last_icecube", "Time of last IceCube alert")
         self.last_icecube_trigger = ValueString("last_icecube_trigger", "Last IceCube event ID")
@@ -399,10 +399,6 @@ class GrbDaemon(Device, DeviceConfig):
 
         elif mission == 'MAXI':
             self.maxi_alerts.value += 1
-            self.last_maxi_time.value = current_time
-            self.last_maxi_trigger.value = grb_info.grb_id
-            if self._is_valid_coordinates(grb_info.ra, grb_info.dec):
-                self.last_maxi_coords.value = (grb_info.ra, grb_info.dec)
 
         elif mission == 'ICECUBE':
             self.icecube_alerts.value += 1
@@ -417,6 +413,13 @@ class GrbDaemon(Device, DeviceConfig):
             self.last_ep_trigger.value = grb_info.grb_id
             if self._is_valid_coordinates(grb_info.ra, grb_info.dec):
                 self.last_ep_coords.value = (grb_info.ra, grb_info.dec)
+
+        elif mission == 'SVOM':
+            self.svom_alerts.value += 1
+            self.last_svom_time.value = current_time
+            self.last_svom_trigger.value = grb_info.grb_id
+            if self._is_valid_coordinates(grb_info.ra, grb_info.dec):
+                self.last_svom_coords.value = (grb_info.ra, grb_info.dec)
 
         else:
             self.other_alerts.value += 1
