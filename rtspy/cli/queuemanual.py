@@ -197,7 +197,7 @@ def get_target_duration_from_db(db_config, target_id):
 def sync_qid_sequence(cursor):
     """Ensure qid sequence is in sync with the actual data."""
     try:
-        cursor.execute("SELECT setval('qid', (SELECT COALESCE(MAX(qid), 0) FROM queues_targets));")
+        cursor.execute("SELECT setval('qid', GREATEST((SELECT COALESCE(MAX(qid), 0) FROM queues_targets), 1));")
     except Exception as e:
         print(f"Warning: Could not sync qid sequence: {e}")
 
