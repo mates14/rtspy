@@ -57,7 +57,7 @@ class QueueSelector(Device, DeviceConfig):
     # Default configuration
     DEFAULT_CONFIG = {
         'time_slice': 300,           # Seconds before target start to issue 'next'
-        'grb_grace_period': 1200,    # Grace period duration (seconds)
+        'grb_grace_period': 3600,    # Grace period duration (seconds)
         'update_interval': 5,        # Selector loop interval (seconds)
         'executor': 'EXEC',          # Executor device name
     }
