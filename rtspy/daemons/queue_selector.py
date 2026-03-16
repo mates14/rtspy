@@ -92,6 +92,10 @@ class QueueSelector(Device, DeviceConfig):
         config.add_argument('--executor', default='EXEC',
                           help='Executor device name')
 
+        # Idle target
+        config.add_argument('--idle-target', type=int, default=4,
+                          help='Target ID to execute when queue is empty (default: 4 = pointing model scan, -1 to disable)')
+
     def apply_config(self, config):
         """Apply configuration and initialize selector."""
         super().apply_config(config)
@@ -119,8 +123,9 @@ class QueueSelector(Device, DeviceConfig):
         self.update_interval = config.get('update_interval')
         self.executor_name = config.get('executor')
 
-        # Initialize networked time_slice value with command-line config
+        # Initialize networked values with command-line config
         self.time_slice_value.value = self.time_slice
+        self.idle_target.value = config.get('idle_target')
 
         # Runtime state
         self.db_conn = None
@@ -148,6 +153,7 @@ class QueueSelector(Device, DeviceConfig):
         self.queue_size = ValueInteger("queue_size", "Number of targets in scheduler queue", initial=0)
         self.current_queue = ValueString("current_queue", "Currently active queue name", initial="")
         self.next_target = ValueInteger("next_target", "Next target to observe", initial=-1)
+        self.idle_target = ValueInteger("idle_target", "Target to execute when queue is empty (-1 to disable)", writable=True, initial=4)
         self.system_state_desc = ValueString("system_state", "Current system state description", initial="unknown")
         self.grb_grace_active = ValueBool("grb_grace_active", "GRB grace period active", writable=True, initial=False)
         self.grb_grace_until = ValueTime("grb_grace_until", "GRB grace period end time", initial=0.0)
@@ -392,7 +398,18 @@ class QueueSelector(Device, DeviceConfig):
                     if self.next_target.value != -1:
                         self.next_target.value = -1
                         self.current_queue.value = ""
-                    logging.debug("No target selected")
+
+                    # If nothing is scheduled for right now, switch to idle target
+                    idle_id = self.idle_target.value
+                    if current_target is None and idle_id >= 0:
+                        if self.executor_current_target.value != idle_id:
+                            logging.info(f"Queue empty - issuing idle target {idle_id}")
+                            self._send_executor_command(f"now {idle_id}")
+                            self.next_target.value = idle_id
+                            self.current_queue.value = "idle"
+                    else:
+                        logging.debug("No target selected")
+
                     sleep_time = self.update_interval
 
                 time.sleep(sleep_time)
