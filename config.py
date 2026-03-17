@@ -106,7 +106,7 @@ class DeviceConfigRegistry:
         # Network arguments
         self.add_argument('-P', '--port', type=int, default=0,
                          help='TCP/IP port for RTS2 communication', section='network')
-        self.add_argument('-c', '--centrald', default='localhost',
+        self.add_argument('-c', '--server', default='localhost',
                          help='Centrald hostname', section='network')
         self.add_argument('-p', '--centrald-port', type=int, default=617,
                          help='Centrald port', section='network')
