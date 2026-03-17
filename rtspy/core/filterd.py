@@ -12,10 +12,10 @@ import logging
 from typing import Dict, Any, List, Optional
 from abc import ABC, abstractmethod
 
-from device import Device
-from config import DeviceConfig
-from constants import DeviceType
-from value import ValueSelection, ValueInteger, ValueString, ValueTime
+from rtspy.core.device import Device
+from rtspy.core.config import DeviceConfig
+from rtspy.core.constants import DeviceType
+from rtspy.core.value import ValueSelection, ValueInteger, ValueString, ValueTime
 
 
 class FilterMixin(DeviceConfig):

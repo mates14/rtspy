@@ -1,0 +1,77 @@
+#!/bin/bash
+
+# rts2-queuer - Sample wrapper script for rtspy Python daemon
+#
+# This wrapper makes Python-based rtspy queue_selector.py compatible with 
+# the original C++ RTS2 daemon management system. It provides:
+#
+# - Proper lock file creation in /var/run/rts2_{device_name} with correct PID
+# - Integration with rts2-start/rts2-stop commands  
+# - Prevention of multiple instances for the same device
+# - Standard RTS2 daemon forking behavior
+#
+# The script extracts device name from -d parameter and manages the daemon
+# lifecycle to match native RTS2 component behavior.
+
+# Extract device name from -d parameter
+DEVICE_NAME=""
+ARGS=("$@")
+for ((i=0; i<${#ARGS[@]}; i++)); do
+    if [[ "${ARGS[i]}" == "-d" && $((i+1)) -lt ${#ARGS[@]} ]]; then
+        DEVICE_NAME="${ARGS[$((i+1))]}"
+        break
+    fi
+done
+
+if [[ -z "$DEVICE_NAME" ]]; then
+    echo "Error: Device name not specified with -d parameter" >&2
+    exit 1
+fi
+
+LOCK_FILE="/var/run/rts2_${DEVICE_NAME}"
+LOG_FILE="${RTS2_LOG_FILE:-/home/mates/rtspy.log}"
+PYTHON_SCRIPT="rtspy-queue-selector"
+RUN_USER="mates"
+
+# Check if already running
+if [[ -f "$LOCK_FILE" ]]; then
+    PID=$(cat "$LOCK_FILE" 2>/dev/null)
+    if [[ -n "$PID" ]] && kill -0 "$PID" 2>/dev/null; then
+        echo "rts2-queuer already running (PID: $PID)" >&2
+        exit 1
+    else
+        # Stale lock file
+        rm -f "$LOCK_FILE"
+    fi
+fi
+
+# Create lock file directory if it doesn't exist
+mkdir -p "$(dirname "$LOCK_FILE")"
+
+# Start the process in background without pipe (to get correct PID)
+sudo -u "$RUN_USER" nohup "$PYTHON_SCRIPT" "$@" >> "$LOG_FILE" 2>&1 &
+SUDO_PID=$!
+
+# Wait a moment for the process to start
+sleep 0.5
+
+# Find the actual Python process PID (child of sudo)
+DAEMON_PID=$(pgrep -P "$SUDO_PID" -f "$PYTHON_SCRIPT")
+
+if [[ -z "$DAEMON_PID" ]]; then
+    echo "Error: Could not find Python daemon process" >&2
+    exit 1
+fi
+
+# Write Python PID to lock file
+echo "$DAEMON_PID" > "$LOCK_FILE"
+
+# Disown the process so it continues after shell exits
+disown
+
+echo "Started rts2-$DEVICE_NAME (PID: $DAEMON_PID)"
+
+# it started like this :-):
+#!/bin/bash
+#sudo -u mates nohup /home/mates/rtspy/queue_selector.py $* 2>&1 | tee -a /home/mates/rtspy.log &
+

@@ -6,7 +6,7 @@ import queue
 from enum import IntEnum
 from typing import Dict, Any, Callable, Optional, Union, Tuple, List
 
-from constants import ConnectionState
+from rtspy.core.constants import ConnectionState
 
 class QueuedCommand:
     """Represents a command queued for execution."""
@@ -132,7 +132,7 @@ class Connection:
         self.state = new_state
 
         # Update descriptive name if info might have changed
-        from netman import NetworkManager
+        from rtspy.core.netman import NetworkManager
         net_manager = NetworkManager._instance if hasattr(NetworkManager, '_instance') else None
         if net_manager:
             net_manager.update_connection_name(self)

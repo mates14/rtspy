@@ -11,10 +11,10 @@ import fcntl
 import math
 from dataclasses import dataclass
 
-from value import ValueTime
-from netman import NetworkManager
-from config import DeviceConfig
-from constants import DeviceType
+from rtspy.core.value import ValueTime
+from rtspy.core.netman import NetworkManager
+from rtspy.core.config import DeviceConfig
+from rtspy.core.constants import DeviceType
 
 
 class Device(DeviceConfig):
@@ -212,7 +212,7 @@ class Device(DeviceConfig):
     def _on_centrald_connected(self, conn_id):
         """Called when a centrald connection is established and authenticated."""
         # Now we can send our status and metadata
-        logging.debug("Connected to centrald, sending device status")
+        logging.info("Connected to centrald")
 
         # Send state after connection
         # This should match the C++ behavior
@@ -467,7 +467,7 @@ class DeviceCommands:
                 self.network.info_callback()
 
             self.network.values['infotime']._value = time.time()
-            logging.info(f"{self.network.values}")
+            logging.debug(f"DeviceCommands::handle_info() network.values:{self.network.values}")
 
             # Send all values
             with self.network._lock:

@@ -1,6 +1,6 @@
 import logging
 from typing import List, Any, Tuple
-from constants import ConnectionState, DevTypes
+from rtspy.core.constants import ConnectionState, DevTypes
 
 class CommandRegistry:
     """
@@ -311,8 +311,13 @@ class ProtocolCommands:
             key = f"{conn.remote_device_name}.{value_name}"
 
             if hasattr(self.network_manager, 'value_interests') and key in self.network_manager.value_interests:
-                # Call the registered callback with the value
-                self.network_manager.value_interests[key](value_data)
+                # Call the registered callback with context dictionary
+                context = {
+                    'device': conn.remote_device_name,
+                    'value': value_name,
+                    'data': value_data
+                }
+                self.network_manager.value_interests[key](context)
 
         # Value commands don't expect response
         conn.command_in_progress = False
@@ -429,6 +434,21 @@ class ProtocolCommands:
             port = int(parts[4])
             device_type = int(parts[5]) if len(parts) > 5 else -1
 
+            # Remove any existing entity with the same device name (device names must be unique)
+            # This handles the case where a device restarts with a new centrald_id
+            entity_id_to_remove = None
+            for eid, entity in self.network_manager.entities.items():
+                if (entity.get('entity_type') == 'DEVICE' and
+                    entity.get('name') == device_name and
+                    eid != centrald_id):
+                    entity_id_to_remove = eid
+                    old_port = entity.get('port', 'unknown')
+                    logging.debug(f"Removing stale entity for {device_name} (old ID: {eid}, old port: {old_port})")
+                    break
+
+            if entity_id_to_remove is not None:
+                del self.network_manager.entities[entity_id_to_remove]
+
             # Store in global registry
             self.network_manager.entities[centrald_id] = {
                 'name': device_name,
@@ -441,6 +461,11 @@ class ProtocolCommands:
             }
 
             logging.debug(f"Registered device: {device_name} (ID: {centrald_id}, type: {device_type})")
+
+            # If we're interested in this device, reset retry state for immediate reconnection
+            if device_name in self.network_manager.pending_interests:
+                self.network_manager.device_connection_attempts[device_name] = (0, 0, 0)
+                logging.debug(f"Device {device_name} reappeared, resetting retry state for immediate reconnection")
 
         except Exception as e:
             logging.warning(f"Error processing device info: {e}")
@@ -592,11 +617,7 @@ class AuthCommands:
             logging.debug(f"authorize request to {centrald_conn.name} for device {device_id}, key {key}")
 
             # Always queue the command - authorization is not time-critical
-            success = centrald_conn.send_command(
-                f"authorize {device_id} {key}",
-                callback=None,
-                queue_if_busy=True  # Always queue
-            )
+            success = centrald_conn.send_command(f"authorize {device_id} {key}")
 
             if not success:
                 logging.warning(f"Failed to queue authorize command for device {device_id}")

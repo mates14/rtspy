@@ -10,9 +10,9 @@ import errno
 import math
 import fcntl
 
-from constants import ConnectionState, DeviceType, DevTypes
-from connection import Connection, ConnectionManager, QueuedCommand
-from commands import CommandRegistry, ProtocolCommands, AuthCommands
+from rtspy.core.constants import ConnectionState, DeviceType, DevTypes
+from rtspy.core.connection import Connection, ConnectionManager, QueuedCommand
+from rtspy.core.commands import CommandRegistry, ProtocolCommands, AuthCommands
 
 class NetworkManager:
     """
@@ -80,9 +80,11 @@ class NetworkManager:
         # Interest tracking
         self.value_interests = {}  # "device_name.value_name" -> callback
         self.state_interests = {}  # device_name -> callback
+        self.connection_state_callbacks = {}  # device_name -> callback(device_name, connected: bool)
         self.pending_interests = set()  # Set of device names we're interested in
-        self.connection_retry_interval = 30.0  # seconds between connection attempts
-        self.device_connection_attempts = {}  # device_name -> last_attempt_time
+        self.device_connection_attempts = {}  # device_name -> (last_attempt_time, retry_count, last_error_logged_time)
+        self.min_retry_interval = 5.0  # Start with 5 seconds
+        self.max_retry_interval = 300.0  # Cap at 5 minutes
 
         # Register standard command handlers
         self._register_command_handlers()
@@ -190,9 +192,14 @@ class NetworkManager:
                             break
 
                     if device_found and device_info:
-                        # Check if we've attempted to connect recently
-                        last_attempt = self.device_connection_attempts.get(device_name, 0)
-                        if current_time - last_attempt < self.connection_retry_interval:
+                        # Check if we've attempted to connect recently with exponential backoff
+                        attempt_info = self.device_connection_attempts.get(device_name, (0, 0, 0))
+                        last_attempt, retry_count, last_error_logged = attempt_info
+
+                        # Calculate retry interval with exponential backoff
+                        retry_interval = min(self.min_retry_interval * (2 ** retry_count), self.max_retry_interval)
+
+                        if current_time - last_attempt < retry_interval:
                             continue
 
                         # Try to connect to the device
@@ -201,7 +208,8 @@ class NetworkManager:
 
                         if host and port and centrald_conn.auth_key is not None:
                             logging.info(f"Establishing connection to device {device_name} at {host}:{port}")
-                            self.device_connection_attempts[device_name] = current_time
+                            # Update attempt time but keep retry count (will be reset on success or incremented on failure)
+                            self.device_connection_attempts[device_name] = (current_time, retry_count, last_error_logged)
 
                             # Connect to the device
                             self._connect_to_device(host, port, device_name)
@@ -414,6 +422,47 @@ class NetworkManager:
 
     def _on_connection_closed(self, conn_id):
         """Handle a connection being closed."""
+        # Get connection info before removing it
+        conn = self.connection_manager.get_connection(conn_id)
+        if conn and hasattr(conn, 'remote_device_name') and conn.remote_device_name:
+            device_name = conn.remote_device_name
+
+            # Track if this was an established connection
+            was_established = (conn.state == ConnectionState.AUTH_OK or
+                             conn.state == ConnectionState.AUTH_PENDING or
+                             conn.state == ConnectionState.CONNECTED)
+
+            # Notify connection state callbacks if there's one registered
+            if device_name in self.connection_state_callbacks and was_established:
+                try:
+                    self.connection_state_callbacks[device_name](device_name, False)
+                    logging.debug(f"Notified callback of {device_name} disconnection")
+                except Exception as e:
+                    logging.error(f"Error in connection state callback for {device_name}: {e}")
+
+            # Only reset if this was a successful connection that closed (not a failed connection attempt)
+            # Check if connection was authenticated - that means it was established successfully
+            if conn.state == ConnectionState.AUTH_OK or conn.state == ConnectionState.AUTH_PENDING:
+                # Reset retry count to allow immediate reconnection when device reappears
+                self.device_connection_attempts[device_name] = (0, 0, 0)
+                logging.info(f"Device {device_name} disconnected, ready for immediate reconnection")
+            else:
+                # Connection failed before auth - increment retry count for exponential backoff
+                attempt_info = self.device_connection_attempts.get(device_name, (0, 0, 0))
+                last_attempt, retry_count, last_error_logged = attempt_info
+                new_retry_count = retry_count + 1
+
+                # Calculate next retry interval for logging
+                next_retry_interval = min(self.min_retry_interval * (2 ** new_retry_count), self.max_retry_interval)
+
+                # Only log error if enough time has passed since last error log (avoid spam)
+                current_time = time.time()
+                if current_time - last_error_logged > 30.0 or last_error_logged == 0:
+                    logging.warning(f"Device {device_name} connection failed (retry #{new_retry_count}), next attempt in {next_retry_interval:.0f}s")
+                    last_error_logged = current_time
+
+                self.device_connection_attempts[device_name] = (time.time(), new_retry_count, last_error_logged)
+
         # Remove from connection manager
         self.connection_manager.remove_connection(conn_id)
 
@@ -422,12 +471,28 @@ class NetworkManager:
         # Check socket error status
         err = conn.socket.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
         if err != 0:
-            logging.error(f"Socket error connecting to {conn.name}: {os.strerror(err)}")
+            # Check retry count to determine log level
+            device_name = getattr(conn, 'remote_device_name', None)
+            if device_name and device_name in self.device_connection_attempts:
+                _, retry_count, last_error_logged = self.device_connection_attempts[device_name]
+                # Only log at ERROR level on first failure, subsequent failures logged in _on_connection_closed
+                if retry_count == 0:
+                    logging.error(f"Socket error connecting to {conn.name}: {os.strerror(err)}")
+                else:
+                    logging.debug(f"Socket error connecting to {conn.name}: {os.strerror(err)}")
+            else:
+                logging.error(f"Socket error connecting to {conn.name}: {os.strerror(err)}")
             conn.close()
             return
 
-        # Connection successful
+        # Connection successful - reset retry count for this device
         conn.update_state(ConnectionState.CONNECTED, "Connection established")
+
+        # Reset retry count since connection was successful
+        device_name = getattr(conn, 'remote_device_name', None)
+        if device_name and device_name in self.device_connection_attempts:
+            self.device_connection_attempts[device_name] = (0, 0, 0)
+            logging.debug(f"Connection to {device_name} established, reset retry count")
 
         # For centrald connections, send registration
         if conn.type == 'centrald' and not getattr(conn, 'registration_sent', False):
@@ -444,10 +509,16 @@ class NetworkManager:
             centrald_conn = self.connection_manager.get_associated_centrald_connection()
             if centrald_conn and hasattr(centrald_conn, 'auth_key') and centrald_conn.auth_key:
                 conn.registration_sent = True
-
+                # Find the target device's centrald_num from entities
+                target_centrald_num = 0  # default
+                if hasattr(conn, 'remote_device_name'):
+                    for entity in self.entities.values():
+                        if entity.get('name') == conn.remote_device_name:
+                            target_centrald_num = entity.get('centrald_num', 0)
+                            break
                 # Send auth command with our device ID and auth key from centrald
-                auth_cmd = f"auth {centrald_conn.device_id} {centrald_conn.centrald_num} {centrald_conn.auth_key}"
-                conn.send_command(auth_cmd)
+                auth_cmd = f"auth {centrald_conn.device_id} {target_centrald_num} {centrald_conn.auth_key}"
+                conn.send_command(auth_cmd, self._complete_device_authorization)
                 conn.update_state(ConnectionState.AUTH_PENDING, "Authentication sent to device")
             else:
                 logging.error("Cannot authenticate to device: missing centrald connection or auth key")
@@ -695,7 +766,7 @@ class NetworkManager:
                 conn.send(msg)
 
                 # Handle selection values specially
-                from value import ValueSelection
+                from rtspy.core.value import ValueSelection
                 if isinstance(value, ValueSelection):
                     # First send empty selection to clear any existing values
                     conn.send(f"F \"{value.name}\"\n")
@@ -924,6 +995,22 @@ class NetworkManager:
         # Use the connection's send_command method
         return conn.send_command(command, callback)
 
+    def _complete_device_authorization(self, conn, success, status_code, status_msg):
+        """Handle device authentication response."""
+        if success and "authorized" in status_msg:
+            logging.debug(f"Device authentication successful for {conn.name}")
+            conn.update_state(ConnectionState.AUTH_OK, "Authorization complete")
+
+            # Notify connection state callbacks
+            if hasattr(conn, 'remote_device_name') and conn.remote_device_name in self.connection_state_callbacks:
+                try:
+                    self.connection_state_callbacks[conn.remote_device_name](conn.remote_device_name, True)
+                except Exception as e:
+                    logging.error(f"Error in connection state callback: {e}")
+        else:
+            logging.error(f"Device authentication failed for {conn.name}: {status_code} {status_msg}")
+            conn.close()
+
     def _complete_client_authorization(self, conn):
         """Complete client authorization process."""
         logging.debug(f"Authorizing client {conn.name} (ID: {conn.device_id})")
@@ -1030,10 +1117,19 @@ class NetworkManager:
         # Add to pending interests to ensure connection is established
         self.pending_interests.add(device_name)
 
+        # CENTRALD QUIRK: centrald sends all values immediately after 'register'
+        # command, before authentication completes. For centrald only, we allow
+        # state callbacks on CONNECTED connections to catch this initial flood.
+        # This is a workaround for centrald's design, not a security feature.
+        #
+        # And just to make sure, I will simply allow it for all connections, it
+        # makes no harm anyway so there is ConnectionState.CONNECTED instead of
+        # ConnectionState.AUTH_OK
+
         # Check if we already have a connection to this device
         device_connected = False
         for conn in self.connection_manager.connections.values():
-            if (conn.state == ConnectionState.AUTH_OK and
+            if (conn.state >= ConnectionState.CONNECTED and
                 hasattr(conn, 'remote_device_name') and
                 conn.remote_device_name == device_name):
                 device_connected = True
@@ -1054,6 +1150,20 @@ class NetworkManager:
 
         if not device_connected:
             logging.info(f"No connection to {device_name} yet - waiting for centrald updates")
+
+    def register_connection_state_callback(self, device_name, callback):
+        """
+        Register callback for device connection state changes.
+
+        Args:
+            device_name: Name of the device to monitor
+            callback: Callback function(device_name, connected: bool)
+        """
+        self.connection_state_callbacks[device_name] = callback
+        logging.debug(f"Registered connection state callback for {device_name}")
+
+        # Add to pending interests to ensure connection is established
+        self.pending_interests.add(device_name)
 
     def handle_value_change_request(self, conn, value_name, value_data):
         """

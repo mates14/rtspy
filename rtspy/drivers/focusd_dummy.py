@@ -12,9 +12,9 @@ import math
 import threading
 from typing import Dict, Any, Optional
 
-from focusd import Focusd
-from value import ValueDouble, ValueInteger
-from app import App
+from rtspy.core.focusd import Focusd
+from rtspy.core.value import ValueDouble, ValueInteger
+from rtspy.core.app import App
 
 
 class DummyFocuser(Focusd):
