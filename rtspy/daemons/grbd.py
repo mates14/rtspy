@@ -60,12 +60,12 @@ class GcnKafkaConsumer:
         # Topics to subscribe to for GRB alerts and pointing directions
         self.topics = [
             # GRB coordinate topics
-                    'gcn.classic.voevent.FERMI_GBM_ALERT',
-                    'gcn.classic.voevent.FERMI_GBM_FIN_POS',
-                    'gcn.classic.voevent.FERMI_GBM_FLT_POS',
+#                    'gcn.classic.voevent.FERMI_GBM_ALERT',
+#                    'gcn.classic.voevent.FERMI_GBM_FIN_POS',
+#                    'gcn.classic.voevent.FERMI_GBM_FLT_POS',
 #                    'gcn.classic.voevent.FERMI_GBM_POS_TEST',
-                    'gcn.classic.voevent.FERMI_GBM_GND_POS',
-                    'gcn.classic.voevent.FERMI_GBM_SUBTHRESH',
+#                    'gcn.classic.voevent.FERMI_GBM_GND_POS',
+#                    'gcn.classic.voevent.FERMI_GBM_SUBTHRESH',
                     'gcn.classic.voevent.MAXI_UNKNOWN',
                     'gcn.classic.voevent.SWIFT_BAT_GRB_POS_ACK',
                     'gcn.classic.voevent.SWIFT_BAT_QL_POS',
