@@ -38,6 +38,7 @@ classifiers = [
 
 dependencies = [
     "psycopg2-binary>=2.9.0",
+    "pyyaml>=6.0",
     "gcn-kafka>=0.3.0",
     "astropy>=5.0",
     "pyserial>=3.4",
@@ -74,6 +75,7 @@ rtspy-sensor-temp = "rtspy.drivers.sensor_temp:main"
 rts2-value = "rtspy.cli.valuetool:main"
 rts2-grbinfo = "rtspy.cli.grbinfo:main"
 rts2-queue-manual = "rtspy.cli.queuemanual:main"
+rts2-addtarget = "rtspy.cli.addtarget:main"
 
 # Legacy RTS2 compatibility wrappers (shell scripts)
 # rts2-gcnkafka and rts2-queuer are in rtspy/scripts/
