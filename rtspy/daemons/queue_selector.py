@@ -368,8 +368,12 @@ class QueueSelector(Device, DeviceConfig):
 
                 # First check if currently running target is correct (NOW mode)
                 current_target = self._select_current_target()
-                if current_target and self.executor_current_target.value != current_target.tar_id:
-                    # Wrong target running or no target running - issue NOW command
+                if (current_target
+                        and self.executor_current_target.value != current_target.tar_id
+                        and self.executor_current_target.value != self.expected_executor_target.value):
+                    # Wrong target running or no target running - issue NOW command.
+                    # Skip if executor is already running our expected target: this happens when
+                    # we sent 'next T2' and executor transitioned to T2 before T1's window expired.
                     logging.info(f"Current executor target {self.executor_current_target.value} != expected {current_target.tar_id} - issuing NOW")
                     command = f"now {current_target.tar_id}"
                     self._send_executor_command(command)
@@ -383,7 +387,7 @@ class QueueSelector(Device, DeviceConfig):
                 target, time_until_action = self._select_next_target()
 
                 if target:
-                    logging.info(f"Selected target: {target}")
+                    logging.debug(f"Selected target: {target}")
                     self._execute_target(target)
 
                     # Calculate sleep time - use time_until_action if available and reasonable
