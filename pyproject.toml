@@ -104,7 +104,7 @@ packages = [
 [tool.setuptools.package-data]
 rtspy = ["py.typed"]
 "rtspy.scripts" = ["*"]
-"rtspy.observe" = ["bgnoise_model.pkl", "config_d50_c0.yaml"]
+"rtspy.observe" = ["bgnoise_model.pkl", "config_d50_c0.yaml", "HOWTO.md"]
 
 [tool.black]
 line-length = 100
