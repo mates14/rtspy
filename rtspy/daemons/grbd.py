@@ -40,15 +40,7 @@ from rtspy.core.voevent import VoEventParser, GrbTarget
 class GcnKafkaConsumer:
     """Handles GCN Kafka message consumption and parsing."""
 
-    def __init__(self, client_id: str, client_secret: str, domain: str = "gcn.nasa.gov"):
-        """
-        Initialize GCN Kafka consumer.
-
-        Args:
-            client_id: GCN client ID
-            client_secret: GCN client secret
-            domain: GCN domain (production, test, or dev)
-        """
+    def __init__(self, client_id: str, client_secret: str, domain: str = "gcn.nasa.gov", enable_gbm: bool = False):
         self.client_id = client_id
         self.client_secret = client_secret
         self.domain = domain
@@ -57,32 +49,26 @@ class GcnKafkaConsumer:
         self.thread = None
         self.message_callback = None
 
-        # Topics to subscribe to for GRB alerts and pointing directions
-        self.topics = [
-            # GRB coordinate topics
-#                    'gcn.classic.voevent.FERMI_GBM_ALERT',
-#                    'gcn.classic.voevent.FERMI_GBM_FIN_POS',
-#                    'gcn.classic.voevent.FERMI_GBM_FLT_POS',
-#                    'gcn.classic.voevent.FERMI_GBM_POS_TEST',
-#                    'gcn.classic.voevent.FERMI_GBM_GND_POS',
-#                    'gcn.classic.voevent.FERMI_GBM_SUBTHRESH',
-                    'gcn.classic.voevent.MAXI_UNKNOWN',
-                    'gcn.classic.voevent.SWIFT_BAT_GRB_POS_ACK',
-                    'gcn.classic.voevent.SWIFT_BAT_QL_POS',
-                    'gcn.classic.text.ICECUBE_ASTROTRACK_GOLD',
-                    'gcn.classic.text.ICECUBE_ASTROTRACK_BRONZE',
-                    # SVOM mission topics (as in example.py)
-                    'gcn.notices.svom.voevent.grm',
-                    'gcn.notices.svom.voevent.eclairs',
-                    'gcn.notices.svom.voevent.mxt',
-                    'gcn.notices.einstein_probe.wxt.alert',
-                    # 'gcn.classic.text.LVC_INITIAL',
-                    # 'gcn.classic.text.LVC_UPDATE',
-
-            # Additional mission topics that might be available
-            # Note: Some topics from original grbd.py may not exist
-            # We should only subscribe to topics that actually exist
+        base_topics = [
+            'gcn.classic.voevent.MAXI_UNKNOWN',
+            'gcn.classic.voevent.SWIFT_BAT_GRB_POS_ACK',
+            'gcn.classic.voevent.SWIFT_BAT_QL_POS',
+            'gcn.classic.text.ICECUBE_ASTROTRACK_GOLD',
+            'gcn.notices.svom.voevent.eclairs',
+            'gcn.notices.svom.voevent.mxt',
+            'gcn.notices.einstein_probe.wxt.alert',
         ]
+
+        gbm_topics = [
+            'gcn.classic.voevent.FERMI_GBM_ALERT',
+            'gcn.classic.voevent.FERMI_GBM_FIN_POS',
+            'gcn.classic.voevent.FERMI_GBM_FLT_POS',
+            'gcn.classic.voevent.FERMI_GBM_GND_POS',
+            'gcn.classic.voevent.FERMI_GBM_SUBTHRESH',
+            # 'gcn.classic.voevent.FERMI_GBM_POS_TEST',
+        ]
+
+        self.topics = base_topics + (gbm_topics if enable_gbm else [])
 
     def start(self) -> bool:
         """Start the Kafka consumer in a separate thread."""
@@ -205,6 +191,7 @@ class GrbDaemon(Device, DeviceConfig):
         config.add_argument('--queue-to', help='Queue name for GRB observations')
         config.add_argument('--add-exec', help='Execute command when new GCN packet arrives')
         config.add_argument('--exec-followups', action='store_true', help='Execute observations for follow-ups without error box')
+        config.add_argument('--gbm', action='store_true', help='Subscribe to Fermi GBM alert topics')
 
         # Visibility filtering
         config.add_argument('--not-visible', action='store_true', default=True, help='Record GRBs not visible from current location')
@@ -266,6 +253,7 @@ class GrbDaemon(Device, DeviceConfig):
         self.queue_name.value = config.get('queue_to','grb')
         # self.add_exec.value = config.get('add_exec')
         # self.exec_followups.value = config.get('exec_followups', False)
+        self.enable_gbm = config.get('gbm', False)
         self.record_not_visible.value = config.get('not_visible', True)
 #        self.record_only_visible_tonight.value = config.get('only_visible_tonight', False)
         self.min_altitude.value = config.get('min_altitude', 0.0)
@@ -588,6 +576,7 @@ class GrbDaemon(Device, DeviceConfig):
         self.gcn_consumer = GcnKafkaConsumer(
             client_id=self.gcn_client_id.value,
             client_secret=self.gcn_client_secret,
+            enable_gbm=self.enable_gbm,
         )
         self.gcn_consumer.set_message_callback(self._on_gcn_message)
 
