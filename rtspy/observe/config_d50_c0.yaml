@@ -1,0 +1,46 @@
+# Telescope D50, Camera C0
+# Use this file as a template for other instruments.
+#
+# To re-derive filter_params after an instrument change:
+#   python zpfit.py stat.txt          # produces fitted_parameters.txt
+#   (then update the Z0 and beta values below)
+#
+# To re-derive ape after detector replacement or re-calibration:
+#   See expcalc/new_exposure_calculator2.py calibration procedure.
+
+# --- Camera hardware ---
+gain: 0.81         # e-/ADU  (from CCD datasheet / photon transfer curve)
+readnoise: 8.0     # electrons RMS  (from bias / dark frame analysis)
+ape: 6.146         # aperture growth curve parameter  (fitted from photon noise data)
+default_fwhm: 3.0  # pixels  (typical median seeing at D50)
+
+# --- Photometric calibration from zpfit.py ---
+# Fitted on JD 2460318-2460998 (production dataset, 182k obs)
+# Reference band: Sloan_r  (beta = 0 by definition)
+# Recalibrate after: filter swap, mirror re-coating, major optics change.
+# Z0   = instrument zeropoint at airmass 0 (drifts with instrument)
+# beta = per-filter extinction offset from r-band (stable; atmosphere only)
+filter_params:
+  Sloan_r: {Z0: 21.937985, beta:  0.000000}
+  Sloan_g: {Z0: 21.919920, beta:  0.099949}
+  Sloan_i: {Z0: 21.394691, beta: -0.067270}
+  Sloan_z: {Z0: 20.365853, beta: -0.056017}
+  N:       {Z0: 22.986458, beta: -0.012176}
+
+# --- Sanity limits for 1s-normalised zeropoint ---
+# Observations outside [zp_min, zp_max] are discarded as corrupt before fitting.
+# From zpfit.py SANITY_LIMITS.
+sanity_limits:
+  Sloan_g: {zp_min: 16.7, zp_max: 22.1}
+  Sloan_r: {zp_min: 16.8, zp_max: 22.0}
+  Sloan_i: {zp_min: 16.3, zp_max: 21.5}
+  Sloan_z: {zp_min: 15.5, zp_max: 20.7}
+  N:       {zp_min: 18.0, zp_max: 23.2}
+
+# --- Filter wheel tokens (filter name -> RTS2 camera token) ---
+filter_token:
+  Sloan_g: g
+  Sloan_r: r
+  Sloan_i: i
+  Sloan_z: z
+  N: N

@@ -218,6 +218,72 @@ def main():
     final_bgsigma = bgsigma_from_sky_brightness(sky_1s, exptime)
     print(f"Final conditions: magzero={final_magzero:.2f}, bgsigma={final_bgsigma:.1f}")
 
+class ExposureCalculator:
+    """
+    Exposure time calculator with per-instance telescope parameters.
+
+    Use this when working with multiple cameras that have different GAIN, RN,
+    or APE values.  The module-level functions use the hardcoded constants
+    above (D50/C0 defaults); this class lets you override them per telescope.
+
+    Parameters
+    ----------
+    gain      : CCD gain [e-/ADU]
+    readnoise : effective readout noise [electrons RMS]
+    ape       : aperture growth curve parameter (fitted from photon noise data)
+    """
+
+    def __init__(self, gain: float = GAIN, readnoise: float = RN, ape: float = APE):
+        self.gain      = gain
+        self.readnoise = readnoise
+        self.ape       = ape
+
+    def bgsigma_from_sky_brightness(self, sky_brightness: float, exptime: float) -> float:
+        return np.sqrt(sky_brightness * exptime / self.gain**2 + self.readnoise**2)
+
+    def sky_brightness_from_bgsigma(self, bgsigma_ref: float, exptime_ref: float) -> float:
+        return (self.gain**2 * bgsigma_ref**2 - self.gain**2 * self.readnoise**2) / exptime_ref
+
+    def sky_1s_from_bgnoise(self, bgnoise_1s: float) -> float:
+        """bgnoise_1s [ADU] → sky_1s [photons/s/pixel]."""
+        return max(self.gain**2 * bgnoise_1s**2 - self.gain**2 * self.readnoise**2, 0.5)
+
+    def _break_magnitude(self, bgsigma: float, fwhm: float) -> float:
+        return -2.5 * np.log10(self.ape * np.pi / 4 * fwhm**2 * (bgsigma * self.gain)**2) + ZERO
+
+    def _log_magerror(self, magnitude: float, bgsigma: float, fwhm: float) -> float:
+        bm = self._break_magnitude(bgsigma, fwhm)
+        return sbl(0.2, 0.4, 2.5, magnitude - bm) + 0.2 * bm - 2
+
+    def calculate_exptime(self, target_magnitude: float, target_magerror: float,
+                          fwhm: float, magzero_1s: float, sky_1s: float) -> float:
+        """Required exposure time (seconds); magzero_1s is already zp_1s − 10."""
+        target_log_magerror = np.log10(target_magerror)
+
+        def equation(log_exptime):
+            t = 10 ** log_exptime
+            bgsigma = self.bgsigma_from_sky_brightness(sky_1s, t)
+            magzero = magzero_1s + 2.5 * log_exptime
+            mag_rel = target_magnitude - magzero
+            return self._log_magerror(mag_rel, bgsigma, fwhm) - target_log_magerror
+
+        try:
+            return float(10 ** fsolve(equation, np.log10(300))[0])
+        except Exception:
+            return np.nan
+
+    def predict_performance(self, target_magnitude: float, exptime: float,
+                            fwhm: float, magzero_1s: float, sky_1s: float):
+        """Return (magerror, snr) for the given exposure."""
+        bgsigma  = self.bgsigma_from_sky_brightness(sky_1s, exptime)
+        magzero  = magzero_1s + 2.5 * np.log10(exptime)
+        mag_rel  = target_magnitude - magzero
+        log_magerr = self._log_magerror(mag_rel, bgsigma, fwhm)
+        magerr   = 10 ** log_magerr
+        snr      = magerror_to_snr(magerr)
+        return magerr, snr
+
+
 if __name__ == '__main__':
     main()
 

@@ -84,6 +84,7 @@ rts2-addtarget = "rtspy.cli.addtarget:main"
 
 # Adaptive observation planner
 rtspy-observe = "rtspy.observe.observe:main"
+rtspy-observe-train = "rtspy.observe.train:main"
 
 # Legacy RTS2 compatibility wrappers (shell scripts)
 # rts2-gcnkafka and rts2-queuer are in rtspy/scripts/
@@ -101,7 +102,7 @@ packages = [
 [tool.setuptools.package-data]
 rtspy = ["py.typed"]
 "rtspy.scripts" = ["*"]
-"rtspy.observe" = ["bgnoise_model.pkl"]
+"rtspy.observe" = ["bgnoise_model.pkl", "config_d50_c0.yaml"]
 
 [tool.black]
 line-length = 100

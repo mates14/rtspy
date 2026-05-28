@@ -24,6 +24,7 @@ from rtspy.observe.bg_predict import (
     moon_illumination, night_fraction,
 )
 from rtspy.observe.observe import compute_plan, choose_plan, load_recent
+from rtspy.observe.telescope import TelescopeConfig
 
 __all__ = [
     'predict_zeropoint',
@@ -37,4 +38,5 @@ __all__ = [
     'compute_plan',
     'choose_plan',
     'load_recent',
+    'TelescopeConfig',
 ]
