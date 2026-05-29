@@ -89,13 +89,13 @@ def fit_zeropoints(
     # ------------------------------------------------------------------
     # Load and sanity-filter
     # ------------------------------------------------------------------
-    data = pd.read_csv(
-        stat_file, sep=r'\s+', header=None,
-        names=['jd', 'exposure', 'zeropoint', 'bgnoise', 'maglim',
-               'airmass', 'moon_alt', 'sun_alt', 'filter', 'image'],
-    )
-    data = data[data['exposure'] > 0].copy()
-    data['zp_norm'] = data['zeropoint'] - 2.5 * np.log10(data['exposure'])
+    from rtspy.observe.stat import read_stat
+    data = read_stat(stat_file)
+    if 'exposure' in data.columns and 'exptime' not in data.columns:
+        data = data.rename(columns={'exposure': 'exptime'})
+        data['zp_1s'] = data['zeropoint'] - 2.5 * np.log10(data['exptime'].clip(lower=1e-3))
+    data = data[data['exptime'] > 0].copy()
+    data['zp_norm'] = data['zp_1s']
 
     n_before = len(data)
     if verbose:

@@ -128,23 +128,21 @@ def train_model(
     -------
     trained GradientBoostingRegressor (also saved to model_file)
     """
-    data = pd.read_csv(
-        stat_file, sep=r'\s+', header=None,
-        names=['jd', 'exposure', 'zeropoint', 'bgnoise', 'maglim',
-               'airmass', 'moon_alt', 'sun_alt', 'filter', 'image'],
-    )
-    data = data[(data['exposure'] > 0) & (data['bgnoise'] > 0) & (data['airmass'] > 0)].copy()
-    data['zp_1s'] = data['zeropoint'] - 2.5 * np.log10(data['exposure'])
-
-    # Target: background-limited 1s noise
-    data['bgnoise_1s'] = data['bgnoise'] / np.sqrt(data['exposure'])
+    from rtspy.observe.stat import read_stat
+    data = read_stat(stat_file)
+    # accept both 'exptime' (new ECSV) and legacy 'exposure' column name
+    if 'exposure' in data.columns and 'exptime' not in data.columns:
+        data = data.rename(columns={'exposure': 'exptime'})
+        data['zp_1s']      = data['zeropoint'] - 2.5 * np.log10(data['exptime'].clip(lower=1e-3))
+        data['bgnoise_1s'] = data['bgnoise']   / np.sqrt(data['exptime'].clip(lower=1e-3))
+    data = data[(data['exptime'] > 0) & (data['bgnoise'] > 0) & (data['airmass'] > 0)].copy()
 
     # Log target for regression (covers ~1 dex of dynamic range)
     y = np.log(data['bgnoise_1s'].values)
 
     X = _build_X(
         data['jd'], data['sun_alt'], data['moon_alt'],
-        data['airmass'], data['filter'], data['zp_1s'],
+        data['airmass'], data['filter'], data['zp_1s'],  # type: ignore[arg-type]
     )
 
     if verbose:

@@ -27,6 +27,10 @@ from rtspy.observe.observe import compute_plan, choose_plan, load_recent
 from rtspy.observe.telescope import TelescopeConfig
 from rtspy.observe.zpfit import fit_zeropoints
 from rtspy.observe.apecalfit import fit_ape
+from rtspy.observe.stat import (
+    read_stat, write_stat_record, record_from_ecsv,
+    night_from_jd, load_recent as stat_load_recent,
+)
 
 __all__ = [
     'predict_zeropoint',
@@ -43,4 +47,8 @@ __all__ = [
     'TelescopeConfig',
     'fit_zeropoints',
     'fit_ape',
+    'read_stat',
+    'write_stat_record',
+    'record_from_ecsv',
+    'night_from_jd',
 ]

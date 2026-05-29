@@ -76,21 +76,9 @@ def choose_plan(required_s: float):
 # ---------------------------------------------------------------------------
 
 def load_recent(stat_file: str = STAT_FILE, window_min: float = WINDOW_MIN):
-    """Return (recent_df, last_row) from stat.txt."""
-    data = pd.read_csv(
-        stat_file, sep=r'\s+', header=None,
-        names=['jd', 'exposure', 'zeropoint', 'bgnoise', 'maglim',
-               'airmass', 'moon_alt', 'sun_alt', 'filter', 'image'],
-    )
-    data = data[data['exposure'] > 0].copy()
-    data['zp_1s']      = data['zeropoint'] - 2.5 * np.log10(data['exposure'])
-    data['bgnoise_1s'] = data['bgnoise'] / np.sqrt(data['exposure'])
-
-    jd_now  = current_jd()
-    t_start = jd_now - window_min / 1440.0
-    recent  = data[data['jd'] >= t_start].sort_values('jd').reset_index(drop=True)
-    last    = data.sort_values('jd').iloc[-1] if len(data) else None
-    return recent, last
+    """Return (recent_df, last_row) from the stat file or directory."""
+    from rtspy.observe.stat import load_recent as _load_recent
+    return _load_recent(stat_file, window_min=window_min, reference_jd=current_jd())
 
 
 def _zp_fallback(target_filter, airmass, cfg: TelescopeConfig, k_r=0.15):
