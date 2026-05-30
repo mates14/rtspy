@@ -188,6 +188,9 @@ def make_night_plot(
     #   bg_norm = bgnoise_1s * (model_ref / model_actual)
     # where model_ref = predict(airmass=1, Sloan_r, moon_dist=90°, zp_r_zenith=Z0_r−k_r)
     # This removes airmass, filter, and moon-distance geometry, leaving intrinsic sky state.
+    if predict and not plate_scale:
+        print('WARNING: plate_scale not set in telescope config — sky normalisation disabled',
+              file=sys.stderr)
     if predict and plate_scale:
         try:
             from rtspy.observe.bg_predict import predict_background
@@ -234,7 +237,10 @@ def make_night_plot(
 
             df['sky_r_zen']      = sky_norm_list
             df['sky_r_zen_pred'] = sky_pred_list
-        except Exception:
+        except Exception as e:
+            import traceback
+            print(f'WARNING: sky normalisation/prediction disabled: {e}', file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
             predict = False
 
     filters = [f for f in ['Sloan_g', 'Sloan_r', 'Sloan_i', 'Sloan_z', 'N']
