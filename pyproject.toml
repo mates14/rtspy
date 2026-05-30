@@ -87,6 +87,7 @@ rtspy-observe = "rtspy.observe.observe:main"
 rtspy-observe-train = "rtspy.observe.train:main"
 rtspy-observe-zpfit = "rtspy.observe.zpfit:main"
 rtspy-observe-apecalfit = "rtspy.observe.apecalfit:main"
+rtspy-observe-stat-ingest = "rtspy.observe.stat:main"
 
 # Legacy RTS2 compatibility wrappers (shell scripts)
 # rts2-gcnkafka and rts2-queuer are in rtspy/scripts/

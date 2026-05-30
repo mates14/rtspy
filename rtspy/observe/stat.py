@@ -313,6 +313,54 @@ def read_stat(
     return data
 
 
+def main():
+    """
+    CLI: ingest one or more asarina per-image ECSV files into the stat directory.
+
+    Designed to be called via find … | xargs:
+
+        find ~/phdb -name '*.ecsv' | xargs rtspy-observe-stat-ingest
+        find ~/phdb -name '*.ecsv' | xargs rtspy-observe-stat-ingest --stat-dir /tmp/stat
+
+    Prints one line per file: OK, SKIP (already present and unchanged), or FAIL.
+    Exit code is the number of failures (0 = all succeeded).
+    """
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(
+        description='Ingest asarina per-image ECSVs into the rtspy stat directory',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument('ecsv_files', nargs='+', metavar='FILE',
+                        help='Per-image ECSV catalog(s) produced by asarina')
+    parser.add_argument('--stat-dir', default=_STAT_DIR, metavar='DIR',
+                        help='Destination stat directory')
+    parser.add_argument('-q', '--quiet', action='store_true',
+                        help='Only print failures')
+    args = parser.parse_args()
+
+    n_ok = n_fail = 0
+    for path in args.ecsv_files:
+        record = record_from_ecsv(path)
+        if record is None:
+            print(f'FAIL  {path}  (could not extract record)', file=sys.stderr)
+            n_fail += 1
+            continue
+        try:
+            write_stat_record(record, stat_dir=args.stat_dir)
+            if not args.quiet:
+                print(f'OK    {record["image"]}')
+            n_ok += 1
+        except Exception as e:
+            print(f'FAIL  {path}  ({e})', file=sys.stderr)
+            n_fail += 1
+
+    if not args.quiet:
+        print(f'\n{n_ok} ingested, {n_fail} failed', file=sys.stderr)
+    sys.exit(n_fail)
+
+
 def load_recent(
     source: Union[str, Path, None] = None,
     window_min: float = 15.0,
