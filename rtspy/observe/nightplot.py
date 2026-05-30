@@ -60,11 +60,13 @@ def _jd_to_ut(jd):
 
 def _jd_to_nighthour(jd):
     """
-    Return hours from noon UTC (12 = noon, 0/24 = midnight, 36 = next noon).
-    All observations in one astronomical night map to [12, 36].
+    Return hours from noon UTC (12 = noon, 24 = midnight, 36 = next noon).
+
+    JD integers fall at noon UTC, so (jd % 1.0) is the fractional day since
+    the previous noon.  Multiplying by 24 and adding 12 maps noon→12,
+    midnight→24, and the following morning hours to 24–36.
     """
-    frac = (jd - 0.5) % 1.0   # 0 = noon UTC
-    return frac * 24.0 + 12.0  # noon = 12, midnight = 24, next noon = 36
+    return (jd % 1.0) * 24.0 + 12.0
 
 
 def _jd_night_label(jd):
