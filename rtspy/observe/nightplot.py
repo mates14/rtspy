@@ -185,6 +185,8 @@ def make_night_plot(
             df['bg_pred'] = [
                 predict_background(r['jd'], r['sun_alt'], r['moon_alt'],
                                    r['airmass'], r['filter'], r['zp_1s'],
+                                   moon_dist=r.get('moon_dist'),
+                                   sun_dist=r.get('sun_dist'),
                                    model_file=cfg.model_file)
                 for _, r in df.iterrows()
             ]

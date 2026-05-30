@@ -32,7 +32,6 @@ import sys
 import time
 
 import numpy as np
-import pandas as pd
 
 from rtspy.observe.telescope import TelescopeConfig
 from rtspy.observe.bg_predict import (
@@ -42,15 +41,17 @@ from rtspy.observe.bg_predict import (
 
 
 def _held_out_test(stat_file: str, model_file: str, held_frac: float = 0.20) -> None:
-    """Evaluate the trained model on the most recent held_frac of stat.txt."""
-    data = pd.read_csv(
-        stat_file, sep=r'\s+', header=None,
-        names=['jd', 'exposure', 'zeropoint', 'bgnoise', 'maglim',
-               'airmass', 'moon_alt', 'sun_alt', 'filter', 'image'],
-    )
-    data = data[(data['exposure'] > 0) & (data['bgnoise'] > 0) & (data['airmass'] > 0)].copy()
-    data['zp_1s']      = data['zeropoint'] - 2.5 * np.log10(data['exposure'])
-    data['bgnoise_1s'] = data['bgnoise'] / np.sqrt(data['exposure'])
+    """Evaluate the trained model on the most recent held_frac of stat data."""
+    from rtspy.observe.stat import read_stat
+    data = read_stat(stat_file)
+    if 'exposure' in data.columns and 'exptime' not in data.columns:
+        data = data.rename(columns={'exposure': 'exptime'})
+        data['zp_1s']      = data['zeropoint'] - 2.5 * np.log10(data['exptime'].clip(lower=1e-3))
+        data['bgnoise_1s'] = data['bgnoise'] / np.sqrt(data['exptime'].clip(lower=1e-3))
+    data = data[
+        (data['exptime'] > 0) & (data['bgnoise'] > 0) &
+        (data['airmass'] > 0) & (data['jd'] > 2400000)
+    ].copy()
 
     cutoff = data['jd'].quantile(1.0 - held_frac)
     test   = data[data['jd'] >= cutoff].copy()
@@ -61,9 +62,13 @@ def _held_out_test(stat_file: str, model_file: str, held_frac: float = 0.20) -> 
     print(f"\nHeld-out test (most recent {held_frac*100:.0f}%  —  {len(test):,} obs, "
           f"JD ≥ {cutoff:.2f})")
 
+    moon_dist = test['moon_dist'].values if 'moon_dist' in test.columns else None
+    sun_dist  = test['sun_dist'].values  if 'sun_dist'  in test.columns else None
+
     pred = predict_background(
         test['jd'].values, test['sun_alt'].values, test['moon_alt'].values,
         test['airmass'].values, test['filter'].values, test['zp_1s'].values,
+        moon_dist=moon_dist, sun_dist=sun_dist,
         model_file=model_file,
     )
 

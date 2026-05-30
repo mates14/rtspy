@@ -3,7 +3,7 @@
 Machine-learned background noise predictor.
 
 Predicts the 1-second background RMS noise from observing conditions using
-a gradient boosting regressor trained on historical stat.txt data.
+a gradient boosting regressor trained on per-night ECSV stat data.
 
 Target:
   bgnoise_1s = bgnoise / sqrt(exposure)    [background-limited; read noise negligible]
@@ -19,9 +19,11 @@ Features:
   airmass          -- observing airmass; sky brightness ∝ airmass
   filter           -- ordinal-encoded by wavelength (g < r < i < z < N)
   zp_1s            -- 1-second normalised zeropoint; encodes atmospheric transparency
+  moon_dist        -- angular distance moon→target (deg); scattered moonlight (NaN = unknown)
+  sun_dist         -- angular distance sun→target (deg); mostly relevant in deep twilight (NaN = unknown)
 
-Moon distance and Sun distance to the target are not in stat.txt and are
-therefore not used; they would improve predictions if available.
+HistGradientBoostingRegressor handles NaN features natively, so moon_dist/sun_dist
+can be omitted at prediction time when the target position is not known.
 """
 
 import os
@@ -82,16 +84,33 @@ def _encode_filter(f):
 # ---------------------------------------------------------------------------
 # Feature matrix construction (vectorised)
 # ---------------------------------------------------------------------------
-FEATURE_NAMES = ['sun_alt', 'moon_alt', 'moon_illum', 'night_frac', 'airmass', 'filter_enc', 'zp_1s']
+FEATURE_NAMES = ['sun_alt', 'moon_alt', 'moon_illum', 'night_frac', 'airmass', 'filter_enc', 'zp_1s',
+                 'moon_dist', 'sun_dist']
 
-def _build_X(jd, sun_alt, moon_alt, airmass, filter_name, zp_1s):
-    """Assemble feature matrix from equal-length arrays."""
+def _build_X(jd, sun_alt, moon_alt, airmass, filter_name, zp_1s,
+             moon_dist=None, sun_dist=None):
+    """Assemble feature matrix from equal-length arrays.
+
+    moon_dist and sun_dist are optional (NaN when not available).
+    HistGradientBoostingRegressor handles NaN natively.
+    """
     jd         = np.asarray(jd,      dtype=float)
     sun_alt    = np.asarray(sun_alt,  dtype=float)
     moon_alt   = np.asarray(moon_alt, dtype=float)
     airmass    = np.asarray(airmass,  dtype=float)
     zp_1s      = np.asarray(zp_1s,   dtype=float)
     filter_enc = np.array([_encode_filter(f) for f in np.atleast_1d(filter_name)])
+    n          = len(jd)
+
+    if moon_dist is None:
+        moon_dist_arr = np.full(n, np.nan)
+    else:
+        moon_dist_arr = np.broadcast_to(np.atleast_1d(np.asarray(moon_dist, dtype=float)), (n,))
+
+    if sun_dist is None:
+        sun_dist_arr = np.full(n, np.nan)
+    else:
+        sun_dist_arr = np.broadcast_to(np.atleast_1d(np.asarray(sun_dist, dtype=float)), (n,))
 
     return np.column_stack([
         sun_alt,
@@ -101,6 +120,8 @@ def _build_X(jd, sun_alt, moon_alt, airmass, filter_name, zp_1s):
         airmass,
         filter_enc,
         zp_1s,
+        moon_dist_arr,
+        sun_dist_arr,
     ])
 
 # ---------------------------------------------------------------------------
@@ -135,14 +156,21 @@ def train_model(
         data = data.rename(columns={'exposure': 'exptime'})
         data['zp_1s']      = data['zeropoint'] - 2.5 * np.log10(data['exptime'].clip(lower=1e-3))
         data['bgnoise_1s'] = data['bgnoise']   / np.sqrt(data['exptime'].clip(lower=1e-3))
-    data = data[(data['exptime'] > 0) & (data['bgnoise'] > 0) & (data['airmass'] > 0)].copy()
+    data = data[
+        (data['exptime'] > 0) & (data['bgnoise'] > 0) &
+        (data['airmass'] > 0) & (data['jd'] > 2400000)
+    ].copy()
 
     # Log target for regression (covers ~1 dex of dynamic range)
     y = np.log(data['bgnoise_1s'].values)
 
+    moon_dist = data['moon_dist'].values if 'moon_dist' in data.columns else None
+    sun_dist  = data['sun_dist'].values  if 'sun_dist'  in data.columns else None
+
     X = _build_X(
         data['jd'], data['sun_alt'], data['moon_alt'],
         data['airmass'], data['filter'], data['zp_1s'],  # type: ignore[arg-type]
+        moon_dist=moon_dist, sun_dist=sun_dist,
     )
 
     if verbose:
@@ -218,6 +246,8 @@ def predict_background(
     airmass,
     filter_name,
     zp_1s,
+    moon_dist=None,
+    sun_dist=None,
     model_file: str = _DEFAULT_MODEL,
 ) -> float | np.ndarray:
     """
@@ -231,15 +261,13 @@ def predict_background(
     airmass     : float or array — observing airmass
     filter_name : str or array   — filter name (e.g. 'Sloan_r')
     zp_1s       : float or array — 1-second normalised zeropoint (mag)
+    moon_dist   : float or array — moon→target angular distance (deg); None = unknown (NaN)
+    sun_dist    : float or array — sun→target angular distance (deg); None = unknown (NaN)
     model_file  : path to saved model (trained by train_model())
 
     Returns
     -------
-    float or np.ndarray — predicted bgnoise_1s in the same ADU units as
-    the bgnoise column in stat.txt, normalised to a 1-second exposure.
-
-    To convert to actual noise for an exposure of t seconds:
-        bgnoise(t) ≈ bgnoise_1s * sqrt(t)   [background-limited]
+    float or np.ndarray — predicted bgnoise_1s in ADU, normalised to 1-second exposure.
     """
     global _cache
     if model_file not in _cache:
@@ -255,6 +283,8 @@ def predict_background(
     X = _build_X(
         _broadcast(jd), _broadcast(sun_alt), _broadcast(moon_alt),
         _broadcast(airmass), _broadcast(filter_name), _broadcast(zp_1s),
+        moon_dist=None if moon_dist is None else _broadcast(moon_dist),
+        sun_dist=None  if sun_dist  is None else _broadcast(sun_dist),
     )
     result = np.exp(model.predict(X))
     return float(result[0]) if scalar else result
@@ -291,6 +321,8 @@ def predict_background_realtime(
     filter_name,
     zp_1s,
     observations,
+    moon_dist=None,
+    sun_dist=None,
     window_minutes: float = 15.0,
     time_decay_minutes: float = RESIDUAL_TIME_DECAY_MIN,
     same_filter_weight: float = 2.0,
@@ -317,9 +349,12 @@ def predict_background_realtime(
     ----------
     jd, sun_alt, moon_alt, airmass, filter_name, zp_1s
         Target observing conditions (same as predict_background).
-    observations : sequence of (jd, filter, bgnoise_1s, sun_alt, moon_alt, airmass, zp_1s)
-        Recent actual background measurements.
+    observations : sequence of tuples (jd, filter, bgnoise_1s, sun_alt, moon_alt, airmass, zp_1s[, moon_dist, sun_dist])
+        Recent actual background measurements. Elements 8 and 9 (moon_dist, sun_dist)
+        are optional; omit or pass NaN if unavailable.
         bgnoise_1s = measured bgnoise / sqrt(exposure).
+    moon_dist   : angular distance moon→target for the prediction point (deg); None = NaN
+    sun_dist    : angular distance sun→target for the prediction point (deg); None = NaN
     window_minutes : look-back window for recent measurements.
     time_decay_minutes : exponential age weighting of recent obs.
     same_filter_weight : extra weight for observations in the same filter.
@@ -336,7 +371,9 @@ def predict_background_realtime(
     """
     # ML prior for the target
     prior = predict_background(jd, sun_alt, moon_alt, airmass,
-                               filter_name, zp_1s, model_file=model_file)
+                               filter_name, zp_1s,
+                               moon_dist=moon_dist, sun_dist=sun_dist,
+                               model_file=model_file)
 
     if not observations:
         return {
@@ -362,13 +399,17 @@ def predict_background_realtime(
             float(obs[0]), str(obs[1]), float(obs[2]),
             float(obs[3]), float(obs[4]), float(obs[5]), float(obs[6]),
         )
+        o_moon_dist = float(obs[7]) if len(obs) > 7 else None
+        o_sun_dist  = float(obs[8]) if len(obs) > 8 else None
         if o_jd < t_start or o_jd > t_ref + 0.5 / 1440.0:
             continue
         if o_bg1s <= 0:
             continue
 
         model_pred = predict_background(o_jd, o_sun, o_moon, o_X,
-                                        o_filt, o_zp, model_file=model_file)
+                                        o_filt, o_zp,
+                                        moon_dist=o_moon_dist, sun_dist=o_sun_dist,
+                                        model_file=model_file)
         if model_pred <= 0:
             continue
 
