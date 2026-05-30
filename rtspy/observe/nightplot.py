@@ -100,6 +100,11 @@ def _sky_mag(zp_1s, bgnoise_1s, gain, plate_scale_arcsec):
     return mag_per_pix + 2.5 * np.log10(plate_scale_arcsec ** 2)
 
 
+# Reference conditions for zenith sky normalisation
+_REF_MOON_DIST = 90.0   # deg — "standard" distance from moon
+_REF_SUN_DIST  = 90.0   # deg
+
+
 def _rolling_smooth(x, y, w_half=3):
     """Simple box-smoothed curve; returns (x_sorted, y_smooth)."""
     idx  = np.argsort(x)
@@ -178,22 +183,57 @@ def make_night_plot(
                       for i, r in df.iterrows()]
     df['fwhm_as'] = df['fwhm'] * plate_scale if plate_scale else df['fwhm']
 
-    # ML bgnoise prediction
-    if predict:
+    # Zenith r-band sky normalisation (requires ML model)
+    # For each observation:
+    #   bg_norm = bgnoise_1s * (model_ref / model_actual)
+    # where model_ref = predict(airmass=1, Sloan_r, moon_dist=90°, zp_r_zenith=Z0_r−k_r)
+    # This removes airmass, filter, and moon-distance geometry, leaving intrinsic sky state.
+    if predict and plate_scale:
         try:
             from rtspy.observe.bg_predict import predict_background
-            df['bg_pred'] = [
-                predict_background(r['jd'], r['sun_alt'], r['moon_alt'],
-                                   r['airmass'], r['filter'], r['zp_1s'],
-                                   moon_dist=r.get('moon_dist'),
-                                   sun_dist=r.get('sun_dist'),
-                                   model_file=cfg.model_file)
-                for _, r in df.iterrows()
-            ]
-            df['sky_mag_pred'] = [
-                _sky_mag(r['zp_1s'], r['bg_pred'], gain, plate_scale)
-                for _, r in df.iterrows()
-            ]
+            Z0_r = fp.get('Sloan_r', {}).get('Z0', 21.94)
+
+            bg_actual_list = []
+            bg_ref_list    = []
+            sky_norm_list  = []
+            sky_pred_list  = []
+
+            for i, r in df.iterrows():
+                if not sane_mask[i] or r['bgnoise_1s'] <= 0 or np.isnan(r['k_r']):
+                    bg_actual_list.append(np.nan)
+                    bg_ref_list.append(np.nan)
+                    sky_norm_list.append(np.nan)
+                    sky_pred_list.append(np.nan)
+                    continue
+
+                zp_r_zen = Z0_r - r['k_r']   # r-band zp at airmass=1
+
+                bg_actual = predict_background(
+                    r['jd'], r['sun_alt'], r['moon_alt'],
+                    r['airmass'], r['filter'], r['zp_1s'],
+                    moon_dist=r.get('moon_dist'), sun_dist=r.get('sun_dist'),
+                    model_file=cfg.model_file,
+                )
+                bg_ref = predict_background(
+                    r['jd'], r['sun_alt'], r['moon_alt'],
+                    1.0, 'Sloan_r', zp_r_zen,
+                    moon_dist=_REF_MOON_DIST, sun_dist=_REF_SUN_DIST,
+                    model_file=cfg.model_file,
+                )
+
+                if bg_actual > 0 and bg_ref > 0:
+                    bg_norm = r['bgnoise_1s'] * (bg_ref / bg_actual)
+                    sky_norm_list.append(_sky_mag(zp_r_zen, bg_norm, gain, plate_scale))
+                    sky_pred_list.append(_sky_mag(zp_r_zen, bg_ref,  gain, plate_scale))
+                else:
+                    sky_norm_list.append(np.nan)
+                    sky_pred_list.append(np.nan)
+
+                bg_actual_list.append(bg_actual)
+                bg_ref_list.append(bg_ref)
+
+            df['sky_r_zen']      = sky_norm_list
+            df['sky_r_zen_pred'] = sky_pred_list
         except Exception:
             predict = False
 
@@ -262,10 +302,19 @@ def make_night_plot(
                fontsize=8, va='top', color='#666666')
 
     # ------------------------------------------------------------------
-    # Panel 2: Sky surface brightness
+    # Panel 2: Sky surface brightness — normalised to zenith r-band at 90° from Moon
     # ------------------------------------------------------------------
-    sky_label = 'Sky brightness  [mag/arcsec²]' if plate_scale else 'Sky noise  bgnoise_1s  [ADU]'
-    sky_col   = 'sky_mag' if plate_scale else 'bgnoise_1s'
+    use_normalised = predict and plate_scale and 'sky_r_zen' in df.columns
+
+    if use_normalised:
+        sky_col  = 'sky_r_zen'
+        sky_label = 'Sky brightness  r-band zenith  [mag/arcsec²]'
+    elif plate_scale:
+        sky_col  = 'sky_mag'
+        sky_label = 'Sky brightness  [mag/arcsec²]'
+    else:
+        sky_col  = 'bgnoise_1s'
+        sky_label = 'Sky noise  bgnoise_1s  [ADU]'
 
     for filt in filters:
         sub = df[(df['filter'] == filt) & df[sky_col].notna()]
@@ -274,16 +323,20 @@ def make_night_plot(
         st = _filter_style(filt)
         ax_sky.scatter(sub['t'], sub[sky_col], s=18, color=st['color'],
                        alpha=0.8, zorder=st['zorder'])
-        if predict and 'sky_mag_pred' in df.columns:
-            pred_col = 'sky_mag_pred' if plate_scale else 'bg_pred'
-            subp = df[(df['filter'] == filt) & df[pred_col].notna()]
-            if not subp.empty:
-                ax_sky.scatter(subp['t'], subp[pred_col], s=8,
-                               color=st['color'], alpha=0.35, marker='x', zorder=2)
+
+    # Prediction: single curve at reference conditions (same for all filters)
+    if use_normalised:
+        pred_sub = df[df['sky_r_zen_pred'].notna()]
+        if not pred_sub.empty:
+            ax_sky.scatter(pred_sub['t'], pred_sub['sky_r_zen_pred'], s=8,
+                           color='#888888', alpha=0.45, marker='x', zorder=2)
+            xs, ys = _rolling_smooth(pred_sub['t'].values,
+                                     pred_sub['sky_r_zen_pred'].values, w_half=4)
+            ax_sky.plot(xs, ys, color='#222222', lw=1.5, alpha=0.6, zorder=4)
 
     ax_sky.set_ylabel(sky_label, fontsize=10)
     if plate_scale:
-        ax_sky.invert_yaxis()   # brighter sky (lower mag) at top conventionally
+        ax_sky.invert_yaxis()
         ax_sky.text(0.01, 0.97, '← brighter sky', transform=ax_sky.transAxes,
                     fontsize=8, va='top', color='#666666')
     # Clip y-axis to sane percentile range
@@ -295,12 +348,14 @@ def make_night_plot(
             ax_sky.set_ylim(hi + margin, lo - margin)   # inverted
         else:
             ax_sky.set_ylim(lo - margin, hi + margin)
-    if predict:
+    if use_normalised:
         ax_sky.scatter([], [], s=8, color='#888888', marker='x',
                        label='ML prediction', alpha=0.5)
         ax_sky.scatter([], [], s=18, color='#888888',
-                       label='measured', alpha=0.8)
+                       label='measured (normalised)', alpha=0.8)
         ax_sky.legend(fontsize=8, loc='upper right', framealpha=0.9)
+        ax_sky.text(0.01, 0.03, 'normalised to airmass=1, 90° from Moon',
+                    transform=ax_sky.transAxes, fontsize=7, va='bottom', color='#888888')
 
     # ------------------------------------------------------------------
     # Panel 3: FWHM / seeing
