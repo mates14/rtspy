@@ -120,12 +120,15 @@ def record_from_ecsv(ecsv_path: str) -> Optional[dict]:
     # Required keys — must be present for a useful stat record
     # ------------------------------------------------------------------
     required = ['JD', 'EXPTIME', 'FILTER', 'AIRMASS', 'SUN_ALT', 'MOONALT',
-                'MOONDIST', 'FWHM', 'ELLIP', 'BGSIGMA', 'MAGZERO', 'LIMMAG',
-                'FITSFILE', 'OBJRA', 'OBJDEC']
+                'MOONDIST', 'FWHM', 'BGSIGMA', 'MAGZERO', 'FITSFILE',
+                'OBJRA', 'OBJDEC']
     missing = [k for k in required if k not in m]
     if missing:
         logger.warning(f"Missing header keys in {ecsv_path}: {missing}")
         return None
+
+    # LIMMAG was renamed MAGLIM in a pipeline update; accept both
+    maglim = m.get('LIMMAG', m.get('MAGLIM', float('nan')))
 
     # ------------------------------------------------------------------
     # Sun distance: use header SUNDIST if present, else compute from
@@ -162,10 +165,10 @@ def record_from_ecsv(ecsv_path: str) -> Optional[dict]:
         'moon_dist': float(m['MOONDIST']),
         'sun_dist':  float(sun_dist),
         'fwhm':      float(m['FWHM']),
-        'ellip':     float(m['ELLIP']),
+        'ellip':     float(m['ELLIP']) if 'ELLIP' in m else float('nan'),
         'zeropoint': float(m['MAGZERO']),
         'bgnoise':   float(m['BGSIGMA']),
-        'maglim':    float(m['LIMMAG']),
+        'maglim':    float(maglim),
         'image':     str(Path(m['FITSFILE']).name),
         'ra':        float(m['OBJRA']),
         'dec':       float(m['OBJDEC']),
