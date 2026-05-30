@@ -13,6 +13,7 @@ gain: 0.81         # e-/ADU  (from CCD datasheet / photon transfer curve)
 readnoise: 8.0     # electrons RMS  (from bias / dark frame analysis)
 ape: 6.146         # aperture growth curve parameter  (fitted from photon noise data)
 default_fwhm: 3.0  # pixels  (typical median seeing at D50)
+plate_scale: 1.177 # arcsec/pixel  (from CDELT1 in FITS header)
 
 # --- Photometric calibration from zpfit.py ---
 # Fitted on JD 2460318-2460998 (production dataset, 182k obs)

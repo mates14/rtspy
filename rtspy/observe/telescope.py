@@ -58,6 +58,7 @@ class TelescopeConfig:
     readnoise:     float = RN
     ape:           float = APE
     default_fwhm:  float = 3.0
+    plate_scale:   Optional[float] = None  # arcsec/pixel; None = unknown
 
     filter_params:  Dict = field(default_factory=lambda: dict(FILTER_PARAMS))
     sanity_limits:  Dict = field(default_factory=lambda: dict(SANITY_LIMITS))
@@ -89,6 +90,7 @@ class TelescopeConfig:
         cfg.readnoise    = float(d.get('readnoise',    RN))
         cfg.ape          = float(d.get('ape',          APE))
         cfg.default_fwhm = float(d.get('default_fwhm', 3.0))
+        cfg.plate_scale  = float(d['plate_scale']) if 'plate_scale' in d else None
 
         if 'filter_params' in d:
             cfg.filter_params = {
@@ -157,6 +159,8 @@ class TelescopeConfig:
             'filter_token': self.filter_token,
             'model_file':   self.model_file,
         }
+        if self.plate_scale is not None:
+            d['plate_scale'] = self.plate_scale
         with open(path, 'w') as fh:
             yaml.dump(d, fh, default_flow_style=False, sort_keys=False)
 
