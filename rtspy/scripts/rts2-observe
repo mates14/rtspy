@@ -2,24 +2,23 @@
 """
 Adaptive exposure calculator and observation executor for camera C0.
 
-Reads recent photometric pipeline output (stat.txt), predicts current
+Reads recent photometric pipeline output (stat dir), predicts current
 zeropoint and sky background with zp_predict / bg_predict, computes the
 required exposure time for (magnitude, SNR, filter), rounds to a practical
 plan, and optionally executes on C0 via RTS2.
 
 Data paths (override via environment variables):
-    RTS2_STAT_FILE       — path to the pipeline stat.txt
-    RTS2_OBSERVE_CONFIG  — path to telescope config YAML
+    RTS2_STAT_DIR        — directory containing per-night stat ECSV files
     RTS2_BGNOISE_MODEL   — path to the trained background noise model
-                           (can also be set inside the config YAML)
+    ASARINA_CAMERA       — camera name (section in /etc/asarina/config)
 
 Usage (calculation only):
-    observe.py -m 18.5 -s 10
-    observe.py -m 18.5 -s 10 --filter Sloan_i --fwhm 3.5
-    observe.py -m 18.5 -s 10 --config /etc/rts2/telescope.yaml
+    rts2-observe -m 18.5 -s 10
+    rts2-observe -m 18.5 -s 10 --filter Sloan_i --fwhm 3.5
+    rts2-observe -m 18.5 -s 10 --camera C0
 
 Usage (also execute on C0):
-    observe.py -m 18.5 -s 10 --execute
+    rts2-observe -m 18.5 -s 10 --execute
 """
 
 import sys
@@ -29,10 +28,10 @@ import argparse
 import numpy as np
 import pandas as pd
 
-from rtspy.observe.zp_predict import predict_zeropoint
-from rtspy.observe.bg_predict import predict_background
-from rtspy.observe.expcalc import snr_to_magerror, magerror_to_snr
-from rtspy.observe.telescope import TelescopeConfig
+from asarina.observe.zp_predict import predict_zeropoint
+from asarina.observe.bg_predict import predict_background
+from asarina.observe.expcalc import snr_to_magerror, magerror_to_snr
+from asarina.observe.camera import CameraConfig
 
 # RTS2 is optional — needed only for --execute
 try:
@@ -43,9 +42,9 @@ except ImportError:
     HAS_RTS2 = False
 
 # ---------------------------------------------------------------------------
-# Module-level defaults (overridden per call via TelescopeConfig)
+# Module-level defaults
 # ---------------------------------------------------------------------------
-STAT_FILE  = os.environ.get('RTS2_STAT_FILE', '/data/rts2/stat.txt')
+STAT_DIR   = os.environ.get('RTS2_STAT_DIR', '/home/mates/phdb/stat')
 WINDOW_MIN = 15.0
 
 NICE_PLANS = [
@@ -75,21 +74,19 @@ def choose_plan(required_s: float):
 # Condition estimation
 # ---------------------------------------------------------------------------
 
-def load_recent(stat_file: str = STAT_FILE, window_min: float = WINDOW_MIN):
-    """Return (recent_df, last_row) from the stat file or directory."""
-    from rtspy.observe.stat import load_recent as _load_recent
-    return _load_recent(stat_file, window_min=window_min, reference_jd=current_jd())
+def load_recent(stat_dir: str = STAT_DIR, window_min: float = WINDOW_MIN):
+    from asarina.observe.stat import load_recent as _load_recent
+    return _load_recent(stat_dir, window_min=window_min, reference_jd=current_jd())
 
 
-def _zp_fallback(target_filter, airmass, cfg: TelescopeConfig, k_r=0.15):
-    """Calibrated Z0 at a typical extinction when no recent obs are available."""
+def _zp_fallback(target_filter, airmass, cfg: CameraConfig, k_r=0.15):
     p     = cfg.filter_params.get(target_filter, {'Z0': 21.5, 'beta': 0.0})
     zp_1s = p['Z0'] - (k_r + p['beta']) * airmass
     return zp_1s, 0.3, 0
 
 
 def predict_conditions(recent, last, target_filter, jd_now, airmass,
-                       sun_alt, moon_alt, cfg: TelescopeConfig):
+                       sun_alt, moon_alt, cfg: CameraConfig):
     """Predict (zp_1s, zp_unc, n_zp, bgnoise_1s, bg_src)."""
     if len(recent) >= 2:
         obs = list(zip(
@@ -134,21 +131,21 @@ def predict_conditions(recent, last, target_filter, jd_now, airmass,
 # ---------------------------------------------------------------------------
 
 def compute_plan(magnitude, snr, target_filter, fwhm,
-                 stat_file=STAT_FILE, cfg: TelescopeConfig = None, verbose=True):
+                 stat_dir=STAT_DIR, cfg: CameraConfig = None, verbose=True):
     """
     Compute an observation plan for (magnitude, snr) in target_filter.
 
     Returns (n_exp, exptime, total_s, zp_1s, bgnoise_1s) or None on failure.
     """
     if cfg is None:
-        cfg = TelescopeConfig.load()
+        cfg = CameraConfig.load()
 
     jd_now = current_jd()
 
     try:
-        recent, last = load_recent(stat_file)
+        recent, last = load_recent(stat_dir)
     except Exception as e:
-        print(f"Warning: could not read {stat_file}: {e}", file=sys.stderr)
+        print(f"Warning: could not read {stat_dir}: {e}", file=sys.stderr)
         recent, last = pd.DataFrame(), None
 
     if last is not None:
@@ -236,19 +233,19 @@ def main():
                         help='Required signal-to-noise ratio')
     parser.add_argument('-f', '--filter', dest='filter_name',
                         default='Sloan_r',
-                        help='Observing filter (must match a key in config filter_params)')
+                        help='Observing filter (must match a key in filter_params)')
     parser.add_argument('--fwhm', type=float, default=None,
-                        help='PSF FWHM in pixels (default: from config default_fwhm)')
-    parser.add_argument('--stat', default=STAT_FILE, metavar='FILE',
-                        help='Path to stat.txt (or set RTS2_STAT_FILE)')
-    parser.add_argument('--config', default=None, metavar='FILE',
-                        help='Telescope config YAML (or set RTS2_OBSERVE_CONFIG)')
+                        help='PSF FWHM in pixels (default: from camera config default_fwhm)')
+    parser.add_argument('--stat', default=STAT_DIR, metavar='DIR',
+                        help='Path to stat directory (or set RTS2_STAT_DIR)')
+    parser.add_argument('--camera', default=None, metavar='NAME',
+                        help='Camera section in /etc/asarina/config (default: $ASARINA_CAMERA or C0)')
     parser.add_argument('--execute', action='store_true',
                         help='Execute the plan on C0 via RTS2 after calculation')
 
     args = parser.parse_args()
 
-    cfg  = TelescopeConfig.load(args.config)
+    cfg  = CameraConfig.load(args.camera)
     fwhm = args.fwhm if args.fwhm is not None else cfg.default_fwhm
 
     if args.filter_name not in cfg.filter_params:
@@ -257,7 +254,7 @@ def main():
         sys.exit(1)
 
     result = compute_plan(args.magnitude, args.snr, args.filter_name,
-                          fwhm, stat_file=args.stat, cfg=cfg)
+                          fwhm, stat_dir=args.stat, cfg=cfg)
     if result is None:
         sys.exit(1)
 

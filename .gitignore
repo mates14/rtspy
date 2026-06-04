@@ -56,9 +56,6 @@ env/
 *.swo
 *~
 
-# Trained ML models — numpy-version-specific pickle, must be rebuilt per machine
-rtspy/observe/bgnoise_model.pkl
-
 # RTS2 specific
 rts2  # symlink
 *.log
