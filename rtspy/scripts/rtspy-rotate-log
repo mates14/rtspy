@@ -1,0 +1,19 @@
+#!/bin/bash
+# Rotate /home/mates/rtspy.log to ~/logs/rtspy-YYYYMMDD.log and truncate in place.
+#
+# Safe with no service restart: both rtspy daemons hold the log fd open with
+# O_APPEND, so after truncation they write from offset 0 automatically.
+#
+# Run from mates' crontab at noon (astronomical quiet period):
+#   0 12 * * * /home/mates/bin/rtspy-rotate-log
+
+LOG=/home/mates/rtspy.log
+DEST_DIR=/home/mates/logs
+DEST="${DEST_DIR}/rtspy-$(date +%Y%m%d).log"
+
+[ -s "$LOG" ] || exit 0          # nothing to rotate if empty
+[ -f "$DEST" ] && exit 0         # already rotated today
+
+mkdir -p "$DEST_DIR"
+cp "$LOG" "$DEST"
+truncate -s 0 "$LOG"

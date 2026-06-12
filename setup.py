@@ -8,5 +8,6 @@ setup(
         'rtspy/scripts/rts2-queuer',
         'rtspy/scripts/rts2-filterd-ovis',
         'rtspy/scripts/rts2-observe',
+        'rtspy/scripts/rtspy-rotate-log',
     ]
 )

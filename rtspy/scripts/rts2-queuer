@@ -48,8 +48,19 @@ fi
 # Create lock file directory if it doesn't exist
 mkdir -p "$(dirname "$LOCK_FILE")"
 
-# Start the process in background without pipe (to get correct PID)
-sudo -u "$RUN_USER" nohup "$PYTHON_SCRIPT" "$@" >> "$LOG_FILE" 2>&1 &
+# Ensure log file is owned by RUN_USER so log rotation works without root.
+# This wrapper runs as root, so we can fix ownership here before launching.
+if [[ -f "$LOG_FILE" ]]; then
+    chown "$RUN_USER" "$LOG_FILE"
+else
+    install -o "$RUN_USER" -m 644 /dev/null "$LOG_FILE"
+fi
+
+# Redirect happens inside sudo so the fd is opened as RUN_USER (not root),
+# keeping the log file mates-owned through restarts.
+sudo -u "$RUN_USER" \
+    env LOG_FILE="$LOG_FILE" \
+    bash -c 'nohup "$@" >> "$LOG_FILE" 2>&1' -- "$PYTHON_SCRIPT" "${ARGS[@]}" &
 SUDO_PID=$!
 
 # Wait a moment for the process to start
