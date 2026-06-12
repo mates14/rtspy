@@ -9,5 +9,6 @@ setup(
         'rtspy/scripts/rts2-filterd-ovis',
         'rtspy/scripts/rts2-observe',
         'rtspy/scripts/rtspy-rotate-log',
+        'rtspy/scripts/rtspy-split-log',
     ]
 )

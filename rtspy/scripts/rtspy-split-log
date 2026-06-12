@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""Split a monolithic rtspy.log into per-day files in ~/logs/.
+
+Usage: rtspy-split-log [--dest DIR] LOGFILE [LOGFILE ...]
+
+Lines that don't start with a timestamp are written to the same file as the
+preceding timestamped line (handles multi-line tracebacks etc.).
+Output files are opened in append mode, so running against an already-rotated
+file won't clobber today's log.
+"""
+import argparse
+import re
+import sys
+from pathlib import Path
+
+TIMESTAMP_RE = re.compile(r'^(\d{4})-(\d{2})-(\d{2})T')
+
+
+def split_log(src: Path, dest_dir: Path) -> None:
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    handles: dict[str, object] = {}
+    current_key = None
+
+    try:
+        with src.open(errors='replace') as f:
+            for line in f:
+                m = TIMESTAMP_RE.match(line)
+                if m:
+                    current_key = f"{m.group(1)}{m.group(2)}{m.group(3)}"
+                if current_key is None:
+                    continue  # skip any preamble before first timestamp
+                if current_key not in handles:
+                    out = dest_dir / f"rtspy-{current_key}.log"
+                    handles[current_key] = out.open('a')
+                handles[current_key].write(line)
+    finally:
+        for h in handles.values():
+            h.close()
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--dest', default=Path.home() / 'logs', type=Path,
+                    help='destination directory (default: ~/logs)')
+    ap.add_argument('logfiles', nargs='+', type=Path)
+    args = ap.parse_args()
+
+    for src in args.logfiles:
+        if not src.exists():
+            print(f"rtspy-split-log: {src}: no such file", file=sys.stderr)
+            sys.exit(1)
+        print(f"splitting {src} → {args.dest}/rtspy-YYYYMMDD.log …", flush=True)
+        split_log(src, args.dest)
+    print("done.")
+
+
+if __name__ == '__main__':
+    main()
