@@ -30,6 +30,15 @@ The high base ensures pipeline ID spaces do not overlap.  WXT alerts happen to
 survive INT4 because their base (≈1.7 billion) is just below the limit; all
 other pipelines observed so far overflow.
 
+## Scientific impact
+
+In practice the bug selectively dropped alerts from the post-processing pipelines
+(`119xx`, `136xx` prefixes), which arrive hours after the event — found
+retrospectively in telemetry rather than in real time.  The real-time WXT pipeline
+(`017xx`) fits in INT4 and was never affected.  By the time a post-processing alert
+arrives the follow-up window for a fast transient is already closed, so no
+actionable observations were lost.
+
 ## Role of grb_id
 
 `grb_id` is stored purely for human cross-referencing against GCN — to verify
