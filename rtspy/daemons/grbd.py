@@ -959,20 +959,21 @@ class GrbDaemon(Device, DeviceConfig):
                     pass
 
     def _convert_grb_id_to_int(self, grb_id: str) -> int:
-        """FIXED: Safely convert GRB ID to integer."""
+        """Safely convert GRB ID to integer fitting in a 32-bit DB column."""
         try:
-            return int(grb_id)
+            val = int(grb_id)
         except (ValueError, TypeError):
-            # Handle Einstein Probe or other non-numeric IDs
             if grb_id.startswith('EP_'):
-                # Extract timestamp from Einstein Probe ID
                 try:
-                    return int(grb_id[3:])
+                    val = int(grb_id[3:])
                 except (ValueError, TypeError):
-                    pass
-
-            # If grb_id is not numeric, create a stable hash
-            return abs(hash(grb_id)) % 2147483647
+                    return abs(hash(grb_id)) % 1_000_000_000
+            else:
+                return abs(hash(grb_id)) % 1_000_000_000
+        # Keep last 9 digits if value exceeds INT4 range (e.g. Einstein Probe IDs)
+        if val > 2_147_483_647:
+            val = val % 1_000_000_000
+        return val
 
     def _are_positions_compatible(self, ra1, dec1, err1, ra2, dec2, err2):
         """
