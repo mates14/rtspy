@@ -328,7 +328,7 @@ class Value(Generic[T]):
 
     def send_type_meta_info(self, conn) -> int:
         """Send type metadata information."""
-        msg = f"{PROTO_METAINFO} {self.rts2_type} \"{self.name}\" \"{self.description}\""
+        msg = f"{PROTO_METAINFO} {int(self.rts2_type)} \"{self.name}\" \"{self.description}\""
         logging.debug(f"send_type_meta_info: {msg}")
         return conn.send_msg(msg)
 

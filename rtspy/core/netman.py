@@ -762,7 +762,7 @@ class NetworkManager:
         with self._lock:
             for value in self.values.values():
                 # Send detailed metadata using the E protocol command
-                msg = f"E {value.rts2_type} \"{value.name}\" \"{value.description}\"\n"
+                msg = f"E {int(value.rts2_type)} \"{value.name}\" \"{value.description}\"\n"
                 conn.send(msg)
 
                 # Handle selection values specially
