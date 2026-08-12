@@ -473,12 +473,14 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
 
             # Home the filter wheel (from filterd_ovis.py)
             logging.info("Homing filter wheel")
-            self.set_state(self._state | self.FILTERD_MOVE, "Homing filter wheel", self.BOP_EXPOSURE)
+            self.set_state(self._state | self.FILTERD_MOVE, "Homing filter wheel",
+                            self.set_bop_exposure('filter', True))
 
             response = self.serial_comm.send_command("M 1 HOM", True, self.home_timeout)
             if not response or "OK" not in response:
                 logging.error("Failed to home filter wheel")
-                self.set_state(self.STATE_IDLE | self.ERROR_HW, "Failed to home filter wheel")
+                self.set_state(self.STATE_IDLE | self.ERROR_HW, "Failed to home filter wheel",
+                                self.set_bop_exposure('filter', False))
                 return
 
             # Homing successful
@@ -486,7 +488,8 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
             self.filter_num = 0
             self.motor_initialized = True
 
-            # Move filter to position 0
+            # Move filter to position 0 (raises its own 'filter' BOP reason,
+            # cleared asynchronously by _handle_filter_movement_complete)
             self.set_filter_num(0)
 
             # Initialize focuser position
@@ -494,13 +497,15 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
             self.foc_tar.value = 0.0
             self.foc_def.value = 0.0
 
-            # Mark device as ready
-            self.set_state(self.STATE_IDLE, "OVIS multi-function device ready", 0)
+            # Mark device as ready - do not touch BOP state here, the filter
+            # move to position 0 just started above is still in progress
+            self.set_state(self.STATE_IDLE, "OVIS multi-function device ready")
             self.set_ready("Multi-function device initialized and ready")
 
         except Exception as e:
             logging.error(f"Error initializing OVIS device: {e}")
-            self.set_state(self.STATE_IDLE | self.ERROR_HW, f"Initialization error: {e}")
+            self.set_state(self.STATE_IDLE | self.ERROR_HW, f"Initialization error: {e}",
+                            self.set_bop_exposure('filter', False))
 
     def stop(self):
         """Stop the OVIS device."""
@@ -613,7 +618,7 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
         self.set_state(
             self._state | self.FILTERD_MOVE,
             f"Moving to filter {new_filter}",
-            self.BOP_EXPOSURE
+            self.set_bop_exposure('filter', True)
         )
 
         # Mark as moving
@@ -639,7 +644,7 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
         self.set_state(
             self._state | self.FILTERD_MOVE,
             "Homing filter wheel",
-            self.BOP_EXPOSURE
+            self.set_bop_exposure('filter', True)
         )
 
         # Send home command with configured timeout
@@ -647,7 +652,8 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
 
         if not response or "OK" not in response:
             logging.error("Failed to home filter wheel")
-            self.set_state(self._state & ~(self.FILTERD_MOVE), "Homing failed", 0)
+            self.set_state(self._state & ~(self.FILTERD_MOVE), "Homing failed",
+                            self.set_bop_exposure('filter', False))
             return -1
 
         # Homing successful
@@ -658,7 +664,8 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
         self.filter.value = 0
 
         # Reset state
-        self.set_state(self._state & ~(self.FILTERD_MOVE), "Filter wheel homed", 0)
+        self.set_state(self._state & ~(self.FILTERD_MOVE), "Filter wheel homed",
+                        self.set_bop_exposure('filter', False))
         return 0
 
     # ========== FocuserMixin Implementation ==========
@@ -704,7 +711,7 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
         self.set_state(
             self._state | self.FOC_FOCUSING,
             "Homing focuser",
-            self.BOP_EXPOSURE
+            self.set_bop_exposure('focus', True)
         )
 
         # Send home command
@@ -712,7 +719,8 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
 
         if not response or "OK" not in response:
             logging.error("Failed to home focuser")
-            self.set_state(self._state & ~(self.FOC_FOCUSING), "Focuser homing failed", 0)
+            self.set_state(self._state & ~(self.FOC_FOCUSING), "Focuser homing failed",
+                            self.set_bop_exposure('focus', False))
             return -1
 
         # Homing successful
@@ -723,7 +731,8 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
         self.foc_tar.value = 0.0
 
         # Reset state
-        self.set_state(self._state & ~(self.FOC_FOCUSING), "Focuser homed", 0)
+        self.set_state(self._state & ~(self.FOC_FOCUSING), "Focuser homed",
+                        self.set_bop_exposure('focus', False))
         return 0
 
     # ========== Device Methods ==========

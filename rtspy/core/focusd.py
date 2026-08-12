@@ -270,7 +270,7 @@ class FocuserMixin(DeviceConfig):
             self.set_state(
                 self._state | self.FOC_FOCUSING,
                 f"Moving to position {target}",
-                self.BOP_EXPOSURE
+                self.set_bop_exposure('focus', True)
             )
 
             # Set progress information if duration is available
@@ -296,7 +296,8 @@ class FocuserMixin(DeviceConfig):
                 self._movement_in_progress = False
                 self.set_state(
                     self._state & ~self.FOC_FOCUSING | self.ERROR_HW,
-                    "Focus movement failed"
+                    "Focus movement failed",
+                    self.set_bop_exposure('focus', False)
                 )
                 return -1
 
@@ -311,7 +312,8 @@ class FocuserMixin(DeviceConfig):
             self._movement_in_progress = False
             self.set_state(
                 self._state & ~self.FOC_FOCUSING | self.ERROR_HW,
-                f"Focus error: {e}"
+                f"Focus error: {e}",
+                self.set_bop_exposure('focus', False)
             )
             return -1
 
@@ -375,7 +377,8 @@ class FocuserMixin(DeviceConfig):
         # Update state
         self.set_state(
             self._state & ~self.FOC_FOCUSING,
-            "Focusing completed"
+            "Focusing completed",
+            self.set_bop_exposure('focus', False)
         )
 
         # Send response to pending command if present
@@ -490,7 +493,8 @@ class FocuserMixin(DeviceConfig):
                     self._movement_in_progress = False
                     self.set_state(
                         self._state & ~self.FOC_FOCUSING | self.ERROR_HW,
-                        "Focusing failed"
+                        "Focusing failed",
+                        self.set_bop_exposure('focus', False)
                     )
 
                     # Send error response to pending command if present
@@ -533,10 +537,6 @@ class FocuserMixin(DeviceConfig):
         # Create and register focuser-specific command handler
         focuser_handler = FocuserCommands(self)
         self.network.command_registry.register_handler(focuser_handler)
-
-    def should_queue_value(self, value):
-        """Check if a value change should be queued."""
-        return False
 
     def focuser_info_update(self):
         """Update focuser information from hardware."""

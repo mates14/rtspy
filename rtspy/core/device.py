@@ -123,12 +123,10 @@ class Device(DeviceConfig):
         self.network.info_callback = self.info
         self.network.centrald_connected_callback = self._on_centrald_connected
 
-        # Value queuing system
-        self.queued_values = {}
-
         # Initialize in IDLE state
         self._state = self.STATE_IDLE
         self._bop_state = 0
+        self._bop_exposure_reasons = set()
 
         # Track expected progress times
         self.state_start = float('nan')
@@ -245,19 +243,12 @@ class Device(DeviceConfig):
         # Update internal state
         self._state = new_state
 
-        # Process any queued values first - these will be sent immediately
-        # This ensures all value changes happen before state changes
-        self.check_queued_values()
-
         # Update BOP state if provided
         if new_bop is not None:
             self.set_full_bop_state(new_bop)  # This will handle BOP state changes
         else:
             # Only state changed - use S command
             self.network.set_device_state(new_state, description)
-
-        # Check queued values that might now be executable
-        self.check_queued_values()
 
         # Call user-defined state changed handler if state changed
         #if old_state != new_state:
@@ -279,23 +270,30 @@ class Device(DeviceConfig):
         if self._bop_state == new_bop_state:
             return
 
-        # Adjust BOP state for queued values
-        for value, op, new_value in self.queued_values.values():
-            if hasattr(self, 'mask_que_value_bop_state'):
-                new_bop_state = self.mask_que_value_bop_state(new_bop_state, value.get_que_condition())
-
-        # Store old state values
-        old_state = self._state
-        old_bop = self._bop_state
-
         # Update internal BOP state
         self._bop_state = new_bop_state
 
         # Propagate to network - use B command for combined state + BOP update
         self.network.set_bop_state(self._state, new_bop_state)
 
-        # Check queued values now that BOP state has changed
-        self.check_queued_values()
+    def set_bop_exposure(self, reason, active):
+        """
+        Add or remove a reason for asserting BOP_EXPOSURE.
+
+        A single device process can host more than one independently
+        moving mechanism (e.g. OVIS combines a filter wheel and a
+        focuser). Each holds BOP_EXPOSURE for its own reason while
+        busy; the flag must only clear once no reason remains, so one
+        mechanism finishing must not drop a block still held by the
+        other.
+
+        Returns the BOP state to pass as set_state()'s new_bop argument.
+        """
+        if active:
+            self._bop_exposure_reasons.add(reason)
+        else:
+            self._bop_exposure_reasons.discard(reason)
+        return self.BOP_EXPOSURE if self._bop_exposure_reasons else 0
 
     def register_value(self, value):
         """Register a value with the device."""
@@ -314,43 +312,6 @@ class Device(DeviceConfig):
     def connect_to_centrald(self, host, port):
         """Connect to a centrald server."""
         return self.network.connect_to_centrald(host, port)
-
-    def should_queue_value(self, value):
-        """
-        Check if a value change should be queued.
-
-        This method should be overridden by subclasses to implement
-        queuing logic based on device state.
-        """
-        # Default implementation - can be overridden by subclasses
-        # For example, queue changes when device is busy
-        return False
-
-    def queue_value_change(self, value, op, new_value):
-        """Queue a value change."""
-        key = value.name
-        self.queued_values[key] = (value, op, new_value)
-
-    def check_queued_values(self):
-        """Check queued values that may now be executable."""
-        # Process all queued values
-        keys_to_remove = []
-
-        for key, (value, op, new_value) in self.queued_values.items():
-            # Check if we can apply the change now
-            if not self.should_queue_value(value):
-                # Apply the change
-                try:
-                    value._value = new_value
-                    value.changed()
-                    self.distribute_value(value)
-                    keys_to_remove.append(key)
-                except Exception as e:
-                    logging.error(f"Error updating queued value {value.name}: {e}")
-
-        # Remove processed values
-        for key in keys_to_remove:
-            del self.queued_values[key]
 
     def _handle_info_command(self, conn, params):
         """Handle 'info' command."""

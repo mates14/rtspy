@@ -29,7 +29,7 @@ The focuser implementation has been completely rewritten to follow the same patt
 - **Focusing state**: Proper FOC_FOCUSING state during movement
 - **Progress tracking**: Duration estimation and progress reporting
 - **Error handling**: Timeout detection and error state management
-- **Queuing**: Value changes are queued during focusing operations
+- **BOP_EXPOSURE**: Raised while focusing (blocking new exposures elsewhere), cleared on completion or error
 
 ### 5. Temperature Compensation
 - **External monitoring**: Connect to other devices for temperature readings

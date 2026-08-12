@@ -142,33 +142,21 @@ class Value(Generic[T]):
     @track_changes
     def value(self, new_value: T) -> None:
         """
-        Set the value, with automatic queuing and network distribution.
+        Set the value and distribute the change over the network.
         For network updates, use update_from_network() instead.
-
-        Raises:
-            ValueError: If change was queued
         """
-        was_set = self._set_value(new_value, from_network=False)
-        # We can do something with was_set if needed,
-        # e.g., log that it was queued
+        self._set_value(new_value, from_network=False)
 
     def _set_value(self, new_value: Any, from_network: bool = False) -> bool:
         """
         Internal method to set value with control over network behavior.
 
         Returns:
-            True if value was set immediately, False if it was queued
+            True if value was set immediately, False otherwise
         """
         # Get singleton device
         from rtspy.core.device import Device
         device = Device.get_instance()
-
-        # Check if we should queue (only for non-network updates)
-        if not from_network and device and device.should_queue_value(self):
-            #device.network.distribute_value_immediate(self)
-            device.queue_value_change(self, '=', new_value)
-            logging.info(f"Value change for {self.name} was queued")
-            return False  # Indicate value was queued
 
         # Proceed with change
         converted_value = self._convert_value(new_value)

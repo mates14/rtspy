@@ -172,7 +172,7 @@ class FilterMixin(DeviceConfig):
         self.set_state(
             self._state | self.FILTERD_MOVE,
             "filter move started",
-            self.BOP_EXPOSURE
+            self.set_bop_exposure('filter', True)
         )
 
         # Log movement
@@ -196,7 +196,8 @@ class FilterMixin(DeviceConfig):
             # Error occurred
             self.movement_in_progress = False
             if ret == -1:
-                self.set_state(self._state | self.ERROR_HW, "filter movement failed", 0)
+                self.set_state(self._state | self.ERROR_HW, "filter movement failed",
+                                self.set_bop_exposure('filter', False))
             return ret
 
     def movement_completed(self):
@@ -219,7 +220,8 @@ class FilterMixin(DeviceConfig):
         self.movement_in_progress = False
 
         # Reset device state
-        self.set_state(self._state & ~(self.FILTERD_MOVE), "Filter wheel idle", 0)
+        self.set_state(self._state & ~(self.FILTERD_MOVE), "Filter wheel idle",
+                        self.set_bop_exposure('filter', False))
 
         # Send response to pending command if present
         if self.pending_filter_connection:
@@ -301,13 +303,6 @@ class FilterMixin(DeviceConfig):
     def send_filter_names(self):
         """Send filter names to clients."""
         self.network.update_meta_informations(self.filter)
-
-    def should_queue_value(self, value):
-        """Check if a value change should be queued."""
-        # Queue value changes when filter is moving
-        #if (self._state & self.FILTERD_MASK) == self.FILTERD_MOVE:
-        #    return True
-        return False
 
     def set_associated_ccd(self, ccd_name):
         """Set the associated CCD device for state monitoring."""
