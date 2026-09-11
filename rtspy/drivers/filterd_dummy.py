@@ -108,28 +108,8 @@ class DummyFilter(Filterd):
 
 
 def main():
-    """Entry point for rts2-filterd-dummy daemon."""
-    # Create application
-    app = App(description='Dummy Filter Wheel Driver')
-
-    # Register device-specific options
-    app.register_device_options(DummyFilter)
-
-    # Parse command line arguments
-    args = app.parse_args()
-
-    # Create and configure device
-    device = app.create_device(DummyFilter)
-
-    # Show config summary if debug enabled
-    if getattr(args, 'debug', False):
-        print("\nDummyFilter Configuration Summary:")
-        print("=" * 50)
-        print(device.get_config_summary())
-        print("=" * 50)
-
-    # Run application main loop
-    app.run()
+    """Entry point - see rtspy/core/daemon.py for the startup contract."""
+    return App(description='Dummy Filter Wheel Driver').main(DummyFilter)
 
 
 if __name__ == "__main__":

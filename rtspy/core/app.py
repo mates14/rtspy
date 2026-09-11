@@ -1,6 +1,7 @@
 import os
 import sys
 import argparse
+import inspect
 import logging
 import logging.handlers
 import time
@@ -9,9 +10,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from rtspy.core.device import Device
+from rtspy.core import daemon as rts2daemon
 
 # Custom formatter class to handle the specific format you want
 class RTS2LogFormatter(logging.Formatter):
+    # set once the configuration is resolved, before any Device is built
+    device_name = None
+
     def format(self, record):
         # Convert level names to single letters
         level_map = {
@@ -22,10 +27,14 @@ class RTS2LogFormatter(logging.Formatter):
             'CRITICAL': 'C'
         }
 
-        # Get the device name from the Device singleton if available
+        # Prefer the name resolved from the configuration: the daemon logs
+        # (lock errors, privilege failures) before any Device exists, and
+        # "UNKNOWN" in those lines is exactly where the name is wanted most.
         from rtspy.core.device import Device
         device = Device.get_instance()
-        device_name = getattr(device, 'device_name', 'UNKNOWN') if device else 'UNKNOWN'
+        device_name = getattr(device, 'device_name', None) if device else None
+        if not device_name:
+            device_name = RTS2LogFormatter.device_name or 'UNKNOWN'
 
         # Format timestamp in UTC
         timestamp = datetime.fromtimestamp(record.created, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3]
@@ -45,6 +54,10 @@ class App:
         self.parser = argparse.ArgumentParser(description=description)
         self.args = None
         self.device = None
+        self.registry = None
+        self.config = None
+        self.lock = None
+        self.shutdown = None
 
     def register_device_options(self, device_class: Type[Device]):
         """
@@ -114,8 +127,11 @@ class App:
         # Create device instance with basic parameters
         self.device = device_class(device_name=device_name, port=port)
 
-        # Apply configuration from all sources using DeviceConfig system
-        device_class.process_args(self.device, self.args)
+        # Apply configuration from all sources using DeviceConfig system.
+        # A daemon has already resolved this before forking (it had to know
+        # what to lock), so reuse it rather than parsing everything twice.
+        device_class.process_args(self.device, self.args,
+                                  self.registry, self.config)
 
         # At this point, logging configuration has been applied by the device config system
         # so we need to reconfigure logging with the proper RTS2 formatter
@@ -155,9 +171,12 @@ class App:
 
         handlers_added = []
 
-        # 1. CONSOLE HANDLER (always present for development)
+        # 1. CONSOLE HANDLER. stderr rather than stdout on purpose: while a
+        # daemon is initialising, rts2-start captures its stderr and prints
+        # it under the failure line, so this is what turns "FAILED (exit 12)"
+        # into a message saying why.
         try:
-            console_handler = logging.StreamHandler(sys.stdout)
+            console_handler = logging.StreamHandler(sys.stderr)
             console_handler.setFormatter(formatter)
             console_handler.setLevel(current_level)
             root_logger.addHandler(console_handler)
@@ -221,34 +240,17 @@ class App:
             except Exception as e:
                 print(f"Warning: Could not setup file handler: {e}", file=sys.stderr)
 
-        # 3. SYSLOG HANDLER for system integration
+        # 3. SYSLOG HANDLER, under the shared ident "rts2" that every C++
+        # RTS2 daemon uses. That ident is not cosmetic: the shipped rsyslog
+        # rule matches programname == 'rts2' and routes the whole
+        # observatory into /var/log/rts2.log, so a daemon logging under any
+        # other name is simply missing from the site log.
         try:
-            # Try different syslog paths
-            syslog_paths = [
-                '/dev/log',        # Most Linux systems
-                '/var/run/syslog', # Some systems
-                ('localhost', 514) # UDP fallback
-            ]
-
-            syslog_handler = None
-            for path in syslog_paths:
-                try:
-                    if isinstance(path, tuple):
-                        syslog_handler = logging.handlers.SysLogHandler(address=path)
-                    else:
-                        syslog_handler = logging.handlers.SysLogHandler(address=path)
-                    break
-                except (OSError, ConnectionRefusedError):
-                    continue
-
-            if syslog_handler:
-                syslog_handler.setFormatter(syslog_formatter)
-                syslog_handler.setLevel(current_level)
-                # Use local0 facility for custom applications
-                syslog_handler.facility = logging.handlers.SysLogHandler.LOG_LOCAL0
-                root_logger.addHandler(syslog_handler)
-                handlers_added.append("syslog")
-
+            syslog_handler = rts2daemon.Rts2SyslogHandler("rts2")
+            syslog_handler.setFormatter(syslog_formatter)
+            syslog_handler.setLevel(current_level)
+            root_logger.addHandler(syslog_handler)
+            handlers_added.append("syslog(rts2)")
         except Exception as e:
             print(f"Warning: Could not setup syslog handler: {e}", file=sys.stderr)
 
@@ -266,17 +268,152 @@ class App:
 
 
     def run(self):
-        """Run the application main loop."""
+        """
+        Run the application main loop.
+
+        Nothing happens here - the device lives on its network and hardware
+        threads. This just holds the main thread until a signal arrives, so
+        that rts2-stop's SIGTERM reaches device.stop() instead of killing
+        the interpreter out from under it.
+        """
         if not self.device:
             raise RuntimeError("Device not created - call create_device() first")
 
         try:
-            # Main application loop
-            while True:
-                time.sleep(10)
-
+            if self.shutdown is not None:
+                signum = self.shutdown.wait()
+                logging.info("received signal %d, shutting down", signum)
+            else:
+                # not started through main() - no handlers installed
+                while True:
+                    time.sleep(10)
         except KeyboardInterrupt:
             logging.info("Shutting down...")
         finally:
             if self.device:
                 self.device.stop()
+            if self.lock:
+                self.lock.release()
+
+    # ------------------------------------------------------------------
+    # the daemon entry point
+    # ------------------------------------------------------------------
+
+    def main(self, device_class: Type[Device]) -> int:
+        """
+        Start a driver the way a C++ RTS2 daemon starts.
+
+        Order matters throughout and mirrors Daemon::init()/run() - see
+        docs/daemonising-rtspy.md. In particular the configuration is
+        resolved, the lock taken and the fork done before the device exists,
+        because every one of those needs to happen while the process is
+        still single-threaded.
+
+        Returns a process exit status; drivers should sys.exit() it.
+        """
+        self.register_device_options(device_class)
+        self.args = self.parser.parse_args()
+
+        # 1. resolve the configuration with no device and no threads
+        self.registry, self.config = device_class.resolve_config(self.args)
+
+        if self.config.get('show_config', False):
+            print(self.registry.format_config_summary(self.config))
+            return 0
+
+        device_name = self._resolve_device_name(device_class)
+        if device_name is None:
+            return 1
+        RTS2LogFormatter.device_name = device_name
+
+        self._setup_early_logging()
+
+        for opt in self.registry.unimplemented_options(self.config):
+            logging.warning("%s is accepted for compatibility but does nothing", opt)
+
+        # 2. take the lock. -i does not skip this: an interactive start of a
+        #    daemon that is already running is still a duplicate.
+        lock_path = rts2daemon.lock_path_for(device_name,
+                                             self.config.get('lock_prefix'))
+        self.lock = rts2daemon.LockFile(lock_path)
+        ret = self.lock.acquire()
+        if ret == -1:
+            return rts2daemon.EXIT_ALREADY_RUNNING
+        if ret < 0:
+            return rts2daemon.EXIT_LOCK_ERROR
+
+        # 3. fork, keeping a pipe back to the process the shell waits on
+        if not self.config.get('interactive'):
+            rts2daemon.do_daemonize(self.config.get('daemonize_timeout', 120))
+
+        # 4. drop privileges, then record the pid we ended up with
+        if not rts2daemon.drop_privileges(self.config.get('run_as')):
+            return 1
+        self.lock.write_pid()
+
+        # 5. signal handlers, before anything can need stopping
+        self.shutdown = rts2daemon.ShutdownRequest()
+        self.shutdown.install()
+
+        # 6. everything that can fail. Until daemonize_ready() below, stderr
+        #    is still the terminal that started us, so whatever goes wrong
+        #    here is what rts2-start prints under its failure line.
+        try:
+            self.create_device(device_class)
+        except Exception as exc:
+            logging.error("cannot start %s: %s", device_name, exc, exc_info=True)
+            return 12
+
+        # 7. up. Tell the waiting parent and let go of the console.
+        rts2daemon.daemonize_ready()
+        logging.info("%s started", device_name)
+
+        self.run()
+        return 0
+
+    def _resolve_device_name(self, device_class: Type[Device]) -> Optional[str]:
+        """
+        Work out what to lock, before the device that knows its own name exists.
+
+        -d wins; otherwise fall back to the driver's own default, which is
+        the device_name default in its __init__ signature (F0, W0, ...).
+        """
+        name = self.config.get('device')
+        if name:
+            return name
+
+        try:
+            default = inspect.signature(device_class.__init__) \
+                .parameters['device_name'].default
+        except (ValueError, KeyError):
+            default = None
+
+        if default and default is not inspect.Parameter.empty:
+            return default
+
+        print("%s: no device name - pass -d <name>" % self.parser.prog,
+              file=sys.stderr)
+        return None
+
+    def _setup_early_logging(self):
+        """
+        Minimal stderr logging for the pre-fork stage.
+
+        Lock failures and privilege errors happen before the real logging is
+        configured and before any device exists; without this they would be
+        invisible in exactly the case rts2-start most needs to explain.
+        """
+        level = logging.INFO
+        if self.config.get('debug'):
+            level = logging.DEBUG
+        elif self.config.get('verbose'):
+            level = logging.INFO
+
+        root = logging.getLogger()
+        for handler in root.handlers[:]:
+            root.removeHandler(handler)
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(RTS2LogFormatter())
+        handler.setLevel(level)
+        root.addHandler(handler)
+        root.setLevel(level)

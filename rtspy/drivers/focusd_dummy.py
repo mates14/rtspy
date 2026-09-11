@@ -307,38 +307,8 @@ class DummyFocuser(Focusd):
 
 
 def main():
-    """Main entry point for dummy focuser."""
-    # Create application
-    app = App(description='RTS2 Dummy Focuser')
-    
-    # Register device options
-    app.register_device_options(DummyFocuser)
-    
-    # Parse arguments
-    args = app.parse_args()
-    
-    # Create device
-    device = app.create_device(DummyFocuser)
-    
-    # Show configuration if debug enabled
-    if getattr(args, 'debug', False):
-        print("\nDummy Focuser Configuration:")
-        print("=" * 40)
-        print(device.get_config_summary())
-        print("=" * 40)
-        
-    logging.info("Starting RTS2 Dummy Focuser")
-    
-    # Run application
-    try:
-        app.run()
-        return 0
-    except KeyboardInterrupt:
-        logging.info("Shutting down dummy focuser")
-        return 0
-    except Exception as e:
-        logging.error(f"Fatal error in dummy focuser: {e}")
-        return 1
+    """Entry point - see rtspy/core/daemon.py for the startup contract."""
+    return App(description='RTS2 Dummy Focuser').main(DummyFocuser)
 
 
 if __name__ == "__main__":

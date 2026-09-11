@@ -129,28 +129,8 @@ class TemperatureSensor(Device, DeviceConfig):
         logging.info(f"State changed from {old_state:x} to {new_state:x}: {message}")
 
 def main():
-    """Entry point for rts2-sensor-temp daemon."""
-    # Create application
-    app = App(description='Temperature Sensor Device')
-
-    # Register device options (this calls setup_config() internally)
-    app.register_device_options(TemperatureSensor)
-
-    # Parse arguments
-    args = app.parse_args()
-
-    # Create device (this calls apply_config() internally)
-    device = app.create_device(TemperatureSensor)
-
-    # Show config if debug enabled
-    if getattr(args, 'debug', False):
-        print("\nConfiguration Summary:")
-        print("=" * 50)
-        print(device.get_config_summary())
-        print("=" * 50)
-
-    # Run application
-    app.run()
+    """Entry point - see rtspy/core/daemon.py for the startup contract."""
+    return App(description='Temperature Sensor Device').main(TemperatureSensor)
 
 
 if __name__ == "__main__":

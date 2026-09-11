@@ -797,38 +797,8 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
         logging.info(f"Neon lamp set to {'ON' if new_value else 'OFF'}")
 
 def main():
-    """Main entry point for OVIS multi-function device."""
-    # Create application
-    app = App(description='OVIS Multi-function Device (Filter + Focuser)')
-
-    # Register device options
-    app.register_device_options(OvisMultiFunction)
-
-    # Parse arguments
-    args = app.parse_args()
-
-    # Create device
-    device = app.create_device(OvisMultiFunction)
-
-    # Show config summary if debug enabled
-    if getattr(args, 'debug', False):
-        print("\nOVIS Multi-function Configuration:")
-        print("=" * 50)
-        print(device.get_config_summary())
-        print("=" * 50)
-
-    logging.info("Starting OVIS Multi-function Device (Filter + Focuser)")
-
-    # Run application
-    try:
-        app.run()
-        return 0
-    except KeyboardInterrupt:
-        logging.info("Shutting down OVIS multi-function device")
-        return 0
-    except Exception as e:
-        logging.error(f"Fatal error in OVIS device: {e}")
-        return 1
+    """Entry point - see rtspy/core/daemon.py for the startup contract."""
+    return App(description='OVIS Multi-function Device (Filter + Focuser)').main(OvisMultiFunction)
 
 
 if __name__ == "__main__":

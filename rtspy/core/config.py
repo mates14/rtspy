@@ -44,6 +44,12 @@ class ConfigArgument:
     
     def _get_config_key(self) -> str:
         """Get configuration key from argument name."""
+        # An explicit dest wins - otherwise adding a longer alias (say the
+        # C++ spelling --local-port beside --port) would silently rename the
+        # configuration key and orphan every reader of the old one.
+        dest = self.argparse_kwargs.get('dest')
+        if dest:
+            return dest
         # Use the longest name, remove dashes, convert to underscore
         longest_name = max(self.names, key=len)
         return longest_name.lstrip('-').replace('-', '_')
@@ -103,15 +109,36 @@ class DeviceConfigRegistry:
         self.add_argument('--disable-device', action='store_true',
                          help='Start device in disabled state', section='device')
         
-        # Network arguments
-        self.add_argument('-P', '--port', type=int, default=0,
+        # Network arguments. --local-port is the C++ spelling of --port;
+        # both are accepted so a line in /etc/rts2/devices written for a C++
+        # driver works unchanged against a Python one.
+        self.add_argument('-P', '--port', '--local-port', type=int, default=0,
+                         dest='port',
                          help='TCP/IP port for RTS2 communication', section='network')
         self.add_argument('-c', '--server', default='localhost',
-                         help='Centrald hostname', section='network')
+                         help='Centrald hostname, optionally as host:port',
+                         section='network')
         self.add_argument('-p', '--server-port', type=int, default=617,
                          help='Centrald port', section='network')
         self.add_argument('--connection-timeout', type=float, default=300.0,
                          help='Connection timeout in seconds', section='network')
+
+        # Daemon arguments - see rtspy/core/daemon.py and
+        # docs/daemonising-rtspy.md for what each one is obliged to do.
+        self.add_argument('-i', '--interactive', action='store_true',
+                         dest='interactive',
+                         help='run in interactive mode, do not fork to background',
+                         section='daemon')
+        self.add_argument('--lock-prefix', default=None,
+                         help='prefix for lock file (default /var/run/rts2_)',
+                         section='daemon')
+        self.add_argument('--run-as', default=None,
+                         help="run under specified user (and group, if provided after '.')",
+                         section='daemon')
+        self.add_argument('--daemonize-timeout', type=int, default=120,
+                         help='seconds to wait for the daemon to finish initialising '
+                              'before backgrounding it anyway (0 = wait forever)',
+                         section='daemon')
         
         # Logging arguments
         self.add_argument('-v', '--verbose', action='store_true',
@@ -128,8 +155,47 @@ class DeviceConfigRegistry:
                          help='Skip system config file', section='meta')
         self.add_argument('--show-config', action='store_true',
                          help='Show resolved configuration and exit', section='meta')
-        
+
+        self._add_compat_arguments()
+
         self._standard_args_added = True
+
+    # Options a C++ RTS2 daemon understands that rtspy has no equivalent for.
+    # They are accepted rather than rejected so that a device line written for
+    # the C++ driver never stops a Python one from starting - but anything
+    # actually set is reported at startup, so a silently ignored option can be
+    # found rather than wondered about.
+    COMPAT_ARGUMENTS = [
+        ('--autorestart', 1, 'seconds to wait for restart of crashed daemon'),
+        ('--modefile', 1, 'file holding device modes'),
+        ('--valuefile', 1, 'file with values which should be created on the device'),
+        ('--autosave', 1, 'autosave file'),
+        ('--defaults', 1, 'file with default values'),
+        ('--localhost', 1, 'hostname, if different from gethostname()'),
+        ('--noauth', 0, 'allow unauthorized connections'),
+        ('--notcheck', 0, 'ignore if some recommended values are not set'),
+    ]
+
+    def _add_compat_arguments(self):
+        """Accept the C++-only options without acting on them."""
+        for name, takes_value, help_text in self.COMPAT_ARGUMENTS:
+            if takes_value:
+                self.add_argument(name, default=None,
+                                  help='%s (accepted, not implemented)' % help_text,
+                                  section='compat')
+            else:
+                self.add_argument(name, action='store_true',
+                                  help='%s (accepted, not implemented)' % help_text,
+                                  section='compat')
+
+    def unimplemented_options(self, config: Dict[str, Any]) -> List[str]:
+        """Which accepted-but-inert options the caller actually asked for."""
+        used = []
+        for name, _takes_value, _help in self.COMPAT_ARGUMENTS:
+            key = name.lstrip('-').replace('-', '_')
+            if config.get(key):
+                used.append(name)
+        return used
     
     def register_with_parser(self, parser: argparse.ArgumentParser):
         """Register all arguments with an argparse parser."""
@@ -159,8 +225,32 @@ class DeviceConfigRegistry:
             if source_data:
                 config.update(source_data)
                 logging.debug(f"Applied {source_name} configuration")
-        
+
+        self._normalise(config)
+
         return config
+
+    @staticmethod
+    def _normalise(config: Dict[str, Any]):
+        """
+        Fix up values whose C++ spelling carries more than one field.
+
+        C++ takes the centrald address as a single --server host:port, rtspy
+        as a hostname plus a separate --server-port. Accepting the combined
+        form matters more than it looks: without this, --server sulafat:617
+        is taken as a *hostname* of "sulafat:617" and the daemon simply fails
+        to resolve it, with nothing in the log pointing at the real cause.
+        The port given inside --server wins over --server-port.
+        """
+        server = config.get('server')
+        if isinstance(server, str) and ':' in server:
+            host, _, port = server.rpartition(':')
+            try:
+                config['server_port'] = int(port)
+                config['server'] = host
+            except ValueError:
+                # not a port - leave it alone and let resolution complain
+                pass
     
     def _get_defaults(self) -> Dict[str, Any]:
         """Get default values from argument definitions."""
@@ -304,40 +394,73 @@ class DeviceConfig:
         self._resolved_config = {}
     
     @classmethod
-    def register_options(cls, parser: argparse.ArgumentParser):
-        """Register all device options with parser."""
-        # Create temporary instance to set up configuration
-        temp_registry = DeviceConfigRegistry()
-        temp_registry.add_standard_arguments()
-        
-        # Let device add its specific arguments
+    def build_registry(cls) -> 'DeviceConfigRegistry':
+        """
+        Build this class's full argument registry without an instance.
+
+        Deliberately free of any device: the daemon has to know its device
+        name, lock prefix and -i flag *before* it forks, and it has to fork
+        before it creates the device, because forking a process that has
+        already started threads hands the child locked mutexes with no
+        owners. setup_config() only ever touches the registry, so calling it
+        on an uninitialised instance is safe.
+        """
+        registry = DeviceConfigRegistry()
+        registry.add_standard_arguments()
+
         if hasattr(cls, 'setup_config'):
             temp_instance = cls.__new__(cls)  # Create without calling __init__
-            temp_instance._config_registry = temp_registry
-            temp_instance.setup_config(temp_registry)
-        
-        # Register all arguments with parser
-        temp_registry.register_with_parser(parser)
-    
+            temp_instance._config_registry = registry
+            temp_instance.setup_config(registry)
+
+        return registry
+
     @classmethod
-    def process_args(cls, device, args: argparse.Namespace):
-        """Process arguments and apply configuration to device."""
-        # Set up configuration registry
-        device._config_registry.add_standard_arguments()
-        
-        # Let device add its specific arguments
-        if hasattr(device, 'setup_config'):
-            device.setup_config(device._config_registry)
-        
-        # Resolve configuration from all sources
-        config = device._config_registry.resolve_configuration(args)
+    def register_options(cls, parser: argparse.ArgumentParser):
+        """Register all device options with parser."""
+        cls.build_registry().register_with_parser(parser)
+
+    @classmethod
+    def resolve_config(cls, args: argparse.Namespace):
+        """
+        Resolve the whole configuration with no device in existence.
+
+        Returns (registry, config).
+        """
+        registry = cls.build_registry()
+        return registry, registry.resolve_configuration(args)
+
+    @classmethod
+    def process_args(cls, device, args: argparse.Namespace,
+                     registry: 'DeviceConfigRegistry' = None,
+                     config: Dict[str, Any] = None):
+        """
+        Apply configuration to a device.
+
+        A registry and config already resolved by resolve_config() can be
+        passed in, so a daemon that had to resolve early (to know what to
+        lock) does not parse everything a second time.
+        """
+        if registry is None or config is None:
+            # Set up configuration registry
+            device._config_registry.add_standard_arguments()
+
+            # Let device add its specific arguments
+            if hasattr(device, 'setup_config'):
+                device.setup_config(device._config_registry)
+
+            # Resolve configuration from all sources
+            config = device._config_registry.resolve_configuration(args)
+        else:
+            device._config_registry = registry
+
         device._resolved_config = config
-        
+
         # Show configuration if requested
         if config.get('show_config', False):
             print(device._config_registry.format_config_summary(config))
             exit(0)
-        
+
         # Apply configuration to device
         device._apply_resolved_config(config)
     

@@ -67,11 +67,23 @@ rtspy-grbd = "rtspy.daemons.grbd:main"
 rtspy-queue-selector = "rtspy.daemons.queue_selector:main"
 rtspy-watcher = "rtspy.daemons.watcher:main"
 
-# Hardware drivers
+# Hardware drivers. Installed under the rts2- names the RTS2 launcher
+# expects: a /etc/rts2/devices line "focusd toptec F0" runs
+# rts2-focusd-toptec, and rts2-stop will only kill a process whose
+# /proc/<pid>/comm matches the first 15 characters of that name - which a
+# console script of this name gets for free, since Linux takes comm from
+# the shebang script rather than from the interpreter. These daemonize
+# themselves (see rtspy/core/daemon.py); no shell wrapper is involved.
+rts2-filterd-ovis = "rtspy.drivers.filterd_ovis:main"
+rts2-sensor-temp = "rtspy.drivers.sensor_temp:main"
+
+# The two dummies keep the rtspy- prefix on purpose: C++ RTS2 ships its own
+# rts2-focusd-dummy and rts2-filterd-dummy, and /usr/local/bin comes before
+# /usr/bin, so naming these rts2-* would silently shadow the packaged
+# drivers with a different implementation. They are test drivers; nothing
+# starts them from /etc/rts2/devices.
 rtspy-filterd-dummy = "rtspy.drivers.filterd_dummy:main"
-rtspy-filterd-ovis = "rtspy.drivers.filterd_ovis:main"
 rtspy-focusd-dummy = "rtspy.drivers.focusd_dummy:main"
-rtspy-sensor-temp = "rtspy.drivers.sensor_temp:main"
 
 # CLI utilities (using rts2- prefix for ecosystem integration)
 rts2-value = "rtspy.cli.valuetool:main"
@@ -79,8 +91,10 @@ rts2-grbinfo = "rtspy.cli.grbinfo:main"
 rts2-queue-manual = "rtspy.cli.queuemanual:main"
 rts2-addtarget = "rtspy.cli.addtarget:main"
 
-# Legacy RTS2 compatibility wrappers (shell scripts, via setup.py scripts=)
-# rts2-gcnkafka, rts2-queuer, rts2-filterd-ovis, rts2-observe are in rtspy/scripts/
+# Shell scripts installed via setup.py scripts= (rtspy/scripts/):
+# rts2-gcnkafka, rts2-queuer, rts2-observe. The per-driver rts2-* daemon
+# wrappers that used to live there are gone - the drivers background
+# themselves now.
 
 [tool.setuptools]
 packages = [

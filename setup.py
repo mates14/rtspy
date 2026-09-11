@@ -6,7 +6,6 @@ setup(
     scripts=[
         'rtspy/scripts/rts2-gcnkafka',
         'rtspy/scripts/rts2-queuer',
-        'rtspy/scripts/rts2-filterd-ovis',
         'rtspy/scripts/rts2-observe',
         'rtspy/scripts/rtspy-rotate-log',
         'rtspy/scripts/rtspy-split-log',
