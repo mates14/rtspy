@@ -75,6 +75,7 @@ rtspy-watcher = "rtspy.daemons.watcher:main"
 # the shebang script rather than from the interpreter. These daemonize
 # themselves (see rtspy/core/daemon.py); no shell wrapper is involved.
 rts2-filterd-ovis = "rtspy.drivers.filterd_ovis:main"
+rts2-focusd-toptec = "rtspy.drivers.toptec:main"
 rts2-sensor-temp = "rtspy.drivers.sensor_temp:main"
 
 # The two dummies keep the rtspy- prefix on purpose: C++ RTS2 ships its own
