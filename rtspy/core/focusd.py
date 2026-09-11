@@ -292,7 +292,15 @@ class FocuserMixin(DeviceConfig):
             result = self.set_to(target)
 
             if result != 0:
-                # Movement failed
+                # Movement failed.  Put foc_tar back to where the focuser
+                # actually is - nothing moved, and leaving it advanced to a
+                # target that never happened makes re-issuing that same
+                # target a silent no-op, because Value.set_from_client
+                # returns early on a write that changes nothing.  (It also
+                # assigns the new value before calling this, so the caller's
+                # old foc_tar is already gone by the time we get here.)
+                self.foc_tar.value = self.get_position()
+                self._target_position = None
                 self._movement_in_progress = False
                 self.set_state(
                     self._state & ~self.FOC_FOCUSING | self.ERROR_HW,
