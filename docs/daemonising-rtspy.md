@@ -40,7 +40,7 @@ satisfy it.
 
 | Obligation | What is required |
 |---|---|
-| **program name** | `rts2-<family>-<type>` found on `PATH`. A `devices` line `focusd toptec F0 [opts]` is invoked as `rts2-focusd-toptec -d F0 [opts]`. |
+| **program name** | Resolved from the `devices` line on `PATH`: `rts2-<family>-<type>` first, `rtspy-<family>-<type>` second. A line `focusd toptec TOPTEC [opts]` becomes `rtspy-focusd-toptec -d TOPTEC [opts]` when only rtspy provides it. |
 | **exit 0** | The daemon is up — or is still initialising past `--daemonize-timeout` and has been left running. |
 | **exit 255** | The lock is held by another instance. `RTS2_EXIT_ALREADY_RUNNING`. |
 | **exit 254** | The lock file cannot be used at all — permissions, missing directory. `RTS2_EXIT_LOCK_ERROR`. Kept distinct from 255 precisely so "already running" stops being a lie. |
@@ -90,7 +90,7 @@ simply unavailable for any rtspy daemon — argparse rejects the flag before
 anything runs.
 
 ```
-$ rts2-focusd-toptec -d F0 -i --debug
+$ rtspy-focusd-toptec -d TOPTEC -i --debug
 error: unrecognized arguments: -i
 ```
 
@@ -103,10 +103,10 @@ and it accepts the combined form without complaint — storing the whole string
 as the hostname and then trying to resolve it.
 
 ```
-$ rts2-focusd-toptec -d F0 --local-port 1234
+$ rtspy-focusd-toptec -d TOPTEC --local-port 1234
 error: unrecognized arguments: --local-port 1234
 
-$ rts2-focusd-toptec -d F0 --server localhost:18617 --show-config
+$ rtspy-focusd-toptec -d TOPTEC --server localhost:18617 --show-config
   server      = localhost:18617    # taken as a hostname
   server_port = 617                # the :18617 is ignored
 ```
@@ -140,8 +140,8 @@ the config.
 
 Worth stating because it is the trap the current design walks toward, not one
 it has hit. `rts2-stop` compares `/proc/<pid>/comm` against the program name
-before killing anything. Running `rts2-focusd-toptec` as a wrapper that execs
-`rtspy-focusd-toptec` makes those two names differ, and the kill is refused.
+before killing anything, and a wrapper that execs a differently-named script
+makes those two disagree, so the kill is refused.
 Dropping the wrapper fixes it for free — see §3.
 
 ---
@@ -169,10 +169,10 @@ One result is worth calling out because it **removes** work rather than adding
 it. I expected `comm` to read `python3` for a Python entry point, which would
 have meant a `prctl(PR_SET_NAME)` call to satisfy `rts2-stop`. It does not:
 Linux takes `comm` from the *shebang script's* own name, not the interpreter's.
-A console script installed as `rts2-focusd-toptec` reports `rts2-focusd-top` —
-exactly the 15 characters `rts2-stop` compares against. Installing the Python
-entry point under the `rts2-` name and deleting the shell wrapper is therefore
-both simpler and more correct than what we have now.
+A console script installed as `rtspy-focusd-toptec` reports `rtspy-focusd-to` —
+the 15 characters `rts2-stop` compares against, and it matches, because the
+launcher resolved that same name. So the Python entry point can be a plain
+console script and the shell wrapper can go.
 
 ---
 
@@ -252,7 +252,7 @@ exit until the background daemon says it got all the way up. Same self-pipe as
 C++, and the prototype behaves identically.
 
 ```
-  rts2-focusd-toptec -d F0            <- the process rts2-start waits on
+  rtspy-focusd-toptec -d TOPTEC       <- the process rts2-start waits on
         |
         +-- check_lock()  ------------  held by another instance -> exit 255, never forks
         |
@@ -352,13 +352,39 @@ The daemon machinery is not device-specific.
   an ignored option can be found rather than wondered about. Real structural
   work, deferred.
 
-### D — cutover · **chosen: wrapper deleted**
+### D — naming and cutover · **chosen: rtspy keeps its own namespace**
 
-The wrapper goes; the Python app backgrounds itself and installs under the
-`rts2-` name directly. Nothing is stranded mid-upgrade, since both names exist
-today — but the running daemons have to be stopped with the current tooling
-*before* the new package lands, or their locks end up held by processes the new
-tooling will not recognise.
+The wrapper goes and the Python app backgrounds itself. The entry points stay
+`rtspy-*`.
+
+The first attempt renamed them `rts2-*`, on the reasoning that this is what a
+`/etc/rts2/devices` line resolves to. That was wrong, and it announced itself:
+`rts2-focusd-dummy` and `rts2-filterd-dummy` collided with the C++ drivers of
+the same name, and since `/usr/local/bin` precedes `/usr/bin` the rtspy test
+dummies silently shadowed the packaged ones. Needing a per-name exception is
+the symptom that the namespace is wrong — rtspy would have had to keep dodging
+whatever C++ RTS2 ships next, forever.
+
+**rtspy does not pretend to be rts2.** The two keep strictly separate command
+namespaces, and the launcher is the single place that knows both exist:
+`rts2-start` resolves a device line by trying `rts2-<family>-<type>` first and
+`rtspy-<family>-<type>` second, and a service line the same way. C++ stays the
+default wherever both are installed — which in practice only matters for the
+dummies. The configuration names neither program, so nothing has to be
+cross-linked in either direction and no name can ever conflict.
+
+Resolution happens once, in the launcher's `list_entries()`, because
+`rts2-stop` refuses to kill unless `/proc/<pid>/comm` matches the program
+name — start, stop and status have to agree on what a name means. (Were the
+other implementation installed between a start and a stop, resolution could
+name a different program than the one running; the comm check then refuses to
+kill, which is the safe way to be wrong.)
+
+Cutover: running daemons have to be stopped with the current tooling *before*
+the new package lands, or their locks end up held by processes the new tooling
+will not recognise. A machine carrying an older rtspy install also needs its
+stale `rts2-*` scripts removed — `~/.local/bin` on a developer box is an easy
+one to miss — or they shadow the resolution.
 
 ---
 
@@ -438,11 +464,19 @@ The whole contract, stdlib only:
 
 ### Packaging
 
-Entry points renamed `rtspy-*` → `rts2-*` (`rts2-focusd-toptec`,
-`rts2-filterd-ovis`, `rts2-focusd-dummy`, `rts2-filterd-dummy`,
-`rts2-sensor-temp`). The per-driver shell wrappers in `rtspy/scripts/` are
-deleted; `rts2-gcnkafka`, `rts2-queuer` and `rts2-observe` remain, as they are
-not daemons.
+Every rtspy entry point is `rtspy-*`; none claims an `rts2-` name. The
+per-driver shell wrappers in `rtspy/scripts/` are deleted. `rtspy-gcnkafka`
+and `rtspy-queuer` remain for now and can go the same way once `grbd` and
+`queue_selector` move to `App.main()`.
+
+`base/packaging/rts2-start.in` gained `resolve_bin()`, which tries
+`rts2-<name>` then `rtspy-<name>`, applied in `list_entries()` so start, stop
+and status all agree. Verified against a scratch `/etc/rts2` tree: a device
+only C++ provides resolves to `rts2-`, one only rtspy provides resolves to
+`rtspy-`, one both provide resolves to `rts2-`, one neither provides reports
+"no such program: rts2-… (nor its rtspy- equivalent)", and a full
+start/status/stop/status cycle on an `rtspy-` daemon passed the `comm` check
+(`rtspy-focusd-to`) and stopped cleanly.
 
 All five drivers migrated to `App.main()`.
 
@@ -517,10 +551,12 @@ and the `comm` guard.
 rtspy console script to `rts2-*` made `rts2-focusd-dummy` and
 `rts2-filterd-dummy` collide with the C++ drivers of the same name in
 `/usr/bin` - and since `/usr/local/bin` precedes `/usr/bin`, rtspy's test
-dummies silently shadowed the real ones. Fixed by keeping exactly those two as
-`rtspy-focusd-dummy` / `rtspy-filterd-dummy`; the drivers with no C++
-counterpart (`toptec`, `ovis`, `sensor-temp`) keep their `rts2-` names. Any
-future rtspy driver that duplicates a C++ one needs the same care.
+dummies silently shadowed the real ones. First patched by excepting those two;
+then fixed properly by giving rtspy its own namespace throughout and teaching
+the launcher to resolve both - see decision D above. The FLORES install
+therefore predates the final naming and still carries `rts2-*` scripts plus a
+`/usr/bin/rts2-focusd-toptec` symlink; both want clearing out on the next
+deployment there.
 
 ### Camera link
 

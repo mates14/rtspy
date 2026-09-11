@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# rts2-queuer - Sample wrapper script for rtspy Python daemon
+# rtspy-queuer - Sample wrapper script for rtspy Python daemon
 #
 # This wrapper makes Python-based rtspy queue_selector.py compatible with 
 # the original C++ RTS2 daemon management system. It provides:

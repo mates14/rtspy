@@ -30,17 +30,21 @@ power) is plain telemetry.
 
 ## Running it
 
-    rts2-focusd-toptec -d F0 --server <centrald> --toptec-host 192.168.193.198
+    rtspy-focusd-toptec -d TOPTEC --server <centrald> --toptec-host 192.168.193.198
 
-It backgrounds itself, takes `/var/run/rts2_F0` and reports startup failure
+It backgrounds itself, takes `/var/run/rts2_TOPTEC` and reports startup failure
 through its exit status, exactly as a C++ RTS2 daemon does - so
-`rts2-start F0` / `rts2-stop F0` / `systemctl start rts2@F0` drive it
-directly, with no shell wrapper. Add `-i` to keep it on the terminal. See
-`docs/daemonising-rtspy.md`.
+`rts2-start TOPTEC` / `rts2-stop TOPTEC` / `systemctl start rts2@TOPTEC`
+drive it directly, with no shell wrapper. Add `-i` to keep it on the
+terminal. See `docs/daemonising-rtspy.md`.
 
 The matching line in `/etc/rts2/devices`:
 
-    focusd  toptec  F0  --toptec-host 192.168.193.198
+    focusd  toptec  TOPTEC  --toptec-host 192.168.193.198
+
+The line names no program. `rts2-start` resolves `focusd toptec` by looking
+for `rts2-focusd-toptec` first and `rtspy-focusd-toptec` second, so nothing
+in rtspy has to claim an `rts2-` name.
 
 Useful options:
 
@@ -182,7 +186,7 @@ own when the server returns.
 method surface, with both axes travelling at a settable rate:
 
     tools/toptec_sim.py 16000 &
-    rts2-focusd-toptec -d TOPTEC -i --toptec-host 127.0.0.1 --toptec-port 16000 \
+    rtspy-focusd-toptec -d TOPTEC -i --toptec-host 127.0.0.1 --toptec-port 16000 \
         --lock-prefix /tmp/rts2_
 
 Enough to exercise moves, the focus offset, camera power, the nudges,
