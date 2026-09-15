@@ -1807,13 +1807,9 @@ class GrbCommands:
         self.grb_daemon = grb_daemon
         self.handlers = {
             "test": self.handle_test_grb,
-            "script_ends": self.handle_script_ends,
-            "status_info": self.handle_status_info,
         }
         self.needs_response = {
             "test": True,
-            "script_ends": True,
-            "status_info": True,
         }
 
     def get_commands(self):
@@ -1851,27 +1847,6 @@ class GrbCommands:
 
         except Exception as e:
             logging.error(f"Error in test GRB command: {e}")
-            return False
-
-    def handle_script_ends(self, conn, params):
-        """Handle script_ends command."""
-        try:
-            # GRB daemon doesn't need to do anything special for script_ends
-            self.grb_daemon.network._send_ok_response(conn, "Script end acknowledged")
-            return True
-        except Exception as e:
-            logging.error(f"Error in script_ends command: {e}")
-            return False
-
-    def handle_status_info(self, conn, params):
-        """Handle status_info command."""
-        try:
-            # Send current device status
-            self.grb_daemon.network._send_status(conn)
-            self.grb_daemon.network._send_ok_response(conn, "Status sent")
-            return True
-        except Exception as e:
-            logging.error(f"Error in status_info command: {e}")
             return False
 
 

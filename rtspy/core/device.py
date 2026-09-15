@@ -327,25 +327,6 @@ class Device(DeviceConfig):
             self.network._send_error_response(conn, f"Error: {str(e)}")
             return False
 
-    def _handle_base_info(self, conn, params):
-        """Handle 'base_info' command."""
-        try:
-            # Base info is related to sending constant values
-            # Send OK response - the network manager will handle sending values
-            self.network._send_ok_response(conn)
-            return True
-        except Exception as e:
-            logging.error(f"Error handling base_info command: {e}", exc_info=True)
-            self.network._send_error_response(conn, f"Error: {str(e)}")
-            return False
-
-    def _handle_status_info(self, conn, params):
-        """Handle 'status_info' command."""
-        # Send current device state
-        self.network._send_status(conn)
-        self.network._send_ok_response(conn)
-        return True
-
     def on_value_changed_from_client(self, value, old_value, new_value):
         """
         Called when a value is changed by a client command.
@@ -393,13 +374,17 @@ class DeviceCommands:
         self.handlers = {
             "info": self.handle_info,
             "base_info": self.handle_base_info,
-            "device_status": self.handle_device_status
+            "device_status": self.handle_device_status,
+            "status_info": self.handle_status_info,
+            "script_ends": self.handle_script_ends,
         }
         # Commands that need responses
         self.needs_response = {
             "info": True,
             "base_info": True,
-            "device_status": True
+            "device_status": True,
+            "status_info": True,
+            "script_ends": True,
         }
 
     def get_commands(self):
@@ -457,5 +442,26 @@ class DeviceCommands:
         """Handle 'device_status' command."""
         # Send current device state
         self.network._send_status(conn)
+        return True
+
+    def handle_status_info(self, conn, params):
+        """
+        Handle 'status_info': reply with our state, then OK.
+
+        centrald fans this out to every device when anyone asks it for
+        status_info, and answers the asker only once all have replied - as
+        C++ Device::statusInfo does, sendStatusMessageConn and return 0.
+        """
+        self.network._send_status(conn)
+        return True
+
+    def handle_script_ends(self, conn, params):
+        """
+        Handle 'script_ends', sent by the executor to every device after a
+        script. C++ resets values flagged for it to their defaults; rtspy has
+        no such values, so this only acknowledges. Device families that do
+        have something to reset register their own handler, which runs after
+        this one and sends the reply itself.
+        """
         return True
 
