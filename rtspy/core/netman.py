@@ -785,6 +785,17 @@ class NetworkManager:
             if conn.type == 'centrald':
                 conn.remote_device_name = 'centrald'
                 logging.debug(f"Set remote_device_name to 'centrald' for centrald connection")
+
+                # centrald volunteers its state exactly once, as the first
+                # line of its reply to register (S, registered_as, values,
+                # then this OK) - and never again until the state changes;
+                # there is no command that simply returns it. That S arrived
+                # while the connection had no name, so no interest matched
+                # and it was only cached on the connection. Replay it now.
+                callback = self.state_interests.get('centrald')
+                if callback and conn.state_known:
+                    logging.debug(f"Replaying centrald state from registration: {conn.device_state:x}")
+                    callback('centrald', conn.device_state, conn.bop_state, "")
             # Registration successful, now need to wait for registered_as message
             # The centrald_connected_callback will be called after getting registered_as
         else:
@@ -1136,7 +1147,7 @@ class NetworkManager:
                 logging.debug(f"Already have a connection to {device_name}, sending cached state")
 
                 # Immediately dispatch the current state if we have it
-                if conn.device_state != 0 or conn.bop_state != 0:
+                if conn.state_known:
                     # Create a message if none exists
                     status_msg = self.last_status_message if hasattr(self, 'last_status_message') else ""
 

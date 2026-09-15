@@ -268,8 +268,11 @@ class ProtocolCommands:
             else:
                 status_msg = msg_part
 
-        # Update device state in connection
+        # Update device state in connection. Kept even when nobody below
+        # matches it: centrald's one unprompted S arrives before its
+        # connection is named, and is replayed from here once it is.
         conn.device_state = status_value
+        conn.state_known = True
 
         # Notify about state change if needed
         if self.network_manager.state_changed_callback:

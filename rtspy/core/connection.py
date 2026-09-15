@@ -92,6 +92,9 @@ class Connection:
         # State tracking for remote devices
         self.device_state = 0
         self.bop_state = 0
+        # device_state is only meaningful once an S/B has arrived - 0 is a
+        # real state (centrald ON + DAY), not "unknown"
+        self.state_known = False
         self.progress_start = float('nan')
         self.progress_end = float('nan')
 
