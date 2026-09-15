@@ -104,12 +104,11 @@ After installation with pip, the following commands are available:
 - `rts2-grbinfo` - Query GRB information from database
 - `rts2-queue-manual` - Manual queue management
 
-**RTS2 Ecosystem Integration (Shell Wrappers):**
-- `rts2-gcnkafka` - Daemon wrapper for rtspy-grbd
-- `rts2-queuer` - Daemon wrapper for rtspy-queue-selector
-- `rts2-filterd-ovis` - Daemon wrapper for rtspy-filterd-ovis
+**RTS2 Ecosystem Integration:**
+- `rtspy-gcnkafka` - rtspy-grbd under the name rts2-start resolves for a `gcnkafka` services line
+- `rtspy-queuer` - rtspy-queue-selector under the name rts2-start resolves for a `queuer` services line
 
-These wrappers provide daemon management (forking, PID files) compatible with rts2-start/rts2-stop.
+Every daemon locks, forks and reports readiness itself, the way a C++ RTS2 daemon does (see docs/daemonising-rtspy.md), so rts2-start/rts2-stop drive them directly with no wrapper.
 
 All commands support `--help` for detailed usage information.
 

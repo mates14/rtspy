@@ -62,7 +62,14 @@ Repository = "https://github.com/MATES-Observatory/rtspy"
 Issues = "https://github.com/MATES-Observatory/rtspy/issues"
 
 [project.scripts]
-# Production daemons
+# Production daemons. rtspy-gcnkafka and rtspy-queuer are the names
+# rts2-start resolves for the /etc/rts2/services lines "gcnkafka KAFKA ..."
+# and "queuer QUEUE ...", and so the names rts2-stop's comm check expects -
+# they used to be shell wrappers, now they daemonize like the drivers below.
+# rtspy-grbd/rtspy-queue-selector are the same program under the old names,
+# for running by hand; rts2-stop will not stop a copy started that way.
+rtspy-gcnkafka = "rtspy.daemons.grbd:main"
+rtspy-queuer = "rtspy.daemons.queue_selector:main"
 rtspy-grbd = "rtspy.daemons.grbd:main"
 rtspy-queue-selector = "rtspy.daemons.queue_selector:main"
 rtspy-watcher = "rtspy.daemons.watcher:main"
@@ -94,10 +101,8 @@ rts2-queue-manual = "rtspy.cli.queuemanual:main"
 rts2-addtarget = "rtspy.cli.addtarget:main"
 
 # Shell scripts installed via setup.py scripts= (rtspy/scripts/):
-# rtspy-gcnkafka, rtspy-queuer, rts2-observe. The per-driver wrappers that
-# used to live there are gone - the drivers background themselves now.
-# rtspy-gcnkafka/rtspy-queuer can go the same way once grbd and
-# queue_selector move to App.main().
+# rts2-observe, rtspy-rotate-log, rtspy-split-log. The daemon wrappers that
+# used to live there are gone - every daemon backgrounds itself now.
 
 [tool.setuptools]
 packages = [

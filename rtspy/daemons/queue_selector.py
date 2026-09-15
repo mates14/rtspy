@@ -1031,34 +1031,8 @@ class QueueSelector(Device, DeviceConfig):
 
 
 def main():
-    """Main entry point."""
-
-    # Create application
-    app = App(description='RTS2 Queue Selector Daemon')
-
-    # Register device options
-    app.register_device_options(QueueSelector)
-
-    # Parse arguments
-    args = app.parse_args()
-
-    # Create device
-    device = app.create_device(QueueSelector)
-
-    logging.info("Starting RTS2 Queue Selector")
-    logging.info(f"Database: {device.db_config['database']} on {device.db_config['host']}")
-    logging.info(f"Queues: {list(device.queue_name_to_id.keys())}")
-
-    # Run application
-    try:
-        app.run()
-        return 0
-    except KeyboardInterrupt:
-        logging.info("Shutting down queue selector")
-        return 0
-    except Exception as e:
-        logging.error(f"Fatal error in queue selector: {e}")
-        return 1
+    """Entry point - see rtspy/core/daemon.py for the startup contract."""
+    return App(description='RTS2 Queue Selector Daemon').main(QueueSelector)
 
 
 if __name__ == "__main__":

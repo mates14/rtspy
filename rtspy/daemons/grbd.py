@@ -18,6 +18,7 @@ import threading
 import re
 import math
 import json
+import zlib
 import decimal
 from typing import Dict, Optional, Any, Callable
 from datetime import datetime
@@ -36,6 +37,13 @@ from rtspy.core.config import DeviceConfig
 from rtspy.core.value import (ValueBool, ValueString, ValueInteger, ValueTime, ValueDouble, ValueRaDec)
 from rtspy.core.app import App
 from rtspy.core.voevent import VoEventParser, GrbTarget
+
+DB_PARAMS = dict(host="localhost", database="stars", user="mates", password="pasewcic25")
+
+# pg_advisory_xact_lock key serialising GRB target look-up-then-insert
+# ("rtspygrb" in ASCII). Two alerts for one trigger arriving together - or two
+# grbd processes seeing the same alert - must not both conclude "no target yet".
+GRB_TARGET_LOCK_KEY = 0x7274737079677262
 
 class GcnKafkaConsumer:
     """Handles GCN Kafka message consumption and parsing."""
@@ -80,6 +88,9 @@ class GcnKafkaConsumer:
             # Create consumer with persistent group ID for message recovery
             config = {
                 'broker.address.family': 'v4',
+                # librdkafka writes to stderr by default, which a daemon
+                # points at /dev/null once it is up - route it into our log
+                'logger': logging.getLogger('rdkafka'),
 #                'group.id': f'rts2-grbd-{self.client_id}',
 #                'auto.offset.reset': 'latest',  # Start from latest messages
 #                'enable.auto.commit': True,     # Auto-commit offsets
@@ -238,6 +249,8 @@ class GrbDaemon(Device, DeviceConfig):
         self.set_state(self.STATE_IDLE, "GRB daemon initializing")
         # System state monitoring
         self.system_state_required = 0x03    # ON (0x0.) + NIGHT (0x.3)
+
+        self.network.command_registry.register_handler(GrbCommands(self))
 
     def apply_config(self, config: Dict[str, Any]):
         """Apply GRB-specific configuration."""
@@ -543,6 +556,19 @@ class GrbDaemon(Device, DeviceConfig):
         """Start the GRB daemon."""
         super().start()
 
+        # Anything raised here fails the startup: App.main() reports it on
+        # the terminal rts2-start is waiting on and exits non-zero.
+        if not self.gcn_client_id.value or not self.gcn_client_secret:
+            raise RuntimeError("GCN client ID and secret are required "
+                               "(--gcn-client-id/--gcn-client-secret, "
+                               "credentials from https://gcn.nasa.gov/)")
+        try:
+            psycopg2.connect(**DB_PARAMS).close()
+        except Exception as e:
+            raise RuntimeError(f"cannot connect to RTS2 database "
+                               f"'{DB_PARAMS['database']}': {e}") from e
+        logging.info("PostgreSQL database connection verified")
+
         # Record start time for uptime calculation
         self.start_time = time.time()
 
@@ -564,13 +590,9 @@ class GrbDaemon(Device, DeviceConfig):
             callback=self._on_executor_connection_changed
         )
 
-        # Validate configuration
-        if not self.gcn_client_id.value or not self.gcn_client_secret:
-            logging.error("GCN client ID and secret must be provided")
-            self.set_state(self.STATE_IDLE | self.ERROR_HW, "Missing GCN credentials")
-            return
-
         logging.info(f"GCN Client ID: {self.gcn_client_id.value}")
+        if self.queue_name.value:
+            logging.info(f"GRBs will be queued to: {self.queue_name.value}")
 
         # Initialize GCN Kafka consumer
         self.gcn_consumer = GcnKafkaConsumer(
@@ -612,7 +634,7 @@ class GrbDaemon(Device, DeviceConfig):
                     self.trigger_ready = False
 
         except (ValueError, TypeError):
-            logging.warning(f"Could not parse state mask: {state_mask_value}")
+            logging.warning(f"Could not parse state mask: {state}")
 
     def _on_executor_enabled_changed(self, context):
         """
@@ -752,8 +774,10 @@ class GrbDaemon(Device, DeviceConfig):
                 logging.info(f"{grb_info.mission} {grb_info.grb_id}: {skip_reason} - skipping target creation")
                 return
 
-            # Only proceed for targets we actually want to observe
-            logging.info(f"{grb_info.mission} {grb_info.grb_id}: creating target for follow-up")
+            # Only proceed for targets we actually want to observe. Whether
+            # this creates, updates or links a target is decided (and logged)
+            # by _add_grb_to_database.
+            logging.info(f"{grb_info.mission} {grb_info.grb_id}: accepted for follow-up")
 
             # Add to database with proper error handling
             db_start_time = time.time()
@@ -848,13 +872,14 @@ class GrbDaemon(Device, DeviceConfig):
         """ Add GRB target to RTS2 PostgreSQL database with time-based deduplication."""
         try:
             # Connect to RTS2 PostgreSQL database
-            conn = psycopg2.connect(
-                host="localhost",
-                database="stars",  # Default RTS2 database name
-                user="mates",
-                password="pasewcic25"  # Assumes peer authentication or configured password
-            )
+            conn = psycopg2.connect(**DB_PARAMS)
             cursor = conn.cursor()
+
+            # Everything below is check-then-insert. Hold a transaction-scoped
+            # advisory lock across it (released by the commit/rollback/close
+            # that ends every path), so a concurrent alert for the same
+            # trigger sees this one's target instead of making its own.
+            cursor.execute("SELECT pg_advisory_xact_lock(%s)", (GRB_TARGET_LOCK_KEY,))
 
             # Convert string grb_id to integer for database
             grb_id_int = self._convert_grb_id_to_int(grb.grb_id)
@@ -959,17 +984,23 @@ class GrbDaemon(Device, DeviceConfig):
                     pass
 
     def _convert_grb_id_to_int(self, grb_id: str) -> int:
-        """Safely convert GRB ID to integer fitting in a 32-bit DB column."""
+        """
+        Convert a GRB ID to an integer fitting in a 32-bit DB column.
+
+        Must be deterministic: the result is what later alerts for the same
+        trigger are matched on. Python's hash() is not - it is salted per
+        process - so a SVOM burst ID like sb26091501 used to map to a
+        different grb_id in every grbd instance and after every restart.
+        """
         try:
             val = int(grb_id)
         except (ValueError, TypeError):
-            if grb_id.startswith('EP_'):
-                try:
-                    val = int(grb_id[3:])
-                except (ValueError, TypeError):
-                    return abs(hash(grb_id)) % 1_000_000_000
-            else:
-                return abs(hash(grb_id)) % 1_000_000_000
+            # Prefixed IDs (SVOM "sb26091501", "EP_…") keep their digits,
+            # which stay readable against GCN: sb26091501 -> 26091501
+            digits = re.sub(r'\D', '', str(grb_id))
+            if not digits:
+                return zlib.crc32(str(grb_id).encode()) % 1_000_000_000
+            val = int(digits)
         # Keep last 9 digits if value exceeds INT4 range (e.g. Einstein Probe IDs)
         if val > 2_147_483_647:
             val = val % 1_000_000_000
@@ -1022,6 +1053,8 @@ class GrbDaemon(Device, DeviceConfig):
     def _update_existing_grb_target(self, cursor, conn, grb: GrbTarget, grb_id_int: int, existing):
         """Update existing target for the same trigger ID."""
         (existing_tar_id, existing_error, existing_ra, existing_dec, existing_name) = existing
+        if existing_error is None:
+            existing_error = float('nan')
 
         # Determine if we should update the target position
         should_update_position = False
@@ -1077,6 +1110,8 @@ class GrbDaemon(Device, DeviceConfig):
         """Link new GRB alert to existing target based on time/position match."""
         (cand_tar_id, cand_grb_id, cand_ra, cand_dec, cand_errorbox,
          cand_date, cand_name, cand_epoch) = candidate
+        if cand_errorbox is None:
+            cand_errorbox = float('nan')
 
         time_diff = abs(float(grb.detection_time) - cand_epoch) if cand_epoch is not None else 999.0
 
@@ -1089,7 +1124,7 @@ class GrbDaemon(Device, DeviceConfig):
                 should_update_position = True
                 update_reason = "adding coordinates to target without position"
         elif self._is_valid_coordinates(grb.ra, grb.dec):
-            if (cand_errorbox is None or math.isnan(cand_errorbox) or
+            if (math.isnan(cand_errorbox) or
                 (not math.isnan(grb.error_box) and grb.error_box < cand_errorbox)):
                 should_update_position = True
                 update_reason = f"better accuracy: {cand_errorbox:.3f}° -> {grb.error_box:.3f}°"
@@ -1646,7 +1681,9 @@ class GrbDaemon(Device, DeviceConfig):
             logging.debug(f"Triggering GRB observation for target {target_id}")
 
             if not self.trigger_ready:
-                logging.debug(f"System not ready for immediate GRB observation (state=0x{self.system_state:02x})")
+                # system_state stays None until centrald first reports one
+                state = "unknown" if self.system_state is None else f"0x{self.system_state:02x}"
+                logging.debug(f"System not ready for immediate GRB observation (state={state})")
                 logging.debug("GRB will be discovered by scheduler for time-critical scheduling")
                 # Do not queue - let the scheduler handle it
                 return
@@ -1839,66 +1876,8 @@ class GrbCommands:
 
 
 def main():
-    """Main entry point for GRB daemon."""
-
-    # Create application
-    app = App(description='RTS2 GRB Daemon with GCN Kafka Support')
-
-    # Register device options
-    app.register_device_options(GrbDaemon)
-
-    # Parse arguments
-    args = app.parse_args()
-
-    # Validate required arguments
-    if not args.gcn_client_id or not args.gcn_client_secret:
-        logging.error("GCN client ID and secret are required")
-        logging.error("Get credentials from: https://gcn.nasa.gov/")
-        logging.error("Use --gcn-client-id and --gcn-client-secret options")
-        return 1
-
-    # Test database connection
-    try:
-        conn = psycopg2.connect(
-            host="localhost",
-            database="stars",
-            user="mates",
-            password="pasewcic25"
-        )
-        conn.close()
-        logging.info("PostgreSQL database connection verified")
-    except Exception as e:
-        logging.error(f"Cannot connect to RTS2 database 'stars': {e}")
-        logging.error("Make sure PostgreSQL is running and RTS2 database is set up")
-        return 1
-
-    # Create device
-    device = app.create_device(GrbDaemon)
-
-    # Register additional command handlers
-    grb_commands = GrbCommands(device)
-    device.network.command_registry.register_handler(grb_commands)
-
-    logging.info("Starting RTS2 GRB Daemon with GCN Kafka interface")
-    logging.info(f"Client ID: {args.gcn_client_id}")
-    logging.info("Database: PostgreSQL 'stars' on localhost")
-
-    if args.queue_to:
-        logging.info(f"GRBs will be queued to: {args.queue_to}")
-
-#    if args.add_exec:
-#        logging.info(f"External script: {args.add_exec}")
-
-    # Run application
-    try:
-        app.run()
-        return 0
-    except KeyboardInterrupt:
-        logging.info("Shutting down GRB daemon")
-        return 0
-    except Exception as e:
-        logging.error(f"Fatal error in GRB daemon: {e}")
-        return 1
+    """Entry point - see rtspy/core/daemon.py for the startup contract."""
+    return App(description='RTS2 GRB Daemon with GCN Kafka Support').main(GrbDaemon)
 
 if __name__ == "__main__":
     import sys

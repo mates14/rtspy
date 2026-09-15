@@ -186,17 +186,22 @@ class App:
 
         # 2. FILE HANDLER with smart fallback
         log_file = None
+        explicit_log_file = False
 
-        # First try device configuration
+        # First try device configuration. The resolved config is flat, so
+        # --log-file arrives as 'log_file'; the nested form is kept for
+        # anything that still builds one.
         if self.device and hasattr(self.device, '_resolved_config'):
-            logging_config = self.device._resolved_config.get('logging', {})
-            config_file = logging_config.get('file')
+            resolved = self.device._resolved_config
+            config_file = resolved.get('log_file') or \
+                resolved.get('logging', {}).get('file')
             if config_file:
                 try:
                     # Test if we can write to the configured path
                     with open(config_file, 'a') as f:
                         pass
                     log_file = config_file
+                    explicit_log_file = True
                 except (PermissionError, OSError):
                     print(f"Warning: Cannot write to configured log file {config_file}, using fallback", file=sys.stderr)
 
@@ -226,13 +231,23 @@ class App:
         # Create file handler if we have a path
         if log_file:
             try:
-                # Use rotating file handler to prevent huge log files
-                file_handler = logging.handlers.RotatingFileHandler(
-                    log_file,
-                    maxBytes=10*1024*1024,  # 10MB max file size
-                    backupCount=5,          # Keep 5 backup files
-                    encoding='utf-8'
-                )
+                if explicit_log_file:
+                    # A file named on purpose is rotated by the site, not by
+                    # us: several daemons may share it (rtspy.log carries
+                    # both QUEUE and KAFKA) and rtspy-rotate-log truncates it
+                    # in place, so each process rotating on its own would
+                    # tear it apart. Watched, so a rename-style rotation is
+                    # picked up too.
+                    file_handler = logging.handlers.WatchedFileHandler(
+                        log_file, encoding='utf-8')
+                else:
+                    # Use rotating file handler to prevent huge log files
+                    file_handler = logging.handlers.RotatingFileHandler(
+                        log_file,
+                        maxBytes=10*1024*1024,  # 10MB max file size
+                        backupCount=5,          # Keep 5 backup files
+                        encoding='utf-8'
+                    )
                 file_handler.setFormatter(formatter)
                 file_handler.setLevel(current_level)
                 root_logger.addHandler(file_handler)

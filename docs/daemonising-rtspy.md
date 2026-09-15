@@ -466,8 +466,8 @@ The whole contract, stdlib only:
 
 Every rtspy entry point is `rtspy-*`; none claims an `rts2-` name. The
 per-driver shell wrappers in `rtspy/scripts/` are deleted. `rtspy-gcnkafka`
-and `rtspy-queuer` remain for now and can go the same way once `grbd` and
-`queue_selector` move to `App.main()`.
+and `rtspy-queuer` followed on 15 Sep 2026 - see "Services: grbd and the queue
+selector" below.
 
 `base/packaging/rts2-start.in` gained `resolve_bin()`, which tries
 `rts2-<name>` then `rtspy-<name>`, applied in `list_entries()` so start, stop
@@ -503,8 +503,8 @@ All five drivers migrated to `App.main()`.
 - `SIGHUP` reload — caught and logged, not implemented.
 - `--valuefile` / `--modefile` / `--autosave` / `--defaults` — accepted, inert.
 - A MultiDev equivalent (several devices in one process, one lock).
-- `rtspy/scripts/rts2-queuer` and `rts2-gcnkafka` are services rather than
-  devices; they still start the old way.
+- ~~`rtspy/scripts/rts2-queuer` and `rts2-gcnkafka` are services rather than
+  devices; they still start the old way.~~ Done 15 Sep 2026, below.
 
 ---
 
@@ -576,3 +576,75 @@ under RTS2 control.
 No movement has been commanded. Focus and lateral moves, camera power and the
 `+`/`-` nudges have only been exercised against the simulator. Metadata landing
 in an actual FITS header also remains untested, since that needs an exposure.
+
+---
+
+## Services: grbd and the queue selector — 15 Sep 2026
+
+### Why it could not wait
+
+The two services still started through their shell wrappers, and so still had
+divergence 01. It was found in production, not in review: SVOM trigger
+`sb26091501` became **three** targets at D50 (53429/53430/53431) and two plus
+a link at SBT. `ps` showed three `rtspy-grbd -d KAFKA` processes on each host
+(D50: started Aug 15, Aug 31, Sep 8; SBT: Jun 12, Jun 26, Aug 24) and two
+`rtspy-queue-selector -d QUEUE` on D50 - every restart through the wrapper had
+added one, exactly as §1 predicts.
+
+Duplicates hurt grbd more than a driver, because nothing between them is
+shared. `gcn_kafka.Consumer` picks a random `group.id` when none is set, so
+every process receives every alert, and each ran its check-then-insert
+against the database at the same millisecond. Only one instance was ever
+told the centrald state, so the other two crashed formatting
+`self.system_state` (None) - the `unsupported format string passed to
+NoneType.__format__` lines.
+
+### What changed
+
+- `rtspy-gcnkafka` and `rtspy-queuer` are console scripts for
+  `grbd:main`/`queue_selector:main`, which are `App.main()` one-liners. Those
+  are the names `rts2-start` resolves for the services lines `gcnkafka KAFKA`
+  and `queuer QUEUE`, and so what `rts2-stop`'s `comm` check expects.
+  `rtspy-grbd`/`rtspy-queue-selector` stay as the same program under the old
+  names, for use by hand.
+- grbd's startup checks - GCN credentials, database reachable - moved from
+  `main()` into `start()` and raise, so they fail the start with a reason on
+  the terminal instead of logging and exiting before the lock was ever taken.
+- librdkafka's own messages are routed through `logging` (logger `rdkafka`):
+  they went to stderr, which a daemon points at `/dev/null` once it is up.
+- `--log-file` now works. The resolved config is flat (`log_file`) but App
+  was looking for a nested `logging.file`, so the option was silently
+  ignored. An explicitly named file gets a `WatchedFileHandler` rather than
+  the size-rotating one: `rtspy.log` is shared by QUEUE and KAFKA and rotated
+  by `rtspy-rotate-log`, and two processes each rotating it would tear it up.
+
+grbd itself, independent of how many copies run:
+
+- `_convert_grb_id_to_int()` fell back to `hash()` for non-numeric IDs.
+  Python salts `str` hashes per process, so `sb26091501` got a different
+  `grb_id` in each instance and after every restart, and the exact-trigger
+  match could never find a target made by another process or an earlier run.
+  Prefixed IDs now keep their digits (`sb26091501` → `26091501`), with CRC32
+  for an ID with no digits at all.
+- The look-up-then-insert in `_add_grb_to_database()` holds
+  `pg_advisory_xact_lock` for its whole transaction, so concurrent alerts
+  serialise however they arrive.
+- NULL error boxes from the database no longer crash the update/link paths.
+
+### Cutover
+
+The wrappers wrote a PID without ever taking the flock, so the running copies
+hold nothing the new code would notice; they have to be stopped by pid, all of
+them, before the first start of the new code:
+
+    pkill -f 'rtspy-grbd -d KAFKA'; pkill -f 'rtspy-queue-selector -d QUEUE'
+
+Remove the old wrappers left in `/usr/local/bin` by pre-rename installs
+(`rts2-gcnkafka`, `rts2-queuer`): `rts2-start` tries `rts2-` before `rtspy-`
+and would keep launching them. The wrappers ran the daemon as `mates` and sent
+its output to `/home/mates/rtspy.log`; the services lines now say that
+themselves:
+
+    queuer    QUEUE  --time-slice 60 --run-as mates --log-file /home/mates/rtspy.log
+    gcnkafka  KAFKA  --run-as mates --log-file /home/mates/rtspy.log --gcn-client-id ...
+
