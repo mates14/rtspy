@@ -37,6 +37,10 @@ class FocuserMixin(DeviceConfig):
     FOC_FOCUSING = 0x0001
     FOC_MASK_FOCUSING = 0x0001
 
+    # home_focuser() may return this: homing continues in the background and
+    # the driver calls focuser_home_finished() when it ends
+    HOME_PENDING = 1
+
     def setup_focuser_config(self, config):
         """Register focuser-specific configuration arguments."""
         config.add_argument('--start-position', type=float,
@@ -122,6 +126,7 @@ class FocuserMixin(DeviceConfig):
         self._movement_in_progress = False
         self.pending_focus_connection = None
         self._pending_focus_lock = threading.Lock()
+        self._focus_home_part = None
 
         # Initialize default values
         self.foc_pos.value = 0.0
@@ -559,6 +564,29 @@ class FocuserMixin(DeviceConfig):
         if previous is not None and previous is not conn and previous.command_in_progress:
             self.network._send_error_response(previous, "focuser move superseded by another request")
 
+    def claim_focus_home(self, part):
+        """Record the 'home' command part to answer; False if homing is already running."""
+        with self._pending_focus_lock:
+            if self._focus_home_part is not None:
+                return False
+            self._focus_home_part = part
+            return True
+
+    def release_focus_home(self, part):
+        """Take back an unfinished part (homing turned out synchronous); True if it was ours."""
+        with self._pending_focus_lock:
+            if self._focus_home_part is not part:
+                return False
+            self._focus_home_part = None
+            return True
+
+    def focuser_home_finished(self, ok=True, message="Error homing focuser"):
+        """Called by a driver whose home_focuser() returned HOME_PENDING, from any thread."""
+        with self._pending_focus_lock:
+            part, self._focus_home_part = self._focus_home_part, None
+        if part is not None:
+            self.network.end_part(part, ok, message)
+
     def take_focus_waiter(self, conn=None):
         """
         Remove and return the connection waiting for the focuser to stop
@@ -702,16 +730,35 @@ class FocuserCommands:
             self.focuser_device.network._send_error_response(conn, message)
 
     def handle_home(self, conn, params):
-        """Handle 'home' command to home the focuser."""
-        try:
-            # Check if focuser supports homing
-            if not hasattr(self.focuser_device, 'home_focuser'):
-                self._reply_error(
-                    conn, "Home operation not implemented for this focuser")
-                return False
+        """
+        Handle 'home' command to home the focuser.
 
+        A driver may home in the background (home_focuser() returns
+        HOME_PENDING): the command is then answered when it calls
+        focuser_home_finished() - together with any other part of the same
+        command, such as the filter wheel of a combined device.
+        """
+        device = self.focuser_device
+        # Check if focuser supports homing
+        if not hasattr(device, 'home_focuser'):
+            self._reply_error(
+                conn, "Home operation not implemented for this focuser")
+            return False
+
+        part = device.network.begin_part(conn)
+        if not device.claim_focus_home(part):
+            device.network.cancel_part(part)
+            self._reply_error(conn, "Focuser homing already in progress")
+            return False
+        try:
             # Call home_focuser method on the device
-            ret = self.focuser_device.home_focuser()
+            ret = device.home_focuser()
+
+            if ret == device.HOME_PENDING:
+                return True
+
+            if device.release_focus_home(part):
+                device.network.cancel_part(part)
 
             if ret == 0:
                 # netman sends the OK (see _reply_error)
@@ -729,6 +776,8 @@ class FocuserCommands:
 
         except Exception as e:
             logging.error(f"Error handling home command: {e}")
+            if device.release_focus_home(part):
+                device.network.cancel_part(part)
             self._reply_error(conn, f"Error: {str(e)}")
             return False
 

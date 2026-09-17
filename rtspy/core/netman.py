@@ -573,17 +573,33 @@ class NetworkManager:
 
         # For regular commands that need responses, set command_in_progress
         if not is_immediate_command:
-            conn.command_in_progress = True
-            conn.response_deferred = False
+            with conn.reply_lock:
+                conn.command_in_progress = True
+                conn.response_deferred = False
+                conn.command_seq += 1
+                conn.open_parts = 0
+                conn.parts_started = False
+                conn.part_error = None
+                conn.dispatch_finished = False
 
         # Dispatch to registry
         if self.command_registry.can_handle(cmd):
             success, result = self.command_registry.dispatch(cmd, conn, params)
 
+            if not is_immediate_command:
+                with conn.reply_lock:
+                    conn.dispatch_finished = True
+                    parts_done = (conn.parts_started and conn.open_parts == 0
+                                  and conn.command_in_progress)
+                if parts_done:
+                    # every background part already ended while dispatching
+                    self._finish_parts(conn)
+
             # Check if command was handled and still expects a response
-            # (a handler that called defer_response() answers later itself)
+            # (a handler that called defer_response() or begin_part()
+            # answers later)
             if (not is_immediate_command and conn.command_in_progress
-                    and not conn.response_deferred):
+                    and not conn.response_deferred and not conn.parts_started):
                 needs_response = self.command_registry.needs_response(cmd)
 
                 if needs_response:
@@ -985,6 +1001,52 @@ class NetworkManager:
         """
         conn.response_deferred = True
 
+    def begin_part(self, conn):
+        """
+        Open a background part of the command conn is running.
+
+        The command is answered once every part has ended - with OK, or with
+        the first error a part reported - and once all its handlers have
+        returned. Returns the token to pass to end_part or cancel_part.
+        """
+        with conn.reply_lock:
+            conn.open_parts += 1
+            conn.parts_started = True
+            return (conn, conn.command_seq)
+
+    def cancel_part(self, part):
+        """The part finished synchronously; its handler replies the usual way."""
+        conn, seq = part
+        with conn.reply_lock:
+            if conn.command_seq != seq or conn.open_parts == 0:
+                return
+            conn.open_parts -= 1
+            if conn.open_parts == 0 and conn.part_error is None:
+                conn.parts_started = False
+
+    def end_part(self, part, ok=True, message="failed"):
+        """A background part ended; safe to call from any thread."""
+        conn, seq = part
+        with conn.reply_lock:
+            if conn.command_seq != seq or not conn.command_in_progress or conn.open_parts == 0:
+                return  # its command was answered already (e.g. another part failed synchronously)
+            conn.open_parts -= 1
+            if not ok and conn.part_error is None:
+                conn.part_error = message
+            if conn.open_parts > 0 or not conn.dispatch_finished:
+                return
+        self._finish_parts(conn)
+
+    def _finish_parts(self, conn):
+        with conn.reply_lock:
+            if not conn.command_in_progress:
+                return
+            error = conn.part_error
+        if error is None:
+            self._send_ok_response(conn)
+        else:
+            self._send_error_response(conn, error)
+
     def _send_ok_response(self, conn, message="OK"):
         """Send an OK response to a command."""
         self._end_command(conn, f"+0 {message}\n")
@@ -994,9 +1056,10 @@ class NetworkManager:
         self._end_command(conn, f"{code} {message}\n")
 
     def _end_command(self, conn, reply):
-        deferred = conn.response_deferred
-        conn.response_deferred = False
-        conn.command_in_progress = False
+        with conn.reply_lock:
+            deferred = conn.response_deferred or conn.parts_started
+            conn.response_deferred = False
+            conn.command_in_progress = False
         conn.send(reply)
         if deferred:
             # the reply came from outside the command loop: commands queued

@@ -83,6 +83,16 @@ class Connection:
         self.command_in_progress = False
         self.response_deferred = False
         self.incoming_command_queue = queue.Queue()
+        # A command several handlers finish in the background (home on a
+        # filter wheel + focuser device) is answered once all parts end;
+        # see NetworkManager.begin_part. command_seq tells a late part
+        # that its command was already answered.
+        self.reply_lock = threading.Lock()
+        self.command_seq = 0
+        self.open_parts = 0
+        self.parts_started = False
+        self.part_error = None
+        self.dispatch_finished = True
         self.current_command = None
         self.pending_command = None
         self.pending_command_time = None

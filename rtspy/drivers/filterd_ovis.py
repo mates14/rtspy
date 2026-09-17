@@ -391,6 +391,7 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
         # Focuser motor state
         self.focus_moving = False
         self._focus_position_known = False
+        self._last_home_reply = {}  # 'filter'/'focuser' -> firmware reply to HOM
 
         # OVIS-specific values (from filterd_ovis.py)
         self.m0pos = ValueInteger("M0POS", "[int] focuser motor position", write_to_fits=True)
@@ -505,7 +506,7 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
 
         # Homing is what makes the wheel usable; on success it moves to
         # filter 0 and marks the device ready
-        if self.home_filter() != 0:
+        if self._home_filter_blocking() != 0:
             self.set_state(self._state | self.ERROR_HW, "Failed to home filter wheel")
 
     def stop(self):
@@ -639,7 +640,30 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
         # Movement completion will be detected by status updates
         return 0
 
-    def home_filter(self, move_to_filter=True):
+    def home_filter(self):
+        """
+        'home' command: home in the background, so the network thread is not
+        blocked for the minute or so the firmware may take. The command is
+        answered through filter_home_finished().
+        """
+        return self._home_in_background("filter", self._home_filter_blocking,
+                                        self.filter_home_finished)
+
+    def _home_in_background(self, what, blocking, finished):
+        def run():
+            ok = False
+            try:
+                ok = blocking() == 0
+            except Exception as e:
+                logging.error(f"Error homing {what}: {e}")
+                self._last_home_reply[what] = str(e)
+            finally:
+                finished(ok, f"Homing {what} failed: {self._last_home_reply.get(what) or 'no reply'}")
+
+        threading.Thread(target=run, name=f"OvisHome-{what}", daemon=True).start()
+        return self.HOME_PENDING
+
+    def _home_filter_blocking(self, move_to_filter=True):
         """
         Home the filter wheel. Blocks until the firmware answers.
 
@@ -649,6 +673,7 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
         """
         if not self.serial_comm or not self.serial_comm.is_connected():
             logging.error("Cannot home filter: device not connected")
+            self._last_home_reply['filter'] = "device not connected"
             return -1
 
         logging.info("Homing filter wheel")
@@ -662,6 +687,7 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
 
         # Send home command with configured timeout
         response = self.serial_comm.send_command("M 1 HOM", True, self.home_timeout)
+        self._last_home_reply['filter'] = response
 
         with self.motor_status_lock:
             self.filter_moving = False
@@ -735,9 +761,15 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
         return abs(self.get_position()) < 10.0
 
     def home_focuser(self) -> int:
-        """Home the focuser."""
+        """'home' command: home in the background, see home_filter."""
+        return self._home_in_background("focuser", self._home_focuser_blocking,
+                                        self.focuser_home_finished)
+
+    def _home_focuser_blocking(self) -> int:
+        """Home the focuser. Blocks until the firmware answers."""
         if not self.serial_comm or not self.serial_comm.is_connected():
             logging.error("Cannot home focuser: device not connected")
+            self._last_home_reply['focuser'] = "device not connected"
             return -1
 
         logging.info("Homing focuser")
@@ -751,6 +783,7 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
 
         # Send home command
         response = self.serial_comm.send_command("M 0 HOM", True, self.home_timeout)
+        self._last_home_reply['focuser'] = response
 
         with self.motor_status_lock:
             self.focus_moving = False

@@ -73,10 +73,11 @@ class DummyFilter(Filterd):
 
     def home_filter(self):
         """
-        Home the filter wheel by moving to position 0.
+        Home the filter wheel by moving to position 0, in the background.
 
         Returns:
-            0 on success, -1 on error
+            HOME_PENDING - the 'home' command is answered by
+            filter_home_finished() once the simulated homing is over
         """
         logging.info("Homing filter wheel")
 
@@ -84,27 +85,30 @@ class DummyFilter(Filterd):
         self.set_state(
             self._state | self.FILTERD_MOVE,
             "Homing filter wheel",
-            self.BOP_EXPOSURE
+            self.set_bop_exposure('filter', True)
         )
 
-        # Simulate homing operation with timeout
-        time.sleep(self.filter_sleep.value * 1.5)  # Home takes a bit longer
+        def home_movement():
+            # Simulate homing operation with timeout
+            time.sleep(self.filter_sleep.value * 1.5)  # Home takes a bit longer
 
-        # Update filter position to 0 (home)
-        self.filter_num = 0
-        self.filter.value = 0
+            # Update filter position to 0 (home)
+            self.filter_num = 0
+            self.filter.value = 0
 
-        # Send updated filter value to clients
-        self.network.distribute_value_immediate(self.filter)
+            # Send updated filter value to clients
+            self.network.distribute_value_immediate(self.filter)
 
-        # Reset state
-        self.set_state(
-            self._state & ~self.FILTERD_MOVE,
-            "Filter wheel homed",
-            0
-        )
+            # Reset state
+            self.set_state(
+                self._state & ~self.FILTERD_MOVE,
+                "Filter wheel homed",
+                self.set_bop_exposure('filter', False)
+            )
+            self.filter_home_finished(True)
 
-        return 0
+        threading.Thread(target=home_movement, daemon=True).start()
+        return self.HOME_PENDING
 
 
 def main():

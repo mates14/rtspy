@@ -268,7 +268,8 @@ class DummyFocuser(Focusd):
         Home the focuser by moving to position 0.
 
         Returns:
-            0 on success, -1 on error
+            HOME_PENDING - the 'home' command is answered by
+            focuser_home_finished() once the simulated homing is over
         """
         logging.info("Homing dummy focuser")
 
@@ -276,7 +277,7 @@ class DummyFocuser(Focusd):
         self.set_state(
             self._state | self.FOC_FOCUSING,
             "Homing focuser",
-            self.BOP_EXPOSURE
+            self.set_bop_exposure('focus', True)
         )
 
         def home_movement():
@@ -296,12 +297,13 @@ class DummyFocuser(Focusd):
             self.set_state(
                 self._state & ~self.FOC_FOCUSING,
                 "Focuser homed",
-                0
+                self.set_bop_exposure('focus', False)
             )
+            self.focuser_home_finished(True)
 
         # Start homing in a separate thread
         threading.Thread(target=home_movement, daemon=True).start()
-        return 0
+        return self.HOME_PENDING
         
     def on_value_changed_from_client(self, value, old_value, new_value):
         """Handle value changes from clients."""

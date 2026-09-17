@@ -33,6 +33,10 @@ class FilterMixin(DeviceConfig):
     FILTERD_IDLE = 0x000
     FILTERD_MOVE = 0x002
 
+    # home_filter() may return this: homing continues in the background and
+    # the driver calls filter_home_finished() when it ends
+    HOME_PENDING = 1
+
     # Filter names when -F is not given; a driver for one particular wheel
     # overrides this with the filters it really carries
     DEFAULT_FILTERS = 'J:H:K'
@@ -75,6 +79,7 @@ class FilterMixin(DeviceConfig):
         # Movement state
         self.pending_filter_connection = None
         self._pending_filter_lock = threading.Lock()
+        self._filter_home_part = None
         self.movement_in_progress = False
         self._movement_start_time = None
         self._target_filter = None
@@ -259,6 +264,29 @@ class FilterMixin(DeviceConfig):
                 return None
             self.pending_filter_connection = None
             return waiting
+
+    def claim_filter_home(self, part):
+        """Record the 'home' command part to answer; False if homing is already running."""
+        with self._pending_filter_lock:
+            if self._filter_home_part is not None:
+                return False
+            self._filter_home_part = part
+            return True
+
+    def release_filter_home(self, part):
+        """Take back an unfinished part (homing turned out synchronous); True if it was ours."""
+        with self._pending_filter_lock:
+            if self._filter_home_part is not part:
+                return False
+            self._filter_home_part = None
+            return True
+
+    def filter_home_finished(self, ok=True, message="Error homing filter wheel"):
+        """Called by a driver whose home_filter() returned HOME_PENDING, from any thread."""
+        with self._pending_filter_lock:
+            part, self._filter_home_part = self._filter_home_part, None
+        if part is not None:
+            self.network.end_part(part, ok, message)
 
     def home_filter(self):
         """
@@ -455,10 +483,29 @@ class FilterCommands:
             self.filter_device.network._send_error_response(conn, message)
 
     def handle_home(self, conn, params):
-        """Handle 'home' command to home the filter wheel."""
+        """
+        Handle 'home' command to home the filter wheel.
+
+        A driver may home in the background (home_filter() returns
+        HOME_PENDING): the command is then answered when it calls
+        filter_home_finished() - together with any other part of the same
+        command, such as the focuser of a combined device.
+        """
+        device = self.filter_device
+        part = device.network.begin_part(conn)
+        if not device.claim_filter_home(part):
+            device.network.cancel_part(part)
+            self._reply_error(conn, "Filter wheel homing already in progress")
+            return False
         try:
             # Call home_filter method on the device
-            ret = self.filter_device.home_filter()
+            ret = device.home_filter()
+
+            if ret == device.HOME_PENDING:
+                return True
+
+            if device.release_filter_home(part):
+                device.network.cancel_part(part)
 
             if ret == 0:
                 # netman sends the OK (see _reply_error)
@@ -476,6 +523,8 @@ class FilterCommands:
 
         except Exception as e:
             logging.error(f"Error handling home command: {e}")
+            if device.release_filter_home(part):
+                device.network.cancel_part(part)
             self._reply_error(conn, f"Error: {str(e)}")
             return False
 
