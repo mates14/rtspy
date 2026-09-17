@@ -54,21 +54,24 @@ class FilterMixin(DeviceConfig):
         """Apply filter wheel-specific configuration."""
         # Process filters string
         filters_str = config.get('filters') or self.DEFAULT_FILTERS
-        self.filter = ValueSelection("filter", "used filter", writable=True)
+        # Not written to FITS, as in C++ filterd: the camera using this wheel
+        # (--wheeldev) writes FILTER itself, and a filter wheel's own "filter"
+        # would land on the same FITS keyword
+        self.filter = ValueSelection("filter", "used filter", write_to_fits=False, writable=True)
         self.set_filters(self.filter, filters_str)
 
         # Default and daytime filters
         self.default_filter = None
         default_filter_arg = config.get('default_filter')
         if default_filter_arg:
-            self.default_filter = ValueSelection("def_filter", "default filter", writable=True)
+            self.default_filter = ValueSelection("def_filter", "default filter", write_to_fits=False, writable=True)
             self.set_filters(self.default_filter, filters_str)
             self.default_filter.set_value_char_arr(default_filter_arg)
 
         self.arg_default_filter = None
         daytime_filter_arg = config.get('daytime_filter')
         if daytime_filter_arg:
-            self.daytime_filter = ValueSelection("day_filter", "daytime filter", writable=True)
+            self.daytime_filter = ValueSelection("day_filter", "daytime filter", write_to_fits=False, writable=True)
             self.set_filters(self.daytime_filter, filters_str)
             self.daytime_filter.set_value_char_arr(daytime_filter_arg)
 

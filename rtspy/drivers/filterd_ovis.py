@@ -92,7 +92,8 @@ from typing import Dict, Any
 from rtspy.core.device import Device
 from rtspy.core.constants import DeviceType
 from rtspy.core.value import (
-    ValueSelection, ValueInteger, ValueBool, ValueString, ValueTime, ValueDouble
+    ValueSelection, ValueInteger, ValueBool, ValueString, ValueTime, ValueDouble,
+    ValueFlags
 )
 from rtspy.core.focusd import FocuserMixin
 from rtspy.core.filterd import FilterMixin
@@ -397,8 +398,13 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
         self.m0pos = ValueInteger("M0POS", "[int] focuser motor position", write_to_fits=True)
         self.m1pos = ValueInteger("M1POS", "[int] filter motor position", write_to_fits=True)
 
-        self.neon = ValueSelection("NEON", "[on/off] neon lamp status",
-                                 write_to_fits=True, writable=True)
+        # Written into every frame for the automated reduction; the image
+        # writer also adds NEON.CHANGED = T if it changed during the exposure
+        self.neon = ValueSelection("NEON", "[on/off] neon calibration lamp",
+                                 write_to_fits=True, writable=True,
+                                 flags=ValueFlags.RECORD_CHANGE)
+        self._neon_reading = None        # last relay state the controller reported
+        self._neon_mismatch_since = None  # when NEON and the relay started to disagree
         self.neon.add_sel_val("off")
         self.neon.add_sel_val("on")
 
@@ -559,8 +565,7 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
 
             # Update neon status
             if neon_status is not None:
-                if not self.neon.value == neon_status:
-                    self.neon.value = neon_status
+                self._update_neon_from_hardware(neon_status)
 
     def _filter_positions(self):
         return [self.f0pos.value, self.f1pos.value, self.f2pos.value,
@@ -838,8 +843,7 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
         try:
             # Handle neon lamp (from filterd_ovis.py)
             if value.name == "NEON":
-                self._set_neon(new_value)
-                return 0
+                return self._set_neon(new_value)
             if re.fullmatch(r"F[0-5]POS", value.name):
                 filter_idx = int(value.name[1])
                 if filter_idx == self.filter_num and self.motor_initialized:
@@ -854,21 +858,57 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
             logging.error(f"Error handling value change: {e}")
             return -1
 
-    def _set_neon(self, new_value):
-        """Set neon lamp state (from filterd_ovis.py)."""
-        if not self.serial_comm:
+    # how long NEON may disagree with the relay before the relay wins
+    NEON_SETTLE_S = 2.0
+
+    def _update_neon_from_hardware(self, reading):
+        """
+        Follow the relay state reported by STATUS.
+
+        Only a *change* of the reading is copied into NEON. A client setting
+        NEON changes the value before the relay command goes out, and a
+        STATUS reply from just before that still shows the old state;
+        copying every reading would flip NEON back for a moment - long
+        enough for an exposure starting right after the change to record
+        the wrong lamp state. A disagreement that outlasts NEON_SETTLE_S
+        (the lamp did not follow the command) is resolved in favour of the
+        hardware.
+        """
+        now = time.time()
+        if reading != self._neon_reading:
+            self._neon_reading = reading
+            self._neon_mismatch_since = None
+            if self.neon.value != reading:
+                self.neon.value = reading
             return
 
+        if self.neon.value == reading:
+            self._neon_mismatch_since = None
+        elif self._neon_mismatch_since is None:
+            self._neon_mismatch_since = now
+        elif now - self._neon_mismatch_since > self.NEON_SETTLE_S:
+            logging.warning(f"Neon lamp reports {'on' if reading else 'off'}, "
+                            f"not {'on' if self.neon.value else 'off'} as requested")
+            self._neon_mismatch_since = None
+            self.neon.value = reading
+
+    def _set_neon(self, new_value):
+        """Switch the calibration lamp: servo feeds it into the beam, relay powers it."""
+        if not self.serial_comm or not self.serial_comm.is_connected():
+            logging.error("Cannot switch neon lamp: device not connected")
+            return -1
+
         if new_value == 0:  # OFF
-            self.serial_comm.send_command("S ON")
-            self.serial_comm.send_command("S IN")
-            self.serial_comm.send_command("R OFF")
+            commands = ("S ON", "S IN", "R OFF")
         else:  # ON
-            self.serial_comm.send_command("S ON")
-            self.serial_comm.send_command("S OUT")
-            self.serial_comm.send_command("R ON")
+            commands = ("S ON", "S OUT", "R ON")
+        for cmd in commands:
+            if self.serial_comm.send_command(cmd) is None:
+                logging.error(f"Failed to send '{cmd}' switching the neon lamp")
+                return -1
 
         logging.info(f"Neon lamp set to {'ON' if new_value else 'OFF'}")
+        return 0
 
 def main():
     """Entry point - see rtspy/core/daemon.py for the startup contract."""

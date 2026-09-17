@@ -41,6 +41,8 @@ class ValueFlags(IntFlag):
     NOTNULL = 0x0800_0000
     AUTOSAVE = 0x0080_0000
     CHANGED = 0x0000_0400
+    # the image writer adds {name}.CHANGED = T/F: did the value change during the exposure
+    RECORD_CHANGE = 0x0000_0800
     NEED_SEND = 0x0100_0000
     SCRIPTTEMPORARY = 0x04000000
     ERROR = 0x20000000
