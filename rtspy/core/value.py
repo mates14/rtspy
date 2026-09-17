@@ -210,17 +210,28 @@ class Value(Generic[T]):
             # Notify callbacks about client-originated change
             self._callbacks.trigger(self, old_value, new_value, from_client=True)
 
-            # Get device instance to notify about value change
-            from rtspy.core.device import Device
-            device = Device.get_instance()
-            if device:
-                # Notify device about client-originated value change
-                device.on_value_changed_from_client(self, old_value, new_value)
-
+            self._notify_client_change(old_value, new_value)
             return True
         except Exception as e:
             logging.error(f"Error updating value {self.name} from client: {e}")
             raise
+
+    def _notify_client_change(self, old_value, new_value):
+        """
+        Let the device act on a client's change. A negative result (the
+        device could not carry it out) puts the old value back and raises,
+        so the client gets an error rather than an OK for a change that did
+        not happen - as a C++ daemon answers a failed setValue.
+        """
+        from rtspy.core.device import Device
+        device = Device.get_instance()
+        if not device:
+            return
+        result = device.on_value_changed_from_client(self, old_value, new_value)
+        if isinstance(result, int) and not isinstance(result, bool) and result < 0:
+            self._value = old_value
+            self.changed()
+            raise ValueError(f"device could not set {self.name} to {new_value}")
 
     def _convert_value(self, value: Any) -> T:
         """Convert input value to the appropriate type."""
@@ -802,25 +813,20 @@ class ValueSelection(Value[int]):
         """Update value from network string."""
         old_value = self._value
 
+        # Errors are raised, not returned: the caller answers the client, and
+        # a False here used to be answered with OK
         try:
             new_value = self._convert_value(value_string)
             if new_value < 0 or new_value >= len(self._selection_values):
-                return False
+                raise ValueError(f"Invalid selection value: {value_string}")
 
             self._value = new_value
             self.changed()
-
-            # Get device instance to notify about value change
-            from rtspy.core.device import Device
-            device = Device.get_instance()
-            if device:
-                # Notify device about client-originated value change
-                device.on_value_changed_from_client(self, old_value, new_value)
-
+            self._notify_client_change(old_value, new_value)
             return True
         except Exception as e:
             logging.error(f"Error updating selection value {self.name}: {e}")
-            return False
+            raise
 
     def send_selections(self, conn):
         """Send selection options to a connection."""

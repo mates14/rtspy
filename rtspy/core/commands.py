@@ -382,7 +382,11 @@ class ProtocolCommands:
 
         value_name = parts[0]
         value_op = parts[1]
-        value_data = parts[2]
+        value_data = parts[2].strip()
+        # C++ clients quote string operands (X filter = "R"), and C++
+        # daemons read them without the quotes
+        if len(value_data) >= 2 and value_data[0] == value_data[-1] and value_data[0] in "\"'":
+            value_data = value_data[1:-1]
 
         # Notify network manager of value change request
         if value_op == "=":
