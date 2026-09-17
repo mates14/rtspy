@@ -362,7 +362,7 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
                           help='Motor speed setting', section='hardware')
         config.add_argument('--motor-acceleration', type=int, default=100000,
                           help='Motor acceleration setting', section='hardware')
-        config.add_argument('--home-timeout', type=float, default=30.0,
+        config.add_argument('--home-timeout', type=float, default=90.0,
                           help='Homing operation timeout in seconds', section='hardware')
 
     def __init__(self, device_name="OVIS", port=0):
@@ -375,7 +375,7 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
         self.baudrate = 9600
         self.motor_speed = 100000
         self.motor_acceleration = 100000
-        self.home_timeout = 30.0
+        self.home_timeout = 90.0
 
         # Serial connection
         self.serial_comm = None
@@ -426,7 +426,7 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
         self.baudrate = config.get('baudrate', 9600)
         self.motor_speed = config.get('motor_speed', 100000)
         self.motor_acceleration = config.get('motor_acceleration', 100000)
-        self.home_timeout = config.get('home_timeout', 30.0)
+        self.home_timeout = config.get('home_timeout', 90.0)
 
         # Apply filter positions (hardware supports positions 0-5)
         self.f0pos.value = config.get('f0_pos', 2000)
@@ -666,14 +666,17 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
         with self.motor_status_lock:
             self.filter_moving = False
 
-        if not response or "OK" not in response:
-            logging.error("Failed to home filter wheel")
+        # the firmware replies "OK SG|HARDSTOP|BLIND <details>" or "ERR <reason>"
+        if not response or not response.startswith("OK"):
+            logging.error(f"Failed to home filter wheel: {response or 'no reply'}")
             self.set_state(self._state & ~(self.FILTERD_MOVE), "Homing failed",
                             self.set_bop_exposure('filter', False))
             return -1
 
         # Homing successful
-        logging.info("Filter wheel homed successfully")
+        logging.info(f"Filter wheel homed: {response}")
+        if not response.startswith("OK SG"):
+            logging.warning("Filter wheel homing did not confirm the stop with StallGuard")
 
         # The firmware zeroes the motor position; no filter is in the beam
         self.m1pos.value = 0
@@ -752,14 +755,16 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
         with self.motor_status_lock:
             self.focus_moving = False
 
-        if not response or "OK" not in response:
-            logging.error("Failed to home focuser")
+        if not response or not response.startswith("OK"):
+            logging.error(f"Failed to home focuser: {response or 'no reply'}")
             self.set_state(self._state & ~(self.FOC_FOCUSING), "Focuser homing failed",
                             self.set_bop_exposure('focus', False))
             return -1
 
         # Homing successful
-        logging.info("Focuser homed successfully")
+        logging.info(f"Focuser homed: {response}")
+        if not response.startswith("OK SG"):
+            logging.warning("Focuser homing did not confirm the stop with StallGuard")
 
         # Update focuser position
         self.m0pos.value = 0
