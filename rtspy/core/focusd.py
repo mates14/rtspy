@@ -13,6 +13,7 @@ as a mixin for multi-function devices.
 import time
 import logging
 import math
+import threading
 from typing import Dict, Any, Optional, Callable
 from abc import ABC, abstractmethod
 
@@ -120,6 +121,7 @@ class FocuserMixin(DeviceConfig):
         self._target_position = None
         self._movement_in_progress = False
         self.pending_focus_connection = None
+        self._pending_focus_lock = threading.Lock()
 
         # Initialize default values
         self.foc_pos.value = 0.0
@@ -390,9 +392,9 @@ class FocuserMixin(DeviceConfig):
         )
 
         # Send response to pending command if present
-        if self.pending_focus_connection:
-            self.network._send_ok_response(self.pending_focus_connection)
-            self.pending_focus_connection = None
+        conn = self.take_focus_waiter()
+        if conn is not None:
+            self.network._send_ok_response(conn)
 
         current_pos = self.get_position()
         logging.info(f"Focuser moved to {current_pos}")
@@ -506,9 +508,9 @@ class FocuserMixin(DeviceConfig):
                     )
 
                     # Send error response to pending command if present
-                    if self.pending_focus_connection:
-                        self.network._send_error_response(self.pending_focus_connection, "Focusing failed")
-                        self.pending_focus_connection = None
+                    conn = self.take_focus_waiter()
+                    if conn is not None:
+                        self.network._send_error_response(conn, "Focusing failed")
 
         # Handle linear temperature compensation
         if (self.linear_offset and self.linear_slope and self.linear_intercept and
@@ -552,10 +554,24 @@ class FocuserMixin(DeviceConfig):
         wait: a client still waiting for an earlier move is answered with an
         error rather than never.
         """
-        previous = self.pending_focus_connection
+        with self._pending_focus_lock:
+            previous, self.pending_focus_connection = self.pending_focus_connection, conn
         if previous is not None and previous is not conn and previous.command_in_progress:
             self.network._send_error_response(previous, "focuser move superseded by another request")
-        self.pending_focus_connection = conn
+
+    def take_focus_waiter(self, conn=None):
+        """
+        Remove and return the connection waiting for the focuser to stop
+        (only if it is conn, when given). Taken before replying, never
+        cleared after: the reply can make the client send its next 'move' at
+        once, and clearing afterwards would drop that new request.
+        """
+        with self._pending_focus_lock:
+            waiting = self.pending_focus_connection
+            if waiting is None or (conn is not None and waiting is not conn):
+                return None
+            self.pending_focus_connection = None
+            return waiting
 
     def focuser_info_update(self):
         """Update focuser information from hardware."""
@@ -624,7 +640,7 @@ class FocuserCommands:
                 # Error - send error response immediately
                 self.focuser_device.network._send_error_response(
                     conn, f"Error moving focuser to position {target}")
-                self.focuser_device.pending_focus_connection = None
+                self.focuser_device.take_focus_waiter(conn)
                 return False
 
             # Reply when the movement completes (end_focusing), unless it
@@ -658,7 +674,7 @@ class FocuserCommands:
                 # Error - send error response immediately
                 self.focuser_device.network._send_error_response(
                     conn, f"Error stepping focuser by {step}")
-                self.focuser_device.pending_focus_connection = None
+                self.focuser_device.take_focus_waiter(conn)
                 return False
 
             # Reply when the movement completes (end_focusing), unless it

@@ -9,6 +9,7 @@ for multi-function devices.
 
 import time
 import logging
+import threading
 from typing import Dict, Any, List, Optional
 from abc import ABC, abstractmethod
 
@@ -73,6 +74,7 @@ class FilterMixin(DeviceConfig):
 
         # Movement state
         self.pending_filter_connection = None
+        self._pending_filter_lock = threading.Lock()
         self.movement_in_progress = False
         self._movement_start_time = None
         self._target_filter = None
@@ -229,9 +231,34 @@ class FilterMixin(DeviceConfig):
                         self.set_bop_exposure('filter', False))
 
         # Send response to pending command if present
-        if self.pending_filter_connection:
-            self.network._send_ok_response(self.pending_filter_connection)
+        conn = self.take_filter_waiter()
+        if conn is not None:
+            self.network._send_ok_response(conn)
+
+    def wait_for_filter_end(self, conn):
+        """
+        Make conn the one answered when the wheel stops. Only one can wait:
+        a client still waiting for an earlier move is answered with an error
+        rather than never.
+        """
+        with self._pending_filter_lock:
+            previous, self.pending_filter_connection = self.pending_filter_connection, conn
+        if previous is not None and previous is not conn and previous.command_in_progress:
+            self.network._send_error_response(previous, "filter move superseded by another request")
+
+    def take_filter_waiter(self, conn=None):
+        """
+        Remove and return the connection waiting for the wheel to stop (only
+        if it is conn, when given). Taken before replying, never cleared
+        after: the reply can make the client send its next 'filter' at once,
+        and clearing afterwards would drop that new request.
+        """
+        with self._pending_filter_lock:
+            waiting = self.pending_filter_connection
+            if waiting is None or (conn is not None and waiting is not conn):
+                return None
             self.pending_filter_connection = None
+            return waiting
 
     def home_filter(self):
         """
@@ -390,14 +417,8 @@ class FilterCommands:
                 return False
 
             # Set filter - don't complete the command until movement is done
-            # Store the connection to respond to when movement completes.
-            # Only one can wait: a client still waiting for an earlier move
-            # would otherwise never be answered.
-            previous = self.filter_device.pending_filter_connection
-            if previous is not None and previous is not conn and previous.command_in_progress:
-                self.filter_device.network._send_error_response(
-                    previous, "filter move superseded by another request")
-            self.filter_device.pending_filter_connection = conn
+            # Store the connection to respond to when movement completes
+            self.filter_device.wait_for_filter_end(conn)
 
             # Start the filter movement
             ret = self.filter_device.set_filter_num_mask(filter_num)
@@ -406,7 +427,7 @@ class FilterCommands:
                 # Error - send error response immediately
                 self.filter_device.network._send_error_response(
                     conn, f"Error setting filter to position {filter_num}")
-                self.filter_device.pending_filter_connection = None
+                self.filter_device.take_filter_waiter(conn)
                 return False
 
             # Reply when the movement completes (movement_completed), unless
