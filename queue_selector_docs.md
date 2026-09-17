@@ -234,24 +234,24 @@ Control the selector during operation using RTS2 commands:
 
 ```bash
 # Disable selector for manual operations
-rts2-value SEL enabled false
+rtspy-value SEL enabled false
 
 # Re-enable selector  
-rts2-value SEL enabled true
+rtspy-value SEL enabled true
 
 # Adjust timing for faster target switching
-rts2-value SEL time_slice 180
+rtspy-value SEL time_slice 180
 
 # Manually initiate grace period (debugging)
-rts2-value SEL grb_grace_active true
+rtspy-value SEL grb_grace_active true
 
 # Cancel active grace period
-rts2-value SEL grb_grace_active false
+rtspy-value SEL grb_grace_active false
 
 # Monitor current status
-rts2-value SEL enabled
-rts2-value SEL grb_grace_active  
-rts2-value SEL queue_size
+rtspy-value SEL enabled
+rtspy-value SEL grb_grace_active  
+rtspy-value SEL queue_size
 ```
 
 ### Manual Queue Operations
@@ -264,7 +264,7 @@ VALUES (nextval('qid'), 1, 1234, '2025-07-25 02:30:00'::timestamp, 1);
 
 Or use a simple command-line tool:
 ```bash
-rts2-queue-manual --target 1234 --at "2025-07-25 02:30:00"
+rtspy-queue-manual --target 1234 --at "2025-07-25 02:30:00"
 ```
 
 ## Differences from Original RTS2 Selector

@@ -100,9 +100,9 @@ After installation with pip, the following commands are available:
 - `rtspy-filterd-ovis` - OVIS spectrograph filter wheel driver
 
 **CLI Utilities:**
-- `rts2-value` - Get/set device values via network protocol
-- `rts2-grbinfo` - Query GRB information from database
-- `rts2-queue-manual` - Manual queue management
+- `rtspy-value` - Get/set device values via network protocol
+- `rtspy-grbinfo` - Query GRB information from database
+- `rtspy-queue-manual` - Manual queue management
 
 **RTS2 Ecosystem Integration:**
 - `rtspy-gcnkafka` - rtspy-grbd under the name rts2-start resolves for a `gcnkafka` services line

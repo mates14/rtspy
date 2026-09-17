@@ -13,12 +13,12 @@ Data paths (override via environment variables):
     ASARINA_CAMERA       — camera name (section in /etc/asarina/config)
 
 Usage (calculation only):
-    rts2-observe -m 18.5 -s 10
-    rts2-observe -m 18.5 -s 10 --filter Sloan_i --fwhm 3.5
-    rts2-observe -m 18.5 -s 10 --camera C0
+    rtspy-observe -m 18.5 -s 10
+    rtspy-observe -m 18.5 -s 10 --filter Sloan_i --fwhm 3.5
+    rtspy-observe -m 18.5 -s 10 --camera C0
 
 Usage (also execute on C0):
-    rts2-observe -m 18.5 -s 10 --execute
+    rtspy-observe -m 18.5 -s 10 --execute
 """
 
 import sys

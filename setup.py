@@ -4,7 +4,7 @@ from setuptools import setup
 # Shell scripts cannot be installed via pyproject.toml [project.scripts] alone
 setup(
     scripts=[
-        'rtspy/scripts/rts2-observe',
+        'rtspy/scripts/rtspy-observe',
         'rtspy/scripts/rtspy-rotate-log',
         'rtspy/scripts/rtspy-split-log',
     ]

@@ -6,7 +6,7 @@ This tool queries the RTS2 database for GRB target information and displays
 it in a tabulated format including observation details, timing analysis,
 and image statistics.
 
-Usage: rts2-grbinfo <target_id>
+Usage: rtspy-grbinfo <target_id>
 """
 
 import sys
@@ -615,8 +615,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  rts2-grbinfo 1100848    # Show info for target ID 1100848
-  rts2-grbinfo --all      # Show all GRB targets with activity
+  rtspy-grbinfo 1100848    # Show info for target ID 1100848
+  rtspy-grbinfo --all      # Show all GRB targets with activity
 
 The output format matches the RTS2 GRB log format:
 target_id    date         trigger_time    coordinates              errorbox    site         gcn_id       name         timing1      timing2      delay    comment      images   processed

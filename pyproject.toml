@@ -94,14 +94,17 @@ rtspy-focusd-dummy = "rtspy.drivers.focusd_dummy:main"
 rtspy-focusd-toptec = "rtspy.drivers.toptec:main"
 rtspy-sensor-temp = "rtspy.drivers.sensor_temp:main"
 
-# CLI utilities (using rts2- prefix for ecosystem integration)
-rts2-value = "rtspy.cli.valuetool:main"
-rts2-grbinfo = "rtspy.cli.grbinfo:main"
-rts2-queue-manual = "rtspy.cli.queuemanual:main"
-rts2-addtarget = "rtspy.cli.addtarget:main"
+# CLI utilities. rtspy-*, like everything else rtspy installs: these land in
+# /usr/local/bin, which precedes /usr/bin, so an rts2-* name here would
+# shadow a C++ RTS2 program of that name - and gets cleaned out by an RTS2
+# install for exactly that reason (it happened on hpl on 2026-09-17).
+rtspy-value = "rtspy.cli.valuetool:main"
+rtspy-grbinfo = "rtspy.cli.grbinfo:main"
+rtspy-queue-manual = "rtspy.cli.queuemanual:main"
+rtspy-addtarget = "rtspy.cli.addtarget:main"
 
 # Shell scripts installed via setup.py scripts= (rtspy/scripts/):
-# rts2-observe, rtspy-rotate-log, rtspy-split-log. The daemon wrappers that
+# rtspy-observe, rtspy-rotate-log, rtspy-split-log. The daemon wrappers that
 # used to live there are gone - every daemon backgrounds itself now.
 
 [tool.setuptools]

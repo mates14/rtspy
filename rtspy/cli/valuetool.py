@@ -3,16 +3,16 @@
 RTS2 Value Client - Get and set RTS2 device values via network protocol
 
 Usage:
-    rts2-value -w device.value=new_value       # Write single value
-    rts2-value -R device.value1,device.value2  # Read multiple values (comma-separated output)
-    rts2-value -r device.value1,device.value2  # Read multiple values (shell eval format)
+    rtspy-value -w device.value=new_value       # Write single value
+    rtspy-value -R device.value1,device.value2  # Read multiple values (comma-separated output)
+    rtspy-value -r device.value1,device.value2  # Read multiple values (shell eval format)
 
 Examples:
-    rts2-value -w SEL.enabled=false            # Disable selector
-    rts2-value -w SEL.time_slice=180           # Set advance time to 3 minutes
-    rts2-value -R SEL.enabled,SEL.time_slice   # Get both values: "true,300"
-    rts2-value -r SEL.enabled,SEL.time_slice   # Get both: "enabled=true\\ntime_slice=300"
-    eval $(rts2-value -r SEL.enabled,SEL.time_slice)  # Set shell variables
+    rtspy-value -w SEL.enabled=false            # Disable selector
+    rtspy-value -w SEL.time_slice=180           # Set advance time to 3 minutes
+    rtspy-value -R SEL.enabled,SEL.time_slice   # Get both values: "true,300"
+    rtspy-value -r SEL.enabled,SEL.time_slice   # Get both: "enabled=true\\ntime_slice=300"
+    eval $(rtspy-value -r SEL.enabled,SEL.time_slice)  # Set shell variables
 """
 
 import sys
