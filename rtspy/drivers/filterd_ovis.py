@@ -67,8 +67,7 @@ protocol defined at: https://github.com/Pato-99/spectral_firmware_rp
 Current implementation:
 
 - Motor 1: Primary filter wheel control with position mapping
-- Motor 0: Focusing movement (currently disabled, planned for implementation
-  with a future Focusd template class)
+- Motor 0: Focusing movement, through FocuserMixin
 - Neon lamp and optical path relay controls fully implemented
 
 The primary functionality is to manage the filter wheel positions, with the
@@ -82,6 +81,7 @@ OVIS hardware with two stepper motors:
 
 """
 
+import re
 import time
 import logging
 import threading
@@ -100,7 +100,20 @@ from rtspy.core.app import App
 
 
 class SerialCommunicator:
-    """Serial device communicator for OVIS hardware."""
+    """
+    Serial device communicator for OVIS hardware.
+
+    One background thread owns the port: it opens it, runs the connect
+    callback (hardware initialisation) and polls STATUS. Other threads may
+    send commands through send_command(). Every exchange - a command and
+    all the reply lines belonging to it - happens under self.lock, because
+    the firmware answers strictly in order and a line read by the wrong
+    thread would shift every later STATUS parse by one.
+    """
+
+    # STATUS answers with one line per stepper (MAX_STEPPERS = 3 in the
+    # firmware), then the servo and the relay line
+    STATUS_LINES = 5
 
     def __init__(self, device_file: str, baudrate: int = 9600):
         self.device_file = device_file
@@ -108,6 +121,7 @@ class SerialCommunicator:
         self.serial_conn = None
         self.connected = False
         self.status_callback = None
+        self.connect_callback = None
 
         # Threading
         self.running = False
@@ -133,80 +147,82 @@ class SerialCommunicator:
         self.running = False
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=2.0)
-        self._close()
+        with self.lock:
+            self._close()
 
     def _connect(self):
-        """Connect to the serial device."""
-        try:
-            logging.info(f"Opening serial connection to {self.device_file}")
-            self.serial_conn = serial.Serial(
-                port=self.device_file,
-                baudrate=self.baudrate,
-                bytesize=serial.EIGHTBITS,
-                parity=serial.PARITY_NONE,
-                stopbits=serial.STOPBITS_ONE,
-                timeout=5.0
-            )
+        """Open the serial device. Only called from the status thread."""
+        with self.lock:
+            try:
+                logging.info(f"Opening serial connection to {self.device_file}")
+                self.serial_conn = serial.Serial(
+                    port=self.device_file,
+                    baudrate=self.baudrate,
+                    bytesize=serial.EIGHTBITS,
+                    parity=serial.PARITY_NONE,
+                    stopbits=serial.STOPBITS_ONE,
+                    timeout=5.0
+                )
 
-            # Clear buffers
-            self.serial_conn.reset_input_buffer()
-            self.serial_conn.reset_output_buffer()
+                time.sleep(0.5)  # Wait for device to initialize
 
-            time.sleep(0.5)  # Wait for device to initialize
+                # Drop whatever the board printed before we were listening
+                # ("Starting..." after a reset)
+                self.serial_conn.reset_input_buffer()
+                self.serial_conn.reset_output_buffer()
 
-            # Check device ID
-            response = self.send_command("ID", True)
-            if response != "RPI_PICO_SPECTRAL_AVCR":
-                logging.warning(f"Unknown device ID: {response}")
+                # Check device ID
+                response = self._exchange("ID", True)
+                if response != "RPI_PICO_SPECTRAL_AVCR":
+                    logging.warning(f"Unknown device ID: {response}")
 
-            self.connected = True
-            return True
+                self.connected = True
+                return True
 
-        except Exception as e:
-            logging.error(f"Error connecting to serial device: {e}")
-            self._close()
-            return False
+            except Exception as e:
+                logging.error(f"Error connecting to serial device: {e}")
+                self._close()
+                return False
 
     def _close(self):
         """Close the serial connection."""
         if self.serial_conn:
             try:
                 self.serial_conn.close()
-            except:
+            except Exception:
                 pass
             self.serial_conn = None
         self.connected = False
 
-    def send_command(self, cmd: str, expect_response: bool = False, timeout: float = 5.0):
-        """Send a command and optionally wait for response."""
-        if not self.serial_conn:
-            self._connect()
-
-        if not self.connected:
-            return None
-
-        # Add newline if needed
+    def _exchange(self, cmd: str, expect_response: bool = False, timeout: float = 5.0):
+        """Write a command and optionally read one reply line. Caller holds the lock."""
         if not cmd.endswith('\n'):
             cmd += '\n'
 
-        try:
-            with self.lock:
-                self.serial_conn.write(cmd.encode())
-                self.serial_conn.flush()
+        self.serial_conn.write(cmd.encode())
+        self.serial_conn.flush()
 
-                if expect_response:
-                    orig_timeout = self.serial_conn.timeout
-                    self.serial_conn.timeout = timeout
-                    try:
-                        response = self.serial_conn.readline().decode().strip()
-                        return response
-                    finally:
-                        self.serial_conn.timeout = orig_timeout
-                return "OK"
-        except Exception as e:
-            logging.error(f"Error sending command: {e}")
-            self.connected = False
-            return None
+        if not expect_response:
+            return "OK"
+
+        orig_timeout = self.serial_conn.timeout
+        self.serial_conn.timeout = timeout
+        try:
+            return self.serial_conn.readline().decode().strip()
+        finally:
+            self.serial_conn.timeout = orig_timeout
+
+    def send_command(self, cmd: str, expect_response: bool = False, timeout: float = 5.0):
+        """Send a command and optionally wait for response. None on failure."""
+        with self.lock:
+            if not self.connected:
+                return None
+            try:
+                return self._exchange(cmd, expect_response, timeout)
+            except Exception as e:
+                logging.error(f"Error sending command: {e}")
+                self._close()
+                return None
 
     def _status_loop(self):
         """Background thread loop to poll device status."""
@@ -219,8 +235,9 @@ class SerialCommunicator:
                 if not self.connected:
                     current_time = time.time()
                     if current_time - connect_retry_time >= 5.0:
-                        self._connect()
                         connect_retry_time = current_time
+                        if self._connect() and self.connect_callback:
+                            self.connect_callback()
                     time.sleep(0.1)
                     continue
 
@@ -234,63 +251,64 @@ class SerialCommunicator:
                 logging.error(f"Error in status loop: {e}")
                 time.sleep(0.5)
 
+    @staticmethod
+    def _parse_motor(line, motor_id):
+        motor_info = line.split()
+        if len(motor_info) >= 5 and motor_info[0] == "M" and motor_info[1] == str(motor_id):
+            return {
+                'motor': motor_id,
+                'position': int(motor_info[2]),
+                'is_moving': int(motor_info[3]),
+                'speed': int(float(motor_info[4])),
+                'acceleration': int(float(motor_info[5])) if len(motor_info) > 5 else 0
+            }
+        return None
+
     def _update_status(self):
-        """Poll device status and pass to callback."""
-        if not self.connected or not self.status_callback:
+        """
+        Poll device status and pass it to the callback.
+
+        The callback runs with the lock still held, so no command can be
+        written between the STATUS reply and its processing: a movement
+        flag set after send_command() returns can never be matched against
+        a reply that predates the move.
+        """
+        if not self.status_callback:
             return
 
-        try:
-            response = self.send_command("STATUS", True)
-            if not response:
+        with self.lock:
+            if not self.connected:
+                return
+            try:
+                lines = [self._exchange("STATUS", True)]
+                for _ in range(self.STATUS_LINES - 1):
+                    lines.append(self.serial_conn.readline().decode().strip())
+            except Exception as e:
+                logging.error(f"Error updating status: {e}")
+                self._close()
                 return
 
-            # Parse motor statuses
-            motor_statuses = []
+            if not lines[0].startswith("M 0 ") or not lines[4].startswith("R "):
+                # Out of step with the firmware: drop whatever is still
+                # buffered and start over with the next poll
+                logging.warning(f"Unexpected STATUS reply {lines}, resynchronising")
+                self.serial_conn.reset_input_buffer()
+                return
 
-            # Parse motor 0 status (focuser - first line)
-            motor_info = response.split()
-            if len(motor_info) >= 5 and motor_info[0] == "M" and motor_info[1] == "0":
-                motor_statuses.append({
-                    'motor': 0,
-                    'position': int(motor_info[2]),
-                    'is_moving': int(motor_info[3]),
-                    'speed': int(float(motor_info[4])),
-                    'acceleration': int(float(motor_info[5])) if len(motor_info) > 5 else 0
-                })
+            motor_statuses = [m for m in (self._parse_motor(lines[0], 0),
+                                          self._parse_motor(lines[1], 1)) if m]
+            neon_info = lines[4].split()
+            neon_status = int(neon_info[1]) if len(neon_info) >= 2 else None
 
-            # Read motor 1 status (filter wheel - second line)
-            response = self.serial_conn.readline().decode().strip()
-            motor_info = response.split()
-            if len(motor_info) >= 5 and motor_info[0] == "M" and motor_info[1] == "1":
-                motor_statuses.append({
-                    'motor': 1,
-                    'position': int(motor_info[2]),
-                    'is_moving': int(motor_info[3]),
-                    'speed': int(float(motor_info[4])),
-                    'acceleration': int(float(motor_info[5])) if len(motor_info) > 5 else 0
-                })
-
-            # Skip motor 2, shutter status
-            self.serial_conn.readline()  # motor 2
-            self.serial_conn.readline()  # shutter
-
-            # Read neon status
-            response = self.serial_conn.readline().decode().strip()
-            neon_info = response.split()
-            neon_status = None
-            if len(neon_info) >= 2 and neon_info[0] == "R":
-                neon_status = int(neon_info[1])
-
-            # Call status callback
             self.status_callback(motor_statuses, neon_status)
-
-        except Exception as e:
-            logging.error(f"Error updating status: {e}")
-            self.connected = False
 
     def set_status_callback(self, callback):
         """Set callback for status updates."""
         self.status_callback = callback
+
+    def set_connect_callback(self, callback):
+        """Set callback run (on the status thread) after every (re)connect."""
+        self.connect_callback = callback
 
     def is_connected(self):
         """Check if connected to device."""
@@ -310,6 +328,9 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
     - Neon calibration lamp with relay control
     """
 
+    # The one OVIS in existence
+    DEFAULT_FILTERS = 'i:R:V:B:N:grism'
+
     def setup_config(self, config):
         """Set up configuration for both filter and focuser."""
         #super().setup_config(config)
@@ -317,8 +338,8 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
         self.setup_focuser_config(config)
 
         # OVIS-specific hardware options
-        config.add_argument('-f', '--device-file',
-                          help='Serial port device file (e.g., /dev/ttyUSB0)', section='hardware')
+        config.add_argument('-f', '--device-file', default='/dev/ttyACM0',
+                          help='Serial port device file', section='hardware')
         config.add_argument('--baudrate', type=int, default=9600,
                           help='Serial port baud rate', section='hardware')
 
@@ -363,9 +384,13 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
         self.motor_status_lock = threading.RLock()
 
         # Filter wheel state (from filterd_ovis.py)
-        self.filter_num = 0
+        self.filter_num = -1  # unknown until homed
         self.filter_moving = False
         self.motor_initialized = False
+
+        # Focuser motor state
+        self.focus_moving = False
+        self._focus_position_known = False
 
         # OVIS-specific values (from filterd_ovis.py)
         self.m0pos = ValueInteger("M0POS", "[int] focuser motor position", write_to_fits=True)
@@ -387,9 +412,6 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
         # Set device types for mixins
         self.focuser_type = "OVIS_FOCUSER"
 
-        # Initialize filter names (matching filterd_ovis.py)
-        filter_names = "J:H:K:R:G:B"  # Default filter names, will be overridden by config
-
         # Initialize not ready until motors are initialized
         self.set_state(self.STATE_IDLE | self.NOT_READY, "Initializing hardware")
 
@@ -400,7 +422,7 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
         self.apply_focuser_config(config)
 
         # Apply OVIS-specific config
-        self.device_file = config.get('device_file')
+        self.device_file = config.get('device_file') or '/dev/ttyACM0'
         self.baudrate = config.get('baudrate', 9600)
         self.motor_speed = config.get('motor_speed', 100000)
         self.motor_acceleration = config.get('motor_acceleration', 100000)
@@ -437,102 +459,93 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
         self._register_focuser_commands()
 
     def start(self):
-        """Start the OVIS device."""
+        """
+        Start the OVIS device.
+
+        Hardware initialisation (motor power, homing, move to filter 0) runs
+        on the serial thread each time the controller (re)connects, so a
+        board that is missing at startup or replugged later is brought up
+        without restarting the daemon. Until then the device is NOT_READY.
+        """
         super().start()
+
+        self.foc_type.value = self.focuser_type
 
         if not self.device_file:
             logging.error("No device file specified. Use --device-file option.")
             self.set_state(self.STATE_IDLE | self.ERROR_HW, "No device file specified")
             return
 
-        try:
-            # Create serial communicator
-            self.serial_comm = SerialCommunicator(self.device_file, self.baudrate)
-            self.serial_comm.set_status_callback(self._handle_status_update)
-            self.serial_comm.start()
+        self.set_state(self._state | self.NOT_READY, "Waiting for OVIS controller")
 
-            # Initialize the hardware (from filterd_ovis.py)
-            logging.info("Initializing OVIS multi-function device")
+        self.serial_comm = SerialCommunicator(self.device_file, self.baudrate)
+        self.serial_comm.set_status_callback(self._handle_status_update)
+        self.serial_comm.set_connect_callback(self._initialize_hardware)
+        self.serial_comm.start()
 
-            # Power on both motors
-            if not self.serial_comm.send_command("M 0 ON"):  # Focuser
-                logging.error("Failed to power on focuser motor")
-                self.set_state(self.STATE_IDLE | self.ERROR_HW, "Failed to power on focuser motor")
+    def _initialize_hardware(self):
+        """Power the motors and home the filter wheel. Runs on the serial thread."""
+        logging.info("Initializing OVIS multi-function device")
+        self.motor_initialized = False
+
+        # The controller may have been power cycled: a move that was under
+        # way before will never report its end, so release it now
+        if self.focus_moving or self._movement_in_progress:
+            self.focus_moving = False
+            self.end_focusing()
+
+        commands = ["M 0 ON", "M 1 ON",
+                    f"M 0 SPD {self.motor_speed}", f"M 0 ACC {self.motor_acceleration}",
+                    f"M 1 SPD {self.motor_speed}", f"M 1 ACC {self.motor_acceleration}"]
+        for cmd in commands:
+            if self.serial_comm.send_command(cmd) is None:
+                logging.error(f"Failed to send '{cmd}'")
+                self.set_state(self._state | self.ERROR_HW, f"Failed to send '{cmd}'")
                 return
 
-            if not self.serial_comm.send_command("M 1 ON"):  # Filter wheel
-                logging.error("Failed to power on filter wheel motor")
-                self.set_state(self.STATE_IDLE | self.ERROR_HW, "Failed to power on filter wheel motor")
-                return
-
-            # Set configured speed/acceleration for both motors
-            self.serial_comm.send_command(f"M 0 SPD {self.motor_speed}")
-            self.serial_comm.send_command(f"M 0 ACC {self.motor_acceleration}")
-            self.serial_comm.send_command(f"M 1 SPD {self.motor_speed}")
-            self.serial_comm.send_command(f"M 1 ACC {self.motor_acceleration}")
-
-            # Home the filter wheel (from filterd_ovis.py)
-            logging.info("Homing filter wheel")
-            self.set_state(self._state | self.FILTERD_MOVE, "Homing filter wheel",
-                            self.set_bop_exposure('filter', True))
-
-            response = self.serial_comm.send_command("M 1 HOM", True, self.home_timeout)
-            if not response or "OK" not in response:
-                logging.error("Failed to home filter wheel")
-                self.set_state(self.STATE_IDLE | self.ERROR_HW, "Failed to home filter wheel",
-                                self.set_bop_exposure('filter', False))
-                return
-
-            # Homing successful
-            logging.info("Filter wheel homed successfully")
-            self.filter_num = 0
-            self.motor_initialized = True
-
-            # Move filter to position 0 (raises its own 'filter' BOP reason,
-            # cleared asynchronously by _handle_filter_movement_complete)
-            self.set_filter_num(0)
-
-            # Initialize focuser position
-            self.foc_pos.value = 0.0
-            self.foc_tar.value = 0.0
-            self.foc_def.value = 0.0
-
-            # Mark device as ready - do not touch BOP state here, the filter
-            # move to position 0 just started above is still in progress
-            self.set_state(self.STATE_IDLE, "OVIS multi-function device ready")
-            self.set_ready("Multi-function device initialized and ready")
-
-        except Exception as e:
-            logging.error(f"Error initializing OVIS device: {e}")
-            self.set_state(self.STATE_IDLE | self.ERROR_HW, f"Initialization error: {e}",
-                            self.set_bop_exposure('filter', False))
+        # Homing is what makes the wheel usable; on success it moves to
+        # filter 0 and marks the device ready
+        if self.home_filter() != 0:
+            self.set_state(self._state | self.ERROR_HW, "Failed to home filter wheel")
 
     def stop(self):
         """Stop the OVIS device."""
         if self.serial_comm:
-            try:
-                # Turn off both motors
-                self.serial_comm.send_command("M 0 OFF")
-                self.serial_comm.send_command("M 1 OFF")
-            except:
-                pass
+            # Turn off both motors
+            self.serial_comm.send_command("M 0 OFF")
+            self.serial_comm.send_command("M 1 OFF")
             self.serial_comm.stop()
             self.serial_comm = None
         super().stop()
 
     def _handle_status_update(self, motor_statuses, neon_status):
-        """Handle status updates from hardware."""
+        """
+        Handle status updates from hardware.
+
+        Runs on the serial thread with the serial lock held, so any command
+        sent before a movement flag was set is already reflected here.
+        """
         with self.motor_status_lock:
             # Process each motor status
             for motor in motor_statuses:
                 if motor['motor'] == 0:  # Focuser
                     if not self.m0pos.value == motor['position']:
                         self.m0pos.value = motor['position']
+                    if not self.foc_pos.value == float(motor['position']):
                         self.foc_pos.value = float(motor['position'])
 
+                    if not self._focus_position_known:
+                        # First reading: the focuser stays where it is, and
+                        # that is the default unless --start-position says
+                        # otherwise
+                        self._focus_position_known = True
+                        self.foc_tar.value = float(motor['position'])
+                        if math.isnan(self.foc_def.value):
+                            self.foc_def.value = float(motor['position'])
+
                     # Check for focuser movement completion
-                    if (hasattr(self, '_movement_in_progress') and self._movement_in_progress and
-                        not motor['is_moving']):
+                    if self.focus_moving and not motor['is_moving']:
+                        self.focus_moving = False
                         self._handle_focuser_movement_complete()
 
                 elif motor['motor'] == 1:  # Filter wheel
@@ -541,31 +554,25 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
 
                     # Check for filter movement completion
                     if self.filter_moving and not motor['is_moving']:
-                       self._handle_filter_movement_complete()
+                        self._handle_filter_movement_complete()
 
             # Update neon status
             if neon_status is not None:
                 if not self.neon.value == neon_status:
                     self.neon.value = neon_status
 
+    def _filter_positions(self):
+        return [self.f0pos.value, self.f1pos.value, self.f2pos.value,
+                self.f3pos.value, self.f4pos.value, self.f5pos.value]
+
     def _handle_filter_movement_complete(self):
         """Handle filter movement completion (hardware supports positions 0-5)."""
         logging.info(f"Filter movement completed at position {self.m1pos.value}")
 
         # Find which filter position we're closest to
-        target_positions = [
-            self.f0pos.value, self.f1pos.value, self.f2pos.value,
-            self.f3pos.value, self.f4pos.value, self.f5pos.value
-        ]
-
-        closest_filter = 0
-        closest_distance = abs(self.m1pos.value - target_positions[0])
-
-        for i in range(1, len(target_positions)):
-            distance = abs(self.m1pos.value - target_positions[i])
-            if distance < closest_distance:
-                closest_distance = distance
-                closest_filter = i
+        target_positions = self._filter_positions()
+        closest_filter = min(range(len(target_positions)),
+                             key=lambda i: abs(self.m1pos.value - target_positions[i]))
 
         # Update filter position
         self.filter_num = closest_filter
@@ -586,7 +593,7 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
 
     def get_filter_num(self) -> int:
         """Get current filter number (from filterd_ovis.py)."""
-        return self.filter_num
+        return max(self.filter_num, 0)
 
     def set_filter_num(self, new_filter):
         """Set filter wheel position (hardware supports positions 0-5)."""
@@ -595,23 +602,22 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
             logging.error(f"Invalid filter number: {new_filter}")
             return -1
 
-        # Check if already at this position
-        if new_filter == self.filter_num:
-            logging.info(f"Filter already at position {new_filter}")
-            return 0
-
         # Check if ready
         if not self.serial_comm or not self.motor_initialized:
             logging.error("Cannot move filter: device not initialized")
             return -1
 
-        # Get target position
-        target_positions = [
-            self.f0pos.value, self.f1pos.value, self.f2pos.value,
-            self.f3pos.value, self.f4pos.value, self.f5pos.value
-        ]
+        target_position = self._filter_positions()[new_filter]
 
-        target_position = target_positions[new_filter]
+        # Already there: nothing will move, so nothing would ever report the
+        # end of the move - finish it here
+        if (new_filter == self.filter_num and not self.filter_moving
+                and self.m1pos.value == target_position):
+            logging.info(f"Filter already at position {new_filter}")
+            self._target_filter = None
+            self.movement_completed()
+            return 0
+
         logging.info(f"Moving filter to position {new_filter}, motor position {target_position}")
 
         # Update device state to show movement
@@ -621,20 +627,27 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
             self.set_bop_exposure('filter', True)
         )
 
-        # Mark as moving
+        if self.serial_comm.send_command(f"M 1 ABS {target_position}") is None:
+            logging.error("Failed to send filter move command")
+            return -1
+
+        # Only now: a status reply that predates the command must not be
+        # taken for the end of this move
         with self.motor_status_lock:
             self.filter_moving = True
-
-        # Send movement command
-        cmd = f"M 1 ABS {target_position}"
-        self.serial_comm.send_command(cmd)
 
         # Movement completion will be detected by status updates
         return 0
 
-    def home_filter(self):
-        """Home the filter wheel (from filterd_ovis.py)."""
-        if not self.serial_comm:
+    def home_filter(self, move_to_filter=True):
+        """
+        Home the filter wheel. Blocks until the firmware answers.
+
+        Homing leaves the motor at step 0, between filter positions, so by
+        default the wheel then moves to filter 0. A successful homing is
+        what makes the wheel usable (motor_initialized).
+        """
+        if not self.serial_comm or not self.serial_comm.is_connected():
             logging.error("Cannot home filter: device not connected")
             return -1
 
@@ -650,6 +663,9 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
         # Send home command with configured timeout
         response = self.serial_comm.send_command("M 1 HOM", True, self.home_timeout)
 
+        with self.motor_status_lock:
+            self.filter_moving = False
+
         if not response or "OK" not in response:
             logging.error("Failed to home filter wheel")
             self.set_state(self._state & ~(self.FILTERD_MOVE), "Homing failed",
@@ -659,13 +675,24 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
         # Homing successful
         logging.info("Filter wheel homed successfully")
 
-        # Update filter position
-        self.filter_num = 0
-        self.filter.value = 0
+        # The firmware zeroes the motor position; no filter is in the beam
+        self.m1pos.value = 0
+        self.filter_num = -1
+        self.motor_initialized = True
 
         # Reset state
         self.set_state(self._state & ~(self.FILTERD_MOVE), "Filter wheel homed",
                         self.set_bop_exposure('filter', False))
+
+        if move_to_filter:
+            # raises and later clears its own 'filter' BOP reason
+            self.set_filter_num_mask(0)
+
+        if self._state & self.NOT_READY:
+            # first successful homing after (re)connecting, or a 'home' that
+            # recovers from a failed one
+            self.set_state(self._state & ~self.ERROR_MASK, "OVIS controller initialized")
+            self.set_ready("Multi-function device initialized and ready")
         return 0
 
     # ========== FocuserMixin Implementation ==========
@@ -673,22 +700,27 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
     def set_to(self, position: float) -> int:
         """Move focuser to target position."""
         try:
-            if not self.serial_comm:
+            if not self.serial_comm or not self.serial_comm.is_connected():
                 logging.error("Cannot move focuser: device not connected")
                 return -1
 
             # Check if already at target position (within tolerance)
             current_pos = self.get_position()
             position_tolerance = 10.0  # Motor steps tolerance
-            if abs(current_pos - position) <= position_tolerance:
+            if not self.focus_moving and abs(current_pos - position) <= position_tolerance:
                 logging.info(f"Focuser already at target position {position} (current: {current_pos})")
                 # Still need to mark movement as complete for state management
                 self._handle_focuser_movement_complete()
                 return 0
 
             # Send movement command to motor 0 (focuser)
-            cmd = f"M 0 ABS {int(position)}"
-            self.serial_comm.send_command(cmd)
+            if self.serial_comm.send_command(f"M 0 ABS {int(position)}") is None:
+                logging.error("Failed to send focuser move command")
+                return -1
+
+            # Only now - see set_filter_num
+            with self.motor_status_lock:
+                self.focus_moving = True
             logging.info(f"Moving focuser to position {position}")
             return 0
         except Exception as e:
@@ -701,7 +733,7 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
 
     def home_focuser(self) -> int:
         """Home the focuser."""
-        if not self.serial_comm:
+        if not self.serial_comm or not self.serial_comm.is_connected():
             logging.error("Cannot home focuser: device not connected")
             return -1
 
@@ -717,6 +749,9 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
         # Send home command
         response = self.serial_comm.send_command("M 0 HOM", True, self.home_timeout)
 
+        with self.motor_status_lock:
+            self.focus_moving = False
+
         if not response or "OK" not in response:
             logging.error("Failed to home focuser")
             self.set_state(self._state & ~(self.FOC_FOCUSING), "Focuser homing failed",
@@ -727,6 +762,7 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
         logging.info("Focuser homed successfully")
 
         # Update focuser position
+        self.m0pos.value = 0
         self.foc_pos.value = 0.0
         self.foc_tar.value = 0.0
 
@@ -766,11 +802,11 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
             if value.name == "NEON":
                 self._set_neon(new_value)
                 return 0
-            if value.name.startswith("F") and value.name.endswith("POS"):
+            if re.fullmatch(r"F[0-5]POS", value.name):
                 filter_idx = int(value.name[1])
-                if filter_idx == self.filter.value:
-                    # Update current filter position
-                    self.serial_comm.send_command(f"M 1 ABS {new_value}")
+                if filter_idx == self.filter_num and self.motor_initialized:
+                    # Move the wheel to the corrected position of the filter in use
+                    return self.set_filter_num_mask(filter_idx)
                 return 0
             # Let mixins handle their values
             filter_result = FilterMixin.on_value_changed_from_client(self, value, old_value, new_value)
