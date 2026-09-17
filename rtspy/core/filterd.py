@@ -32,9 +32,13 @@ class FilterMixin(DeviceConfig):
     FILTERD_IDLE = 0x000
     FILTERD_MOVE = 0x002
 
+    # Filter names when -F is not given; a driver for one particular wheel
+    # overrides this with the filters it really carries
+    DEFAULT_FILTERS = 'J:H:K'
+
     def setup_filter_config(self, config):
         """Register filter wheel-specific configuration arguments."""
-        config.add_argument('-F', '--filters',
+        config.add_argument('-F', '--filters', default=self.DEFAULT_FILTERS,
                           help='Filter names (colon-separated)')
         config.add_argument('--default-filter',
                           help='Default filter', default=0)
@@ -44,7 +48,7 @@ class FilterMixin(DeviceConfig):
     def apply_filter_config(self, config: Dict[str, Any]):
         """Apply filter wheel-specific configuration."""
         # Process filters string
-        filters_str = config.get('filters', 'J:H:K')  # default
+        filters_str = config.get('filters') or self.DEFAULT_FILTERS
         self.filter = ValueSelection("filter", "used filter", writable=True)
         self.set_filters(self.filter, filters_str)
 
@@ -196,7 +200,8 @@ class FilterMixin(DeviceConfig):
             # Error occurred
             self.movement_in_progress = False
             if ret == -1:
-                self.set_state(self._state | self.ERROR_HW, "filter movement failed",
+                self.set_state((self._state & ~self.FILTERD_MOVE) | self.ERROR_HW,
+                                "filter movement failed",
                                 self.set_bop_exposure('filter', False))
             return ret
 
@@ -385,7 +390,13 @@ class FilterCommands:
                 return False
 
             # Set filter - don't complete the command until movement is done
-            # Store the connection to respond to when movement completes
+            # Store the connection to respond to when movement completes.
+            # Only one can wait: a client still waiting for an earlier move
+            # would otherwise never be answered.
+            previous = self.filter_device.pending_filter_connection
+            if previous is not None and previous is not conn and previous.command_in_progress:
+                self.filter_device.network._send_error_response(
+                    previous, "filter move superseded by another request")
             self.filter_device.pending_filter_connection = conn
 
             # Start the filter movement
@@ -398,13 +409,29 @@ class FilterCommands:
                 self.filter_device.pending_filter_connection = None
                 return False
 
-            # No response sent yet - it will be sent when movement completes
+            # Reply when the movement completes (movement_completed), unless
+            # it already has
+            if conn.command_in_progress:
+                self.filter_device.network.defer_response(conn)
             return True
 
         except ValueError:
             self.filter_device.network._send_error_response(
                 conn, f"Invalid filter number: {params}")
             return False
+
+    def _reply_error(self, conn, message):
+        """
+        Error reply for the commands a multi-function device (filter wheel
+        plus focuser in one process) also registers from its other mixin:
+        home, killall, killall_wse and script_ends. netman runs every handler
+        and sends the single OK itself when all of them return with the
+        command still in progress, so these never send OK, and send an error
+        only if no other handler already answered - a second reply would be
+        taken as the answer to the client's next command.
+        """
+        if conn.command_in_progress:
+            self.filter_device.network._send_error_response(conn, message)
 
     def handle_home(self, conn, params):
         """Handle 'home' command to home the filter wheel."""
@@ -413,23 +440,22 @@ class FilterCommands:
             ret = self.filter_device.home_filter()
 
             if ret == 0:
-                # Success
-                self.filter_device.network._send_ok_response(conn)
+                # netman sends the OK (see _reply_error)
                 return True
             elif ret == -1:
                 # Not implemented
-                self.filter_device.network._send_error_response(
+                self._reply_error(
                     conn, "Home operation not implemented for this filter wheel")
                 return False
             else:
                 # Other error
-                self.filter_device.network._send_error_response(
+                self._reply_error(
                     conn, f"Error homing filter wheel")
                 return False
 
         except Exception as e:
             logging.error(f"Error handling home command: {e}")
-            self.filter_device.network._send_error_response(conn, f"Error: {str(e)}")
+            self._reply_error(conn, f"Error: {str(e)}")
             return False
 
     def handle_killall(self, conn, params):
@@ -445,13 +471,11 @@ class FilterCommands:
             if hasattr(self.filter_device, 'script_ends_filter'):
                 self.filter_device.script_ends_filter()
 
-            # Send OK response
-            self.filter_device.network._send_ok_response(conn)
             return True
 
         except Exception as e:
             logging.error(f"Error handling killall command: {e}")
-            self.filter_device.network._send_error_response(conn, f"Error: {str(e)}")
+            self._reply_error(conn, f"Error: {str(e)}")
             return False
 
     def handle_killall_wse(self, conn, params):
@@ -463,13 +487,11 @@ class FilterCommands:
                 "Errors cleared by killall_wse"
             )
 
-            # Send OK response
-            self.filter_device.network._send_ok_response(conn)
             return True
 
         except Exception as e:
             logging.error(f"Error handling killall_wse command: {e}")
-            self.filter_device.network._send_error_response(conn, f"Error: {str(e)}")
+            self._reply_error(conn, f"Error: {str(e)}")
             return False
 
     def handle_script_ends(self, conn, params):
@@ -481,18 +503,16 @@ class FilterCommands:
                 ret = self.filter_device.script_ends_filter()
 
             if ret == 0:
-                # Success
-                self.filter_device.network._send_ok_response(conn)
                 return True
             else:
                 # Error
-                self.filter_device.network._send_error_response(
+                self._reply_error(
                     conn, f"Error in script_ends handler")
                 return False
 
         except Exception as e:
             logging.error(f"Error handling script_ends command: {e}")
-            self.filter_device.network._send_error_response(conn, f"Error: {str(e)}")
+            self._reply_error(conn, f"Error: {str(e)}")
             return False
 
 

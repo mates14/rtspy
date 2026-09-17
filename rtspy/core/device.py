@@ -460,8 +460,9 @@ class DeviceCommands:
         Handle 'script_ends', sent by the executor to every device after a
         script. C++ resets values flagged for it to their defaults; rtspy has
         no such values, so this only acknowledges. Device families that do
-        have something to reset register their own handler, which runs after
-        this one and sends the reply itself.
+        have something to reset (filterd, focusd) register their own handler,
+        which runs after this one; netman sends the single OK once all have
+        returned.
         """
         return True
 

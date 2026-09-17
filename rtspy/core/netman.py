@@ -534,6 +534,10 @@ class NetworkManager:
         elif msg_type == 'send_value':
             value, conn_id = args
             self._handle_send_value(value, conn_id)
+        elif msg_type == 'run_queued':
+            conn = self.connection_manager.get_connection(args[0])
+            if conn:
+                self._run_queued_command(conn)
         elif msg_type == 'broadcast_value':
             value = args[0]
             self._handle_broadcast_value(value)
@@ -564,19 +568,22 @@ class NetworkManager:
         # If it's not an immediate command and another command is in progress, queue it
         if not is_immediate_command and conn.command_in_progress:
             logging.debug(f"Command {cmd} queued - another command is in progress")
-            conn.command_queue.put(QueuedCommand(f"{cmd} {params}"))
+            conn.incoming_command_queue.put(QueuedCommand(f"{cmd} {params}"))
             return
 
         # For regular commands that need responses, set command_in_progress
         if not is_immediate_command:
             conn.command_in_progress = True
+            conn.response_deferred = False
 
         # Dispatch to registry
         if self.command_registry.can_handle(cmd):
             success, result = self.command_registry.dispatch(cmd, conn, params)
 
             # Check if command was handled and still expects a response
-            if not is_immediate_command and conn.command_in_progress:
+            # (a handler that called defer_response() answers later itself)
+            if (not is_immediate_command and conn.command_in_progress
+                    and not conn.response_deferred):
                 needs_response = self.command_registry.needs_response(cmd)
 
                 if needs_response:
@@ -597,17 +604,20 @@ class NetworkManager:
             logging.warning(f"Unknown command from {conn.name}: '{line}' - ignoring")
             self._send_error_response(conn, f"{cmd}", code=-1)  # Use -1 as error code, which will format as -001
 
-        # Check for queued commands if this command has completed
-        if not conn.command_in_progress and not conn.command_queue.empty():
-            # Get next command from queue
-            next_cmd_item = conn.command_queue.get()
+        self._run_queued_command(conn)
 
-            # Extract command and parameters
-            parts = next_cmd_item.command.split(maxsplit=1)
-            next_cmd = parts[0]
-            next_params = parts[1] if len(parts) > 1 else ""
+    def _run_queued_command(self, conn):
+        """Handle the next command the peer sent while we were busy, if any."""
+        if conn.command_in_progress or conn.incoming_command_queue.empty():
+            return
+        next_cmd_item = conn.incoming_command_queue.get()
 
-            self._process_next_command(conn, next_cmd, next_params)
+        # Extract command and parameters
+        parts = next_cmd_item.command.split(maxsplit=1)
+        next_cmd = parts[0]
+        next_params = parts[1] if len(parts) > 1 else ""
+
+        self._process_next_command(conn, next_cmd, next_params)
 
     def _handle_this_device(self, conn, params):
         """
@@ -647,7 +657,9 @@ class NetworkManager:
 
     def _process_next_command(self, conn, cmd, params):
         """Process the next command from the queue."""
-        conn.command_in_progress = True
+        # not marking the command in progress here: _handle_command does, and
+        # would take an already-set flag for a busy connection and queue the
+        # command straight back
         logging.debug(f"Processing queued command for {conn.name}: {cmd}")
         self._handle_command(conn.id, f"{cmd} {params}".strip())
 
@@ -962,15 +974,34 @@ class NetworkManager:
             # Broadcast to all connections
             self.connection_manager.broadcast_message(status_msg)
 
+    def defer_response(self, conn):
+        """
+        Keep the command in progress after its handler returns.
+
+        For commands answered only once the action finishes - 'filter' and
+        'move' reply when the mechanism stops, as in C++ RTS2 - the handler
+        calls this and later _send_ok_response or _send_error_response,
+        from whatever thread notices the end.
+        """
+        conn.response_deferred = True
+
     def _send_ok_response(self, conn, message="OK"):
         """Send an OK response to a command."""
-        conn.command_in_progress = False
-        conn.send(f"+0 {message}\n")
+        self._end_command(conn, f"+0 {message}\n")
 
     def _send_error_response(self, conn, message, code=-1):
         """Send an error response to a command."""
+        self._end_command(conn, f"{code} {message}\n")
+
+    def _end_command(self, conn, reply):
+        deferred = conn.response_deferred
+        conn.response_deferred = False
         conn.command_in_progress = False
-        conn.send(f"{code} {message}\n")
+        conn.send(reply)
+        if deferred:
+            # the reply came from outside the command loop: commands queued
+            # meanwhile are picked up on the network thread
+            self.put_message(('run_queued', conn.id))
 
     def _handle_broadcast_value(self, value):
         """Broadcast a value to all authenticated connections."""

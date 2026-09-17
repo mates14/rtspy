@@ -157,12 +157,33 @@ class DummyFocuser(Focusd):
                 self.focstep.value = abs(self.focstep.value)
                 
             logging.info(f"Dummy focuser starting movement from {self._current_position} to {position}")
+            self._start_mover()
             return 0
             
         except Exception as e:
             logging.error(f"Error in dummy focuser set_to: {e}")
             return -1
             
+    def _start_mover(self):
+        """
+        Step the simulated movement on its own thread until it ends.
+
+        Nothing calls idle(), so without this focuser_idle() - which steps
+        is_focusing() and calls end_focusing() - never runs and a move never
+        finishes (nor answers the 'move' command waiting for it).
+        """
+        mover = getattr(self, '_mover', None)
+        if mover is not None and mover.is_alive():
+            return
+
+        def run():
+            while self._state & self.FOC_FOCUSING:
+                wait = self.focuser_idle()
+                time.sleep(wait if wait else 0.1)
+
+        self._mover = threading.Thread(target=run, name="DummyFocuserMove", daemon=True)
+        self._mover.start()
+
     def is_focusing(self) -> int:
         """
         Simulate focusing by gradually moving toward target.

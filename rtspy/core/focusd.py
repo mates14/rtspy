@@ -546,6 +546,17 @@ class FocuserMixin(DeviceConfig):
         focuser_handler = FocuserCommands(self)
         self.network.command_registry.register_handler(focuser_handler)
 
+    def wait_for_focus_end(self, conn):
+        """
+        Make conn the one answered when the focuser stops. Only one can
+        wait: a client still waiting for an earlier move is answered with an
+        error rather than never.
+        """
+        previous = self.pending_focus_connection
+        if previous is not None and previous is not conn and previous.command_in_progress:
+            self.network._send_error_response(previous, "focuser move superseded by another request")
+        self.pending_focus_connection = conn
+
     def focuser_info_update(self):
         """Update focuser information from hardware."""
         # Subclasses should override this to update foc_pos and foc_temp
@@ -604,7 +615,7 @@ class FocuserCommands:
             target = float(params.strip())
 
             # Store the connection to respond to when movement completes
-            self.focuser_device.pending_focus_connection = conn
+            self.focuser_device.wait_for_focus_end(conn)
 
             # Start the focuser movement
             ret = self.focuser_device.set_position(target)
@@ -616,7 +627,10 @@ class FocuserCommands:
                 self.focuser_device.pending_focus_connection = None
                 return False
 
-            # No response sent yet - it will be sent when movement completes
+            # Reply when the movement completes (end_focusing), unless it
+            # already has
+            if conn.command_in_progress:
+                self.focuser_device.network.defer_response(conn)
             return True
 
         except ValueError:
@@ -635,7 +649,7 @@ class FocuserCommands:
             new_target = current_pos + step
 
             # Store the connection to respond to when movement completes
-            self.focuser_device.pending_focus_connection = conn
+            self.focuser_device.wait_for_focus_end(conn)
 
             # Start the focuser movement
             ret = self.focuser_device.set_position(new_target)
@@ -647,7 +661,10 @@ class FocuserCommands:
                 self.focuser_device.pending_focus_connection = None
                 return False
 
-            # No response sent yet - it will be sent when movement completes
+            # Reply when the movement completes (end_focusing), unless it
+            # already has
+            if conn.command_in_progress:
+                self.focuser_device.network.defer_response(conn)
             return True
 
         except ValueError:
@@ -655,12 +672,25 @@ class FocuserCommands:
                 conn, f"Invalid step size: {params}")
             return False
 
+    def _reply_error(self, conn, message):
+        """
+        Error reply for the commands a multi-function device (filter wheel
+        plus focuser in one process) also registers from its other mixin:
+        home, killall, killall_wse and script_ends. netman runs every handler
+        and sends the single OK itself when all of them return with the
+        command still in progress, so these never send OK, and send an error
+        only if no other handler already answered - a second reply would be
+        taken as the answer to the client's next command.
+        """
+        if conn.command_in_progress:
+            self.focuser_device.network._send_error_response(conn, message)
+
     def handle_home(self, conn, params):
         """Handle 'home' command to home the focuser."""
         try:
             # Check if focuser supports homing
             if not hasattr(self.focuser_device, 'home_focuser'):
-                self.focuser_device.network._send_error_response(
+                self._reply_error(
                     conn, "Home operation not implemented for this focuser")
                 return False
 
@@ -668,23 +698,22 @@ class FocuserCommands:
             ret = self.focuser_device.home_focuser()
 
             if ret == 0:
-                # Success
-                self.focuser_device.network._send_ok_response(conn)
+                # netman sends the OK (see _reply_error)
                 return True
             elif ret == -1:
                 # Not implemented
-                self.focuser_device.network._send_error_response(
+                self._reply_error(
                     conn, "Home operation not implemented for this focuser")
                 return False
             else:
                 # Other error
-                self.focuser_device.network._send_error_response(
+                self._reply_error(
                     conn, f"Error homing focuser")
                 return False
 
         except Exception as e:
             logging.error(f"Error handling home command: {e}")
-            self.focuser_device.network._send_error_response(conn, f"Error: {str(e)}")
+            self._reply_error(conn, f"Error: {str(e)}")
             return False
 
     def handle_killall(self, conn, params):
@@ -700,13 +729,11 @@ class FocuserCommands:
             if hasattr(self.focuser_device, 'script_ends_focuser'):
                 self.focuser_device.script_ends_focuser()
 
-            # Send OK response
-            self.focuser_device.network._send_ok_response(conn)
             return True
 
         except Exception as e:
             logging.error(f"Error handling killall command: {e}")
-            self.focuser_device.network._send_error_response(conn, f"Error: {str(e)}")
+            self._reply_error(conn, f"Error: {str(e)}")
             return False
 
     def handle_killall_wse(self, conn, params):
@@ -718,13 +745,11 @@ class FocuserCommands:
                 "Errors cleared by killall_wse"
             )
 
-            # Send OK response
-            self.focuser_device.network._send_ok_response(conn)
             return True
 
         except Exception as e:
             logging.error(f"Error handling killall_wse command: {e}")
-            self.focuser_device.network._send_error_response(conn, f"Error: {str(e)}")
+            self._reply_error(conn, f"Error: {str(e)}")
             return False
 
     def handle_script_ends(self, conn, params):
@@ -736,18 +761,16 @@ class FocuserCommands:
                 ret = self.focuser_device.script_ends_focuser()
 
             if ret == 0:
-                # Success
-                self.focuser_device.network._send_ok_response(conn)
                 return True
             else:
                 # Error
-                self.focuser_device.network._send_error_response(
+                self._reply_error(
                     conn, f"Error in script_ends handler")
                 return False
 
         except Exception as e:
             logging.error(f"Error handling script_ends command: {e}")
-            self.focuser_device.network._send_error_response(conn, f"Error: {str(e)}")
+            self._reply_error(conn, f"Error: {str(e)}")
             return False
 
 

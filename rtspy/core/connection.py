@@ -75,8 +75,14 @@ class Connection:
         self.remote_device_type = None
         self.auth_key = None
 
-        # Command tracking
+        # Command tracking. command_in_progress is about commands the peer
+        # sent us: set while one is being answered, and response_deferred
+        # while its reply waits for something to finish (a filter move).
+        # Commands arriving meanwhile wait in incoming_command_queue - not
+        # in command_queue, which holds commands *we* send to the peer.
         self.command_in_progress = False
+        self.response_deferred = False
+        self.incoming_command_queue = queue.Queue()
         self.current_command = None
         self.pending_command = None
         self.pending_command_time = None
