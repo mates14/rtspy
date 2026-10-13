@@ -90,6 +90,7 @@ rtspy-watcher = "rtspy.daemons.watcher:main"
 # These daemonize themselves (see rtspy/core/daemon.py); no shell wrapper.
 rtspy-filterd-dummy = "rtspy.drivers.filterd_dummy:main"
 rtspy-filterd-ovis = "rtspy.drivers.filterd_ovis:main"
+rtspy-filterd-spec2m = "rtspy.drivers.spec2m:main"
 rtspy-focusd-dummy = "rtspy.drivers.focusd_dummy:main"
 rtspy-focusd-toptec = "rtspy.drivers.toptec:main"
 rtspy-sensor-temp = "rtspy.drivers.sensor_temp:main"
