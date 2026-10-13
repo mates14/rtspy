@@ -46,6 +46,7 @@ class Device(DeviceConfig):
     BOP_TEL_MOVE = 0x04000000
     BOP_WILL_EXPOSE = 0x08000000
     BOP_TRIG_EXPOSE = 0x10000000
+    BOP_MASK = 0x3f000000
 
     # Weather state
     GOOD_WEATHER = 0x00000000
@@ -243,12 +244,13 @@ class Device(DeviceConfig):
         # Update internal state
         self._state = new_state
 
-        # Update BOP state if provided
-        if new_bop is not None:
+        # Update BOP state if provided; a state change goes out even when
+        # the BOP is unchanged
+        if new_bop is not None and new_bop != self._bop_state:
             self.set_full_bop_state(new_bop)  # This will handle BOP state changes
         else:
             # Only state changed - use S command
-            self.network.set_device_state(new_state, description)
+            self.network.set_device_state(self._wire_state(), description)
 
         # Call user-defined state changed handler if state changed
         #if old_state != new_state:
@@ -258,6 +260,17 @@ class Device(DeviceConfig):
         """Set device ready."""
         if self._state & self.NOT_READY:
             self.set_state(self._state & ~self.NOT_READY, message)
+
+    def _wire_state(self):
+        """
+        The state as other RTS2 components must see it. A C++ device keeps
+        its own blocks in the state word (maskState (BOP_EXPOSURE, ...)),
+        and centrald collects them from there (getState () & BOP_MASK) to
+        block the other devices. Here the block is kept apart, in
+        _bop_state, so it is put back in the word that goes on the wire;
+        without it no camera would ever wait for an rtspy device.
+        """
+        return (self._state & ~self.BOP_MASK) | (self._bop_state & self.BOP_MASK)
 
     def set_full_bop_state(self, new_bop_state):
         """
@@ -274,7 +287,7 @@ class Device(DeviceConfig):
         self._bop_state = new_bop_state
 
         # Propagate to network - use B command for combined state + BOP update
-        self.network.set_bop_state(self._state, new_bop_state)
+        self.network.set_bop_state(self._wire_state(), new_bop_state)
 
     def set_bop_exposure(self, reason, active):
         """
