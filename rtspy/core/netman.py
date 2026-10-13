@@ -56,6 +56,10 @@ class NetworkManager:
 
         # Registered values
         self.values = {}
+        # the connection whose X command is being applied, while the
+        # device's change callbacks run (network thread only): a device may
+        # answer it later instead, see defer_value_response()
+        self.value_change_conn = None
 
         # Callbacks
         self.auth_callback = None
@@ -1001,6 +1005,20 @@ class NetworkManager:
         """
         conn.response_deferred = True
 
+    def defer_value_response(self):
+        """
+        For a device's change callback: keep the X command that is setting
+        the value open, to be answered with _send_ok_response or
+        _send_error_response when the change has been carried out. Returns
+        the connection to answer, or None when the change did not come from
+        an X command (then there is nobody to answer).
+        """
+        conn = self.value_change_conn
+        if conn is not None and conn.command_in_progress:
+            self.defer_response(conn)
+            return conn
+        return None
+
     def begin_part(self, conn):
         """
         Open a background part of the command conn is running.
@@ -1306,10 +1324,19 @@ class NetworkManager:
         # Attempt to update the value
         try:
             # Update the value from client
-            value.update_from_network(value_data)
+            self.value_change_conn = conn
+            try:
+                value.update_from_network(value_data)
+            finally:
+                self.value_change_conn = None
             # The callbacks didn't handle distribution:
             if value.need_send():
                 self.distribute_value_immediate(value)
+            # A device that answers when the change has been carried out
+            # (a filter wheel when it stops) deferred the reply - or has
+            # already sent it
+            if conn.response_deferred or not conn.command_in_progress:
+                return True
             self._send_ok_response(conn, f"Value {value_name} changed")
             return True
 

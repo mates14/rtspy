@@ -177,8 +177,33 @@ class FilterMixin(DeviceConfig):
             old_value: Previous filter position
             new_value: New filter position
         """
-        # This will be called when a client changes the filter
-        return self.set_filter_num_mask(new_value)
+        # An X command is answered when the wheel stops, as the 'filter'
+        # command is: C++ filterd moves synchronously, so its setValue only
+        # returns, and the X is only answered, once the wheel is there
+        conn = self.network.defer_value_response()
+        if conn is not None:
+            self.wait_for_filter_end(conn)
+        ret = self.set_filter_num_mask(new_value)
+        if ret != 0 and conn is not None:
+            # the X command answers the failure itself
+            self.take_filter_waiter(conn)
+        return ret
+
+    def filter_move_failed(self, message: str):
+        """
+        For a driver that detects a failed move in the background (timeout,
+        refused, hardware error): ends the move with ERROR_HW and answers
+        the client waiting for it with the error.
+        """
+        logging.error(message)
+        self.movement_in_progress = False
+        self._target_filter = None
+        self._movement_start_time = None
+        self.set_state((self._state & ~self.FILTERD_MOVE) | self.ERROR_HW, message,
+                       self.set_bop_exposure('filter', False))
+        conn = self.take_filter_waiter()
+        if conn is not None:
+            self.network._send_error_response(conn, message)
 
     def set_filter_num_mask(self, new_filter):
         """Set filter with appropriate state masking."""
