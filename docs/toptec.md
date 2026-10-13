@@ -73,6 +73,11 @@ table, with the one focus offset that file's `[focus]` section implies:
 for the photometric camera, hence `+672` on `Photometric_G2` and zero
 everywhere else.
 
+One entry is added to that table: `CCD700_comp_both_fibers` at 13290, the
+FLORES comp. The two single-fibre comp presets (12965, 13615) put the ThAr
+lamp on one fibre, overexpose the CCD and leave a residual for half an hour
+or more; 13290 is their average and lights both fibres moderately.
+
 **These numbers are from 2021 and should be re-measured before the device
 is trusted in production.** They are defaults, not constants - nothing in
 the driver depends on their values.

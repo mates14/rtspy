@@ -81,12 +81,16 @@ from rtspy.core.xmlrpc_poller import XmlRpcPoller
 # Lateral positions as measured in 2021 (fiber_control_client.cfg [camera]),
 # with the focus offsets implied by that file's [focus] g1/g2 pair: the fibre
 # couplings and the G1 pointing camera share focus 4678, the G2 photometric
-# camera focuses at 5350.  Override wholesale with --fibsel.
+# camera focuses at 5350.  CCD700_comp_both_fibers is not from that file:
+# it is the FLORES comp position (the average of the two single-fibre comp
+# presets, which put the ThAr lamp on one fibre and overexpose the CCD).
+# Override wholesale with --fibsel.
 DEFAULT_FIBSEL = (
     "CCD700_object_1fiber:400:0,"
     "CCD700_object_2fiber:1050:0,"
     "OES_object:1700:0,"
     "CCD700_comp_1fiber:12965:0,"
+    "CCD700_comp_both_fibers:13290:0,"
     "CCD700_comp_2fiber:13615:0,"
     "OES_comp:14300:0,"
     "CCD700_flat_1fiber:14600:0,"
@@ -215,6 +219,9 @@ class Toptec(Device, FilterMixin, FocuserMixin):
     The TOPTEC head as a single RTS2 device: focuser on the focus axis,
     filter wheel on the lateral axis, telemetry as plain values.
     """
+
+    # seconds for the Quido poll to show a switched relay
+    RELAY_TIMEOUT = 5.0
 
     def setup_config(self, config):
         """Register configuration for both mixins and the TOPTEC itself."""
@@ -363,6 +370,10 @@ class Toptec(Device, FilterMixin, FocuserMixin):
             self.quido_conn = ValueBool("quido_conn", "Quido relay server is responding",
                                         write_to_fits=False)
             self.relay_values = {1: self.fib_comp, 2: self.fib_flat, 3: self.relay3}
+        # relay number -> (connection, wanted state, deadline): the X
+        # commands switching a relay, answered once the Quido poll shows it
+        self._relay_waiters: Dict[int, Any] = {}
+        self._relay_lock = threading.Lock()
 
     def _parse_fibsel(self, spec: str):
         """
@@ -504,6 +515,7 @@ class Toptec(Device, FilterMixin, FocuserMixin):
         """Quido poller thread: (relays, temperature), or None when unreachable."""
         if values is None:
             self.quido_conn.value = False
+            self._fail_relay_waiters("Quido server not responding")
             return
 
         relays, temperature = values
@@ -511,6 +523,7 @@ class Toptec(Device, FilterMixin, FocuserMixin):
         for number, value in self.relay_values.items():
             if len(relays) >= number:
                 value.value = bool(relays[number - 1])
+        self._check_relay_waiters(relays)
         if len(relays) >= 4:
             self.pc_tubus.value = bool(relays[3])
         try:
@@ -519,17 +532,72 @@ class Toptec(Device, FilterMixin, FocuserMixin):
             pass
 
     def _set_relay(self, number: int, on: bool) -> int:
+        """
+        Switch a relay. The X command that asked for it is answered once the
+        Quido poll shows the relay switched (a lamp is on when the write
+        returns), or with an error after RELAY_TIMEOUT.
+        """
         if self.quido is None or not self.quido.is_connected():
             logging.error("Cannot switch Quido relay %d: server not responding", number)
             return -1
 
+        conn = self.network.defer_value_response()
+        if conn is not None:
+            with self._relay_lock:
+                previous = self._relay_waiters.get(number)
+                self._relay_waiters[number] = (conn, on, time.time() + self.RELAY_TIMEOUT)
+            if previous is not None and previous[0] is not conn:
+                self.network._send_error_response(
+                    previous[0], "relay %d switch superseded by another request" % number)
+
         def result(ok, answer):
             if not ok or answer is False:
-                logging.error("quido_set_relay(%d, %d) failed: %s", number, on, answer)
+                message = "quido_set_relay(%d, %d) failed: %s" % (number, on, answer)
+                logging.error(message)
+                waiter = self._take_relay_waiter(number, conn)
+                if waiter is not None:
+                    self.network._send_error_response(waiter, message)
 
         self.quido.call('quido_set_relay', number, 1 if on else 0, on_result=result)
         logging.info("Quido relay %d %s", number, "ON" if on else "OFF")
         return 0
+
+    def _take_relay_waiter(self, number: int, conn=None):
+        """Remove and return the connection waiting for a relay (only if it is conn, when given)."""
+        with self._relay_lock:
+            waiter = self._relay_waiters.get(number)
+            if waiter is None or (conn is not None and waiter[0] is not conn):
+                return None
+            del self._relay_waiters[number]
+            return waiter[0]
+
+    def _check_relay_waiters(self, relays):
+        """Quido poller thread: answer the switches the relays now show, or time out."""
+        now = time.time()
+        done = []
+        with self._relay_lock:
+            for number, (conn, want, deadline) in list(self._relay_waiters.items()):
+                if len(relays) >= number and bool(relays[number - 1]) == want:
+                    done.append((conn, None))
+                elif now > deadline:
+                    done.append((conn, "relay %d did not switch %s within %.0fs"
+                                 % (number, "on" if want else "off", self.RELAY_TIMEOUT)))
+                else:
+                    continue
+                del self._relay_waiters[number]
+        for conn, error in done:
+            if error is None:
+                self.network._send_ok_response(conn)
+            else:
+                logging.error(error)
+                self.network._send_error_response(conn, error)
+
+    def _fail_relay_waiters(self, message: str):
+        with self._relay_lock:
+            waiters = list(self._relay_waiters.values())
+            self._relay_waiters.clear()
+        for conn, _, _ in waiters:
+            self.network._send_error_response(conn, message)
 
     def _initialise_focus(self):
         """
@@ -594,15 +662,13 @@ class Toptec(Device, FilterMixin, FocuserMixin):
 
         if (self._cam_move_started is not None
                 and time.time() - self._cam_move_started > self.fibsel_timeout):
-            logging.error("Lateral axis timed out after %.0fs at %d (target %d)",
-                          self.fibsel_timeout, self.cam_pos.value, self._cam_target)
+            message = ("lateral axis timed out after %.0fs at %d (target %d)"
+                       % (self.fibsel_timeout, self.cam_pos.value, self._cam_target))
             self._cam_target = None
             self._cam_move_started = None
             self._pending_filteroff = None
-            self.movement_in_progress = False
-            self._target_filter = None
-            self.set_state(self._state | self.ERROR_HW, "lateral movement timed out",
-                           self.set_bop_exposure('filter', False))
+            self.filter_move_failed(message)
+            self._sync_fibsel()
 
     def _apply_filter_focus_offset(self):
         """
@@ -692,6 +758,7 @@ class Toptec(Device, FilterMixin, FocuserMixin):
             self._cam_move_started = time.time()
             self._pending_filteroff = self.fibsel_offsets[new_filter]
             self.cam_tar.value = target
+            self._sync_fibsel()
 
         self.comm.call('toptec_set_camera_position', target)
         logging.info("Moving lateral axis to %d (%s)",
@@ -775,11 +842,20 @@ class Toptec(Device, FilterMixin, FocuserMixin):
         self._sync_fibsel()
 
     def _sync_fibsel(self):
-        """Keep the FITS-facing name in step with the selection."""
+        """
+        Keep the FITS-facing name in step with where the head is: the
+        position's name, "moving", or "unnamed" when it stands at a raw
+        position matching no entry - never the name of a position it has
+        left.
+        """
         if self.fibsel is None:
             return
-        name = self.filter.get_sel_name()
-        if name and self.fibsel.value != name:
+        if self._cam_target is not None:
+            name = "moving"
+        else:
+            matched = self._match_position(self.cam_pos.value)
+            name = self.filter.get_sel_name(matched) if matched is not None else "unnamed"
+        if self.fibsel.value != name:
             self.fibsel.value = name
 
     def on_value_changed_from_client(self, value, old_value, new_value):
@@ -795,6 +871,10 @@ class Toptec(Device, FilterMixin, FocuserMixin):
                     logging.error("Lateral target %d outside 0..%d",
                                   target, self.cam_max)
                     return -1
+                # answered on arrival, like a 'filter' change
+                conn = self.network.defer_value_response()
+                if conn is not None:
+                    self.wait_for_filter_end(conn)
                 with self.hw_lock:
                     self._cam_target = target
                     self._cam_move_started = time.time()
@@ -805,12 +885,21 @@ class Toptec(Device, FilterMixin, FocuserMixin):
                                    "lateral move started",
                                    self.set_bop_exposure('filter', True))
                 self.comm.call('toptec_set_camera_position', target)
+                # CAM_POS is where the head is: the client's number is the
+                # target (CAM_TAR) until the poll sees the head get there
+                if old_value is not None:
+                    self.cam_pos.value = old_value
+                self._sync_fibsel()
                 return 0
 
             if self.use_quido:
                 for number, relay in self.relay_values.items():
                     if value is relay:
-                        return self._set_relay(number, bool(new_value))
+                        ret = self._set_relay(number, bool(new_value))
+                        # the relay shows what Quido reports, not the request
+                        if ret == 0 and old_value is not None:
+                            relay.value = old_value
+                        return ret
 
             if value.name == "G1_POWER":
                 return self._set_camera_power(bool(new_value), self.g2_power.value)
