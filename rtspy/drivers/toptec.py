@@ -37,6 +37,14 @@ axes:
 Everything else the head reports - end switches, supply voltages, camera
 power - is plain telemetry, exposed as ordinary values.
 
+The fibre calibration lamps belong with the comp/flat lateral positions but
+are switched elsewhere: by a Papouch Quido relay board, behind a second
+XML-RPC server on the same box (port 6001, `quido_*`).  It is polled on its
+own thread, and losing it does not take the head down - only the lamps go.
+Relay 1 is the comparison lamp, 2 the flat lamp, 3 is unlabelled, and 4
+powers the industrial PC on the telescope tube; relay 4 is shown but never
+switched from here.
+
 This driver is a client of Jan Fuchs' XML-RPC server (default port 6000),
 the same one the `fiber_control_client.py` Qt panel (the "toptec window")
 talks to.  Its whole method surface is:
@@ -68,6 +76,7 @@ from rtspy.core.device import Device
 from rtspy.core.filterd import FilterMixin
 from rtspy.core.focusd import FocuserMixin
 from rtspy.core.value import ValueBool, ValueDouble, ValueInteger, ValueString
+from rtspy.core.xmlrpc_poller import XmlRpcPoller
 
 # Lateral positions as measured in 2021 (fiber_control_client.cfg [camera]),
 # with the focus offsets implied by that file's [focus] g1/g2 pair: the fibre
@@ -232,6 +241,14 @@ class Toptec(Device, FilterMixin, FocuserMixin):
                             help='Focus movement timeout in seconds', section='toptec')
         config.add_argument('--cam-max', type=int, default=15999,
                             help='Maximum lateral axis position', section='toptec')
+        config.add_argument('--quido-host', default=None,
+                            help='Quido relay XML-RPC host (default: the TOPTEC host)',
+                            section='toptec')
+        config.add_argument('--quido-port', type=int, default=6001,
+                            help='Quido relay XML-RPC port', section='toptec')
+        config.add_argument('--no-quido', action='store_true',
+                            help='Do not talk to the Quido relays (fibre lamps)',
+                            section='toptec')
 
     def __init__(self, device_name="F0", port=0):
         super().__init__(device_name, DeviceType.FOCUS, port)
@@ -239,6 +256,7 @@ class Toptec(Device, FilterMixin, FocuserMixin):
         self.focuser_type = "TOPTEC"
 
         self.comm: Optional[ToptecCommunicator] = None
+        self.quido: Optional[XmlRpcPoller] = None
         self.hw_lock = threading.RLock()
         self.fibsel = None
 
@@ -326,6 +344,26 @@ class Toptec(Device, FilterMixin, FocuserMixin):
                                       write_to_fits=False)
         self.toptec_url.value = "http://%s:%d" % (self.toptec_host, self.toptec_port)
 
+        # Quido relays: the fibre calibration lamps
+        self.use_quido = not config.get('no_quido', False)
+        self.quido_host = config.get('quido_host') or self.toptec_host
+        self.quido_port = config.get('quido_port', 6001)
+        if self.use_quido:
+            self.fib_comp = ValueBool("FIBCOMP", "fibre comparison lamp (Quido relay 1)",
+                                      write_to_fits=True, writable=True)
+            self.fib_flat = ValueBool("FIBFLAT", "fibre flat lamp (Quido relay 2)",
+                                      write_to_fits=True, writable=True)
+            self.relay3 = ValueBool("QRELAY3", "Quido relay 3 (unlabelled)",
+                                    write_to_fits=False, writable=True)
+            # Switching this off shuts down the PC on the tube: read-only
+            self.pc_tubus = ValueBool("PCTUBUS", "tube industrial PC power (Quido relay 4)",
+                                      write_to_fits=False)
+            self.quido_temp = ValueDouble("QUIDO_T", "[C] Quido switchboard temperature",
+                                          write_to_fits=False)
+            self.quido_conn = ValueBool("quido_conn", "Quido relay server is responding",
+                                        write_to_fits=False)
+            self.relay_values = {1: self.fib_comp, 2: self.fib_flat, 3: self.relay3}
+
     def _parse_fibsel(self, spec: str):
         """
         Parse the lateral position table.
@@ -391,6 +429,12 @@ class Toptec(Device, FilterMixin, FocuserMixin):
         self.comm.set_status_callback(self._handle_status_update)
         self.comm.start()
 
+        if self.use_quido:
+            self.quido = XmlRpcPoller("Quido", self.quido_host, self.quido_port,
+                                      self._poll_quido, self.poll_interval)
+            self.quido.set_status_callback(self._handle_quido_update)
+            self.quido.start()
+
         logging.info("TOPTEC device started, polling %s every %.1fs",
                      self.toptec_url.value, self.poll_interval)
 
@@ -398,6 +442,9 @@ class Toptec(Device, FilterMixin, FocuserMixin):
         if self.comm:
             self.comm.stop()
             self.comm = None
+        if self.quido:
+            self.quido.stop()
+            self.quido = None
         super().stop()
 
     # ------------------------------------------------------------- telemetry
@@ -447,6 +494,42 @@ class Toptec(Device, FilterMixin, FocuserMixin):
             self._initialise_focus()
             self._check_cam_movement()
             self._check_focus_movement()
+
+    @staticmethod
+    def _poll_quido(proxy):
+        """Quido state takes two calls; runs on the Quido poller thread."""
+        return proxy.quido_get_relays(), proxy.quido_get_temperature()
+
+    def _handle_quido_update(self, values):
+        """Quido poller thread: (relays, temperature), or None when unreachable."""
+        if values is None:
+            self.quido_conn.value = False
+            return
+
+        relays, temperature = values
+        self.quido_conn.value = True
+        for number, value in self.relay_values.items():
+            if len(relays) >= number:
+                value.value = bool(relays[number - 1])
+        if len(relays) >= 4:
+            self.pc_tubus.value = bool(relays[3])
+        try:
+            self.quido_temp.value = float(temperature)
+        except (TypeError, ValueError):
+            pass
+
+    def _set_relay(self, number: int, on: bool) -> int:
+        if self.quido is None or not self.quido.is_connected():
+            logging.error("Cannot switch Quido relay %d: server not responding", number)
+            return -1
+
+        def result(ok, answer):
+            if not ok or answer is False:
+                logging.error("quido_set_relay(%d, %d) failed: %s", number, on, answer)
+
+        self.quido.call('quido_set_relay', number, 1 if on else 0, on_result=result)
+        logging.info("Quido relay %d %s", number, "ON" if on else "OFF")
+        return 0
 
     def _initialise_focus(self):
         """
@@ -723,6 +806,11 @@ class Toptec(Device, FilterMixin, FocuserMixin):
                                    self.set_bop_exposure('filter', True))
                 self.comm.call('toptec_set_camera_position', target)
                 return 0
+
+            if self.use_quido:
+                for number, relay in self.relay_values.items():
+                    if value is relay:
+                        return self._set_relay(number, bool(new_value))
 
             if value.name == "G1_POWER":
                 return self._set_camera_power(bool(new_value), self.g2_power.value)

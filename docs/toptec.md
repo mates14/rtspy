@@ -102,6 +102,17 @@ the head no longer is.
 | `ESW1A` `ESW1B` `ESW2A` `ESW2B` | no | end switches, true = at limit |
 | `VOLT_33` `VOLT_50` `VOLT_120` | no | supply voltages in volts (the server reports tenths) |
 | `toptec_conn` `toptec_url` | no | link health and where it points |
+| `FIBCOMP` `FIBFLAT` | yes | fibre comparison / flat lamp (Quido relays 1, 2), writable |
+| `QRELAY3` | no | Quido relay 3 (unlabelled in Fuky's panel), writable |
+| `PCTUBUS` | no | Quido relay 4, power of the industrial PC on the tube - **read-only**: switching it off shuts that PC down |
+| `QUIDO_T` | no | Quido switchboard temperature, deg C |
+| `quido_conn` | no | Quido server responding |
+
+The lamps sit on a separate XML-RPC server (`quido_*`, port 6001 on the same
+box), polled on its own thread. Use `--quido-host`/`--quido-port` to point
+elsewhere, or `--no-quido` to leave it out. Losing Quido does not put the head
+in error; only the lamp values stop updating, and switching them is refused.
+Test against `tools/quido_sim.py`, as with `tools/toptec_sim.py`.
 
 Commands beyond the focuser/filter standard ones: `reset` (the panel's
 Reset button) and `focus_up` / `focus_down` / `cam_up` / `cam_down` (its
