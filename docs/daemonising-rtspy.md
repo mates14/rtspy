@@ -348,9 +348,14 @@ The daemon machinery is not device-specific.
 - **`SIGHUP` — caught, logs that reload is not implemented.** Better than the
   default action, which would kill the daemon outright.
 - **`--valuefile`, `--modefile`, `--autosave`, `--defaults`, `--noauth`,
-  `--notcheck`, `--localhost` — accepted, inert,** and reported at startup so
+  `--notcheck` — accepted, inert,** and reported at startup so
   an ignored option can be found rather than wondered about. Real structural
   work, deferred.
+- **`--localhost` is implemented:** the device announces that name to
+  centrald, or `gethostname ()` without it, as C++ does (it used to announce
+  `localhost`, which only works with everything on one machine). **`--hosts
+  name=address,...`** resolves those names itself, for centrald and for the
+  other devices, so a device on another machine needs no `/etc/hosts` entry.
 
 ### D — naming and cutover · **chosen: rtspy keeps its own namespace**
 

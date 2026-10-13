@@ -122,6 +122,15 @@ class DeviceConfigRegistry:
                          help='Centrald port', section='network')
         self.add_argument('--connection-timeout', type=float, default=300.0,
                          help='Connection timeout in seconds', section='network')
+        self.add_argument('--localhost', default=None,
+                         help='hostname announced to centrald, if different from '
+                              'gethostname() - the name the other components connect to',
+                         section='network')
+        self.add_argument('--hosts', default=None,
+                         help='name=address pairs, comma separated, used instead of '
+                              'the resolver for centrald and the other devices '
+                              '(flores=192.168.193.216): no /etc/hosts entry needed',
+                         section='network')
 
         # Daemon arguments - see rtspy/core/daemon.py and
         # docs/daemonising-rtspy.md for what each one is obliged to do.
@@ -171,7 +180,6 @@ class DeviceConfigRegistry:
         ('--valuefile', 1, 'file with values which should be created on the device'),
         ('--autosave', 1, 'autosave file'),
         ('--defaults', 1, 'file with default values'),
-        ('--localhost', 1, 'hostname, if different from gethostname()'),
         ('--noauth', 0, 'allow unauthorized connections'),
         ('--notcheck', 0, 'ignore if some recommended values are not set'),
     ]
@@ -489,6 +497,10 @@ class DeviceConfig:
                 self.network.port = config['port']
             if config.get('connection_timeout'):
                 self.network.connection_timeout = config['connection_timeout']
+            if config.get('localhost'):
+                self.network.local_host = config['localhost']
+            if config.get('hosts'):
+                self.network.set_host_map(config['hosts'])
         
         # Apply logging configuration
         if config.get('verbose'):

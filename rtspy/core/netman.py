@@ -41,6 +41,11 @@ class NetworkManager:
 
         self.centrald_host = "localhost"
         self.centrald_port = 617
+        # the name announced to centrald, which the other components connect
+        # to; C++ announces gethostname () unless --localhost says otherwise
+        self.local_host = socket.gethostname()
+        # names resolved here rather than by the system (--hosts)
+        self.host_map = {}
 
         # Connection management - now using ConnectionManager
         self.connection_manager = ConnectionManager()
@@ -502,7 +507,7 @@ class NetworkManager:
         if conn.type == 'centrald' and not getattr(conn, 'registration_sent', False):
             conn.registration_sent = True
             conn.send_command(
-                f"register 0 {self.device_name} {self.device_type} localhost {self.port}",
+                f"register 0 {self.device_name} {self.device_type} {self.local_host} {self.port}",
                 lambda c, success, code, msg: self._handle_registration_result(c, success, code, msg)
             )
             conn.update_state(ConnectionState.AUTH_PENDING, "Registration command sent to centrald")
@@ -683,8 +688,24 @@ class NetworkManager:
         logging.debug(f"Processing queued command for {conn.name}: {cmd}")
         self._handle_command(conn.id, f"{cmd} {params}".strip())
 
+    def set_host_map(self, spec):
+        """--hosts: "name=address,name=address"."""
+        for entry in spec.split(','):
+            entry = entry.strip()
+            if not entry:
+                continue
+            name, sep, address = entry.partition('=')
+            if not sep or not name.strip() or not address.strip():
+                raise ValueError(f"--hosts entry '{entry}' is not name=address")
+            self.host_map[name.strip()] = address.strip()
+
+    def resolve_host(self, host):
+        """The address to connect to: from --hosts, else the name for the resolver."""
+        return self.host_map.get(host, host)
+
     def connect_to_centrald(self, host, port):
         """Connect to a centrald server."""
+        host = self.resolve_host(host)
         try:
             # Create socket
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -729,6 +750,7 @@ class NetworkManager:
         Returns:
             Connection ID on success, None on error
         """
+        host = self.resolve_host(host)
         try:
             # Check if we have a valid centrald connection
             centrald_conn = self.connection_manager.get_associated_centrald_connection()
