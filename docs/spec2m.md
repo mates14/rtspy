@@ -48,7 +48,6 @@ command for it.
 | `COLLIM` `OESCOLL` | yes | Coude / OES collimator: open, closed, open left, open right |
 | `STARCAL` | yes | star / calibration feed |
 | `COUDEOES` | yes | Coude / OES feed |
-| `SPFLAT` `SPCOMP` | yes | spectrograph flat / comparison lamp |
 | `EMSHUT` `OESEMSHT` | yes | exposure meter shutters (Coude, OES) |
 | `SHUT700` `SHUT400` | yes | camera shutters |
 | `SLCFILT` | yes | Coude slit camera filter, 1-5 |
@@ -103,6 +102,13 @@ The simulator listens only on 127.0.0.1. It models motion through the moving
 states (2 s for discrete elements, 500 steps/s for axes), and the iodine cell
 inversion. To test a move made from Fuky's panel, call
 `spectrograph_execute("SPCH 2 1")` on it directly.
+
+## Left out on purpose
+
+Elements 8 and 9, the spectrograph flat and comparison lamps (the "Flat
+field" / "Comp" rows of the ObserveClient Spectrograph tab), have no values.
+Those lamps are permanently gone. The working fibre lamps are TOPTEC's
+`FIBCOMP` and `FIBFLAT`.
 
 ## Not covered (yet)
 

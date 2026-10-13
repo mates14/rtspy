@@ -112,10 +112,10 @@ ELEMENTS = [
             settable=_same(0, 1, 2), moving=(3,)),
     Element(7, "COUDEOES", "Coude / OES light feed", labels=COUDE_OES,
             settable=_same(0, 1, 2), moving=(3,)),
-    Element(8, "SPFLAT", "spectrograph flat lamp", kind='bool',
-            settable=_same(0, 1)),
-    Element(9, "SPCOMP", "spectrograph comparison lamp", kind='bool',
-            settable=_same(0, 1)),
+    # Elements 8 (flat lamp) and 9 (comparison lamp) are left out on
+    # purpose: those lamps are permanently gone, and values for them would
+    # only be mistaken for the real ones - TOPTEC's FIBCOMP / FIBFLAT
+    # (Quido relays).
     Element(10, "EMSHUT", "Coude exposure meter shutter", labels=SHUTTER,
             settable=_same(0, 1, 2), moving=(3,)),
     Element(11, "SHUT700", "camera 700 shutter", labels=SHUTTER,
