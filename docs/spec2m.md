@@ -24,7 +24,9 @@ command for it.
   someone else moves the spectral filter, `filter` follows it.
 - **`--readonly`** turns the driver into a monitor. It refuses every write and
   command except the read-only `spexec SPG*/SPCE/SPFE`. Use this while the
-  telescope is still run by hand.
+  telescope is still run by hand. It only sets `spec_readonly` at start:
+  that value can be switched at any time (`X spec_readonly = 0` to command,
+  `= 1` to hand the spectrograph back).
 - **Exposures are blocked while anything moves** (`BOP_EXPOSURE`), no matter who
   moved it. That covers the dichroic, collimators, star/calibration,
   Coude/OES, shutters, slit camera filter, iodine cell, focus axes, grating

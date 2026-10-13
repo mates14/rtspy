@@ -299,7 +299,7 @@ class Spec2m(Device, FilterMixin):
                                     write_to_fits=False)
         self.spec_url.value = "http://%s:%d" % (self.spec_host, self.spec_port)
         self.spec_readonly = ValueBool("spec_readonly", "commands to the spectrograph refused",
-                                       write_to_fits=False)
+                                       write_to_fits=False, writable=True)
         self.spec_readonly.value = self.readonly
         self.last_error = ValueString("last_error", "last refused or failed command",
                                       write_to_fits=False)
@@ -541,6 +541,14 @@ class Spec2m(Device, FilterMixin):
     def on_value_changed_from_client(self, value, old_value, new_value):
         try:
             name = value.name
+
+            if name == "spec_readonly":
+                # --readonly only sets it at start: switched at run time to
+                # hand the spectrograph over and take it back
+                self.readonly = bool(new_value)
+                logging.info("Spectrograph commands %s",
+                             "refused (read-only)" if self.readonly else "allowed")
+                return 0
 
             if name in self.value_elements:
                 element = self.value_elements[name]
