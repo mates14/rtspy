@@ -203,6 +203,9 @@ class GrbDaemon(Device, DeviceConfig):
         config.add_argument('--add-exec', help='Execute command when new GCN packet arrives')
         config.add_argument('--exec-followups', action='store_true', help='Execute observations for follow-ups without error box')
         config.add_argument('--gbm', action='store_true', help='Subscribe to Fermi GBM alert topics')
+        config.add_argument('--scheduler', default='SCH',
+                          help="Scheduler device told to 'run' when a GRB target is added or updated "
+                               "('' to disable; ignored where no such device is registered)")
 
         # Visibility filtering
         config.add_argument('--not-visible', action='store_true', default=True, help='Record GRBs not visible from current location')
@@ -245,6 +248,9 @@ class GrbDaemon(Device, DeviceConfig):
         self.executor_enabled = None  # Will be set when we receive EXEC.enabled value
         self.executor_connected = False  # Track if we have a connection to EXEC
 
+        # Scheduler (rts2-sensor-scheduler) to replan after a GRB
+        self.scheduler_name = None
+
         # Set initial state
         self.set_state(self.STATE_IDLE, "GRB daemon initializing")
         # System state monitoring
@@ -271,6 +277,7 @@ class GrbDaemon(Device, DeviceConfig):
 #        self.record_only_visible_tonight.value = config.get('only_visible_tonight', False)
         self.min_altitude.value = config.get('min_altitude', 0.0)
         self.max_errorbox.value = config.get('max_errorbox', 15.0)
+        self.scheduler_name = config.get('scheduler', 'SCH') or None
 
     def _create_values(self):
         """Create RTS2 values for comprehensive monitoring and control."""
@@ -590,6 +597,15 @@ class GrbDaemon(Device, DeviceConfig):
             callback=self._on_executor_connection_changed
         )
 
+        # Keep a connection to the scheduler, so a new GRB replans at once. Where
+        # no such device is registered (a site without it) nothing happens.
+        if self.scheduler_name:
+            self.network.register_connection_state_callback(
+                device_name=self.scheduler_name,
+                callback=lambda name, connected: logging.debug(
+                    f"Scheduler {name} {'connected' if connected else 'disconnected'}")
+            )
+
         logging.info(f"GCN Client ID: {self.gcn_client_id.value}")
         if self.queue_name.value:
             logging.info(f"GRBs will be queued to: {self.queue_name.value}")
@@ -793,6 +809,10 @@ class GrbDaemon(Device, DeviceConfig):
                 with self._stats_lock:
                     self.grbs_processed.value += 1
                     self.grbs_today.value += 1
+
+                # The executor starts the GRB now; the scheduler decides, within the
+                # queuer's grace period, how the night continues around it
+                self._trigger_scheduler(grb_info)
 
                 # Trigger observation (filtering already done, executor handles constraints)
                 if self.grb_enabled.value:
@@ -1720,6 +1740,26 @@ class GrbDaemon(Device, DeviceConfig):
 
         except Exception as e:
             logging.error(f"Error triggering GRB observation: {e}")
+
+    def _trigger_scheduler(self, grb_info: 'GrbTarget'):
+        """Ask the scheduler device to plan again, now that a GRB is in the database."""
+        if not self.scheduler_name:
+            return
+        try:
+            for conn in self.network.connection_manager.connections.values():
+                if (getattr(conn, 'remote_device_name', None) == self.scheduler_name and
+                        conn.state == ConnectionState.AUTH_OK):
+                    conn.send_command("run", self._on_scheduler_run_result)
+                    logging.info(f"Asked {self.scheduler_name} to replan for "
+                                 f"{grb_info.mission} {grb_info.grb_id} (target {grb_info.target_id})")
+                    return
+            logging.debug(f"No connection to {self.scheduler_name}, not asking it to replan")
+        except Exception as e:
+            logging.error(f"Error asking {self.scheduler_name} to replan: {e}")
+
+    def _on_scheduler_run_result(self, conn, success, code, message):
+        if not success:
+            logging.warning(f"{self.scheduler_name} refused run: {message}")
 
     def _queue_grb_observation(self, target_id: int):
         """Queue GRB observation with selector."""
