@@ -409,6 +409,9 @@ class QueueSelector(Device, DeviceConfig):
                         if self.executor_current_target.value != idle_id:
                             logging.info(f"Queue empty - issuing idle target {idle_id}")
                             self._send_executor_command(f"now {idle_id}")
+                            # Idling is not a target we expect to keep: anything the
+                            # plan has open must be able to take over via NOW
+                            self.expected_executor_target.value = -1
                             self.next_target.value = idle_id
                             self.current_queue.value = "idle"
                     else:
@@ -935,7 +938,9 @@ class QueueSelector(Device, DeviceConfig):
             # We consider it "our" activity if current target is either:
             # 1. The target we just sent as "next" (expected_executor_target)
             # 2. The target we sent previously (last_target_id) - might still be running
-            our_targets = {self.expected_executor_target.value, self.last_target_id.value}
+            # 3. The idle target, which we send with expected_executor_target = -1
+            our_targets = {self.expected_executor_target.value, self.last_target_id.value,
+                           self.idle_target.value}
             our_targets.discard(-1)  # Remove -1 values
 
             if self.executor_current_target.value != -1 and self.executor_current_target.value not in our_targets:
