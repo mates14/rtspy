@@ -727,6 +727,7 @@ class AuthCommands:
 
             # Mark as connected but not yet authorized
             conn.update_state(ConnectionState.AUTH_OK, f"Registered as {device_id}")
+            self.network_manager.centrald_registered_as(conn, device_id)
 
             # Notify about centrald connection
             if hasattr(self.network_manager, 'centrald_connected_callback') and callable(self.network_manager.centrald_connected_callback):

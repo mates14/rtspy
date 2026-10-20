@@ -95,6 +95,18 @@ class NetworkManager:
         self.min_retry_interval = 5.0  # Start with 5 seconds
         self.max_retry_interval = 300.0  # Cap at 5 minutes
 
+        # centrald link: connected again whenever there is none (see
+        # _check_centrald) - at start, after centrald restarts, after the
+        # link drops. C++ retries every 60 s; we start sooner and back off
+        # to that. Attempts that failed in a row, and when the next is due.
+        self.centrald_failures = 0
+        self.centrald_retry_at = 0.0
+        self.centrald_registered = False
+        # a device link we opened that is not authorized after this long is
+        # dropped, and the interest loop opens it again (C++ retries its
+        # handshake after 30 s too)
+        self.device_auth_timeout = 30.0
+
         # Register standard command handlers
         self._register_command_handlers()
 
@@ -151,7 +163,8 @@ class NetworkManager:
         )
         self.interest_thread.start()
 
-        self.connect_to_centrald(self.centrald_host, self.centrald_port)
+        # the network loop connects to centrald (_check_centrald), at once
+        # and again whenever the link is gone
 
     def _interest_manager_loop(self):
         """
@@ -306,10 +319,17 @@ class NetworkManager:
         logging.info(f"NetworkManager started on port {self.port}")
         last_cleanup_time = time.time()
         last_keepalive_check = time.time()
+        last_handshake_check = time.time()
 
         while self.running:
             try:
                 current_time = time.time()
+
+                self._check_centrald(current_time)
+
+                if current_time - last_handshake_check > 5.0:
+                    self._check_handshakes(current_time)
+                    last_handshake_check = current_time
 
                 # Run connection cleanup every minute
                 if current_time - last_cleanup_time > 60.0:
@@ -433,13 +453,18 @@ class NetworkManager:
         """Handle a connection being closed."""
         # Get connection info before removing it
         conn = self.connection_manager.get_connection(conn_id)
+        if conn and conn.type == 'centrald':
+            self.connection_manager.remove_connection(conn_id)
+            self._centrald_lost(conn)
+            return
         if conn and hasattr(conn, 'remote_device_name') and conn.remote_device_name:
             device_name = conn.remote_device_name
+            state = getattr(conn, 'state_before_close', conn.state)
 
             # Track if this was an established connection
-            was_established = (conn.state == ConnectionState.AUTH_OK or
-                             conn.state == ConnectionState.AUTH_PENDING or
-                             conn.state == ConnectionState.CONNECTED)
+            was_established = (state == ConnectionState.AUTH_OK or
+                             state == ConnectionState.AUTH_PENDING or
+                             state == ConnectionState.CONNECTED)
 
             # Notify connection state callbacks if there's one registered
             if device_name in self.connection_state_callbacks and was_established:
@@ -449,9 +474,10 @@ class NetworkManager:
                 except Exception as e:
                     logging.error(f"Error in connection state callback for {device_name}: {e}")
 
-            # Only reset if this was a successful connection that closed (not a failed connection attempt)
-            # Check if connection was authenticated - that means it was established successfully
-            if conn.state == ConnectionState.AUTH_OK or conn.state == ConnectionState.AUTH_PENDING:
+            # Only reset if this was a successful connection that closed (not a failed connection attempt).
+            # Only an authorized link counts: one that never got there (dropped by
+            # _check_handshakes) backs off
+            if state == ConnectionState.AUTH_OK:
                 # Reset retry count to allow immediate reconnection when device reappears
                 self.device_connection_attempts[device_name] = (0, 0, 0)
                 logging.info(f"Device {device_name} disconnected, ready for immediate reconnection")
@@ -475,6 +501,77 @@ class NetworkManager:
         # Remove from connection manager
         self.connection_manager.remove_connection(conn_id)
 
+    def _check_centrald(self, now):
+        """Connect to centrald when there is no link to it and a try is due."""
+        if now < self.centrald_retry_at:
+            return
+        if self.connection_manager.get_associated_centrald_connection(require_auth=False):
+            return
+        # pushed back by _centrald_lost if this attempt fails
+        self.centrald_retry_at = now + self.max_retry_interval
+        if self.connect_to_centrald(self.centrald_host, self.centrald_port) is None:
+            self._centrald_lost(None)
+
+    def _centrald_lost(self, conn):
+        """
+        The centrald link closed, or a connect to it failed (conn is None).
+
+        The registration belonged to that TCP connection: our id, key and
+        every entity id came from it, and centrald never resumes a session.
+        Device links we have keep running; they do not depend on centrald
+        once authorized.
+        """
+        now = time.time()
+        if self.centrald_registered:
+            self.centrald_registered = False
+            self.centrald_failures = 0
+            # a restarted centrald is usually listening again within seconds
+            self.centrald_retry_at = now + 2.0
+            logging.warning("Connection to centrald lost, registering again")
+        else:
+            self.centrald_failures += 1
+            delay = min(self.min_retry_interval * (2 ** (self.centrald_failures - 1)), 60.0)
+            self.centrald_retry_at = now + delay
+            # once, not every minute while centrald stays away
+            log = logging.warning if self.centrald_failures == 1 else logging.debug
+            log(f"Cannot register with centrald at {self.centrald_host}:{self.centrald_port}"
+                f" (attempt {self.centrald_failures}), next attempt in {delay:.0f}s")
+
+        # ids of the old centrald; the new one announces everybody again
+        self.entities.clear()
+
+        # a client waiting for its authorization will not get it: the
+        # authorize went to the dead link. Its peer connects again.
+        for other in list(self.connection_manager.connections.values()):
+            if not other.outgoing and other.state == ConnectionState.AUTH_PENDING:
+                logging.info(f"Dropping {other.name}: its authorization went to the lost centrald")
+                other.close()
+
+    def centrald_registered_as(self, conn, device_id):
+        """registered_as from centrald (commands.py)."""
+        self.centrald_registered = True
+        if self.centrald_failures > 0:
+            logging.info(f"Registered with centrald as {device_id}, after {self.centrald_failures} failed attempts")
+        self.centrald_failures = 0
+
+    def _check_handshakes(self, now):
+        """
+        Drop a device link we opened that is not authorized in time.
+
+        Its auth was lost, or never answered, or never sent: such a link
+        stays open and answers every command with "unknow command". The
+        interest loop opens it again.
+        """
+        for conn in list(self.connection_manager.connections.values()):
+            if (conn.outgoing and conn.socket is not None
+                    and conn.state not in (ConnectionState.AUTH_OK, ConnectionState.BROKEN, ConnectionState.DELETE)
+                    and now - conn.connection_time > self.device_auth_timeout):
+                retries = self.device_connection_attempts.get(conn.remote_device_name, (0, 0, 0))[1]
+                log = logging.warning if retries == 0 else logging.debug
+                log(f"Link to {conn.remote_device_name} not authorized after"
+                    f" {now - conn.connection_time:.0f}s ({conn.state.name}), dropping it")
+                conn.close()
+
     def _handle_connection_established(self, conn):
         """Handle a socket that has completed its connection attempt."""
         # Check socket error status
@@ -489,24 +586,23 @@ class NetworkManager:
                     logging.error(f"Socket error connecting to {conn.name}: {os.strerror(err)}")
                 else:
                     logging.debug(f"Socket error connecting to {conn.name}: {os.strerror(err)}")
+            elif conn.type == 'centrald':
+                # _centrald_lost logs the failed attempt, once
+                logging.debug(f"Socket error connecting to centrald: {os.strerror(err)}")
             else:
                 logging.error(f"Socket error connecting to {conn.name}: {os.strerror(err)}")
             conn.close()
             return
 
-        # Connection successful - reset retry count for this device
+        # the retry count is reset once the link is authorized
+        # (_complete_device_authorization), not here: a peer that accepts
+        # but never authorizes us must back off too
         conn.update_state(ConnectionState.CONNECTED, "Connection established")
-
-        # Reset retry count since connection was successful
-        device_name = getattr(conn, 'remote_device_name', None)
-        if device_name and device_name in self.device_connection_attempts:
-            self.device_connection_attempts[device_name] = (0, 0, 0)
-            logging.debug(f"Connection to {device_name} established, reset retry count")
 
         # For centrald connections, send registration
         if conn.type == 'centrald' and not getattr(conn, 'registration_sent', False):
             conn.registration_sent = True
-            conn.send_command(
+            conn.send_handshake(
                 f"register 0 {self.device_name} {self.device_type} {self.local_host} {self.port}",
                 lambda c, success, code, msg: self._handle_registration_result(c, success, code, msg)
             )
@@ -527,7 +623,7 @@ class NetworkManager:
                             break
                 # Send auth command with our device ID and auth key from centrald
                 auth_cmd = f"auth {centrald_conn.device_id} {target_centrald_num} {centrald_conn.auth_key}"
-                conn.send_command(auth_cmd, self._complete_device_authorization)
+                conn.send_handshake(auth_cmd, self._complete_device_authorization)
                 conn.update_state(ConnectionState.AUTH_PENDING, "Authentication sent to device")
             else:
                 logging.error("Cannot authenticate to device: missing centrald connection or auth key")
@@ -714,7 +810,9 @@ class NetworkManager:
             # Start non-blocking connect
             err = sock.connect_ex((host, port))
             if err != errno.EINPROGRESS and err != 0:
-                logging.error(f"Error connecting to centrald: {os.strerror(err)}")
+                # retried by _check_centrald, which logs it
+                logging.debug(f"Error connecting to centrald: {os.strerror(err)}")
+                sock.close()
                 return None
 
             # Create new connection object
@@ -784,6 +882,7 @@ class NetworkManager:
             # Create new connection object
             conn_id = str(uuid.uuid4())
             conn = Connection(conn_id, sock, (host, port), conn_type='device')
+            conn.outgoing = True
 
             # Store target device name if provided
             if device_name:
@@ -853,8 +952,10 @@ class NetworkManager:
             # Registration successful, now need to wait for registered_as message
             # The centrald_connected_callback will be called after getting registered_as
         else:
+            # e.g. "name X already registered": centrald still holds our old
+            # link, until its own timeout drops it - try again later
             logging.error(f"Registration failed: {msg}")
-            conn.update_state(ConnectionState.BROKEN, f"{msg}")
+            conn.close()
 
     def _send_value(self, conn, value):
         """Send a value to a connection."""
@@ -1145,6 +1246,8 @@ class NetworkManager:
         if success and "authorized" in status_msg:
             logging.debug(f"Device authentication successful for {conn.name}")
             conn.update_state(ConnectionState.AUTH_OK, "Authorization complete")
+            if conn.remote_device_name in self.device_connection_attempts:
+                self.device_connection_attempts[conn.remote_device_name] = (0, 0, 0)
 
             # Notify connection state callbacks
             if hasattr(conn, 'remote_device_name') and conn.remote_device_name in self.connection_state_callbacks:

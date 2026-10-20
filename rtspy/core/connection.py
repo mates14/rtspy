@@ -98,6 +98,8 @@ class Connection:
         self.pending_command_time = None
         self.pending_command_callback = None
         self.registration_sent = False
+        # a device link we opened (and authorize); see NetworkManager._check_handshakes
+        self.outgoing = False
 
         # Type-specific properties
         if conn_type == 'centrald':
@@ -349,7 +351,11 @@ class Connection:
     def stop_queue_processor(self):
         """Stop the command queue processor thread."""
         self.queue_processor_running = False
-        if self.command_queue_thread and self.command_queue_thread.is_alive():
+        # a command callback run by the queue thread itself may close the
+        # connection (a timed-out auth); joining the current thread raises,
+        # and the socket was never closed
+        if (self.command_queue_thread and self.command_queue_thread.is_alive()
+                and self.command_queue_thread is not threading.current_thread()):
             self.command_queue_thread.join(timeout=1.0)
 
     def _process_command_queue(self):
@@ -358,7 +364,11 @@ class Connection:
             # Check for commands that can be executed
             try:
                 with self.command_queue_lock:
-                    if not self.pending_command and not self.command_queue.empty(): # and self.state == ConnectionState.AUTH_OK:
+                    # nothing goes out before the link is authorized: the peer
+                    # answers anything but its handshake with "unknow command",
+                    # and such a link once ran for six hours (EXEC, 2026-10-14).
+                    # The handshake itself goes by send_handshake()
+                    if not self.pending_command and not self.command_queue.empty() and self.state == ConnectionState.AUTH_OK:
                         # Get next command from queue
                         queued_cmd = self.command_queue.get_nowait()
 
@@ -437,6 +447,19 @@ class Connection:
 
             # No pending command, execute directly
             return self._execute_command(command, callback)
+
+    def send_handshake(self, command: str, callback: Optional[Callable] = None) -> bool:
+        """
+        Send the command that authorizes the link (register, auth), the one
+        command allowed out before the link is AUTH_OK. Commands queued
+        meanwhile wait for it.
+        """
+        logging.debug(f"send_handshake to {self.name}: {command}")
+        with self.command_queue_lock:
+            sent = self._execute_command(command, callback)
+        # the queue thread also times out a command that gets no reply
+        self.start_queue_processor()
+        return sent
 
     def _execute_command(self, command: str, callback: Optional[Callable] = None) -> bool:
         """
@@ -522,6 +545,8 @@ class Connection:
                 pass
 
         self.socket = None
+        # what the link was, for the closed callback (the state is BROKEN by then)
+        self.state_before_close = self.state
         self.update_state(ConnectionState.BROKEN, "Connection closed")
 
         # Notify about closure if callback is registered
