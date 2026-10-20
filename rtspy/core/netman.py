@@ -106,6 +106,9 @@ class NetworkManager:
         # dropped, and the interest loop opens it again (C++ retries its
         # handshake after 30 s too)
         self.device_auth_timeout = 30.0
+        # --connection-timeout: a link with nothing received for twice this
+        # long is dropped; given to every connection as it is made
+        self.connection_timeout = 300.0
 
         # Register standard command handlers
         self._register_command_handlers()
@@ -303,6 +306,7 @@ class NetworkManager:
             conn.register_closed_callback(self._on_connection_closed)
 
             # Add to connection manager
+            conn.connection_timeout = self.connection_timeout
             self.connection_manager.add_connection(conn)
 
             logging.debug(f"New connection from {client_addr}")
@@ -827,6 +831,7 @@ class NetworkManager:
             conn.update_state(ConnectionState.CONNECTING, "Connecting to centrald")
 
             # Add to connection manager
+            conn.connection_timeout = self.connection_timeout
             self.connection_manager.add_connection(conn)
 
             logging.debug(f"Connecting to centrald at {host}:{port}")
@@ -901,6 +906,7 @@ class NetworkManager:
             conn.update_state(ConnectionState.CONNECTING, "Connecting to device")
 
             # Add to connection manager
+            conn.connection_timeout = self.connection_timeout
             self.connection_manager.add_connection(conn)
 
             logging.debug(f"Connecting to device at {host}:{port}")

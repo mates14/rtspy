@@ -62,8 +62,11 @@ class Connection:
         self.buffer = bytearray()
         self.write_buffer = bytearray()
 
-        # Connection metadata
+        # Connection metadata. last_activity also counts our own sends, so
+        # it says when to send a keepalive; last_received only what the
+        # peer sent, so it says whether the peer is still there
         self.last_activity = time.time()
+        self.last_received = time.time()
         self.connection_time = time.time()
         self.description = f"{conn_type}-{addr[0]}:{addr[1]}"
 
@@ -236,6 +239,7 @@ class Connection:
         """
         # Update activity timestamp
         self.last_activity = time.time()
+        self.last_received = self.last_activity
 
         # Add to buffer
         self.buffer.extend(data)
@@ -297,9 +301,12 @@ class Connection:
             # Connections still connecting have a short timeout
             return current_time - self.connection_time > 10.0  # 10 seconds
         else:
-            # In C++ implementation, timeout is enforced after 2x the timeout value
-            # So we check if 2 * actual_timeout has passed since last activity
-            return current_time - self.last_activity > (2 * actual_timeout)
+            # In C++ implementation, timeout is enforced after 2x the timeout value,
+            # counted from the last data *received* (lastData). Our own sends
+            # do not count: the keepalive, sent every timeout/4, kept a peer
+            # that hung with its socket open from ever timing out. A live peer
+            # answers that keepalive with "T OK".
+            return current_time - self.last_received > (2 * actual_timeout)
 
     def check_keepalive(self) -> bool:
         """
@@ -782,7 +789,7 @@ class ConnectionManager:
         with self._lock:
             for conn_id, conn in list(self.connections.items()):
                 if conn.is_timed_out(timeout):
-                    logging.warning(f"Connection {conn.name} timed out after {time.time() - conn.last_activity:.1f} seconds")
+                    logging.warning(f"Connection {conn.name} timed out: nothing received for {time.time() - conn.last_received:.1f} seconds")
                     conn.close()
                     self.remove_connection(conn_id)
 

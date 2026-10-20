@@ -64,6 +64,26 @@ this file when any of it changes.
 - An authorized link that drops ("ready for immediate reconnection") is
   opened again in about a second, or as soon as the device registers
   again.
+### A peer that hangs with its socket open
+
+This covers a stopped or deadlocked process, a host that vanished without
+resetting the connection, and a network cut.
+- Any link, centrald's included, with nothing *received* for twice
+  `--connection-timeout` (default 300 s, so 600 s, as C++) is dropped by
+  `clean_stale_connections`, which runs once a minute. It then recovers as
+  above.
+- The keepalive (`T ready` after `connection_timeout`/4 idle) makes a live
+  peer answer `T OK`, so a quiet but healthy link is not dropped.
+- Before 2026-10-20 the timeout counted our own sends too. The keepalive
+  then kept a hung peer's link up for ever, and only a TCP error (roughly
+  15-20 min) closed it. `--connection-timeout` also never reached the
+  connections.
+- For the centrald link over the network (SPECP on primula registering
+  with flores), a cut is now noticed after at most about 11 min. Lower
+  `--connection-timeout` to notice it sooner.
+
+### Devices that leave
+
 - `delete_device <id> <name>` forgets that registration
   (`handle_delete_device`, matched on id and name), so a device that left
   is not tried until it registers again, and then at its new port. Links
@@ -96,23 +116,15 @@ Setup: rts2ng centrald, `rts2-camd-dummy`, `rtspy-watcher` watching it,
 - **Camera restart:** link up again about 5 s after the camera came back.
   With `delete_device` handled: no attempts while it was gone, and
   authorized at the first attempt when it registered again.
+- **Camera hung (SIGSTOP), `--connection-timeout 20`:**
+  - its link was dropped after 59 s with nothing received;
+  - new links to it were accepted by its kernel but never authorized, so
+    each was dropped after 30 s, with backoff;
+  - after SIGCONT, authorized at the next attempt;
+  - the centrald link was never dropped.
 
 ## Known to fail
 
-- **A peer that hangs with its TCP connection open is never detected.**
-  This covers a stopped or deadlocked process, and a host that vanished
-  without resetting the connection.
-  - `last_activity` is updated by our own sends too, so the keepalive
-    (`T ready` every `connection_timeout`/4 = 75 s) keeps the 600 s idle
-    timeout from ever firing, whether the peer answers or not.
-  - Commands to the peer time out one by one after 60 s, but the link
-    stays.
-  - Only a TCP error closes it: a reset, or the kernel's retransmission
-    timeout, roughly 15-20 min after the peer stops acknowledging.
-  - For the centrald link over the network (SPECP on primula registering
-    with flores), a network cut is therefore noticed only after that
-    time, and re-registration starts only then.
-  - Fix: time out on data *received* (`T OK` counts), as C++ does.
 - **A command sent on a link that then drops never gets its callback.**
   `close()` neither fails the pending command nor clears the queue. This
   cannot block anything, so it costs only a log line:
@@ -204,6 +216,12 @@ Setup: rts2ng centrald, `rts2-camd-dummy`, `rtspy-watcher` watching it,
   `delete_device` deletes the address and stops the reconnects.
 - **After registering:** state and every value with its metadata are
   pushed to centrald.
+- **Open, reported to JS on 2026-10-20:**
+  - centrald counts the bad weather of a connection that is not
+    registered (`Centrald::weatherChanged`). This is how a BART sensor's
+    half-open link sent D50 to standby on 2026-10-18.
+  - The 60 s re-register keeps `required_devices` missing, so centrald
+    reports bad weather, for up to a minute after a centrald restart.
 
 ## Related, not about reconnection
 
