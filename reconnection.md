@@ -1,7 +1,7 @@
 # Reconnection: what recovers, what does not
 
 How rtspy recovers lost links to centrald and to other devices, what is
-known to fail, and what may. State of `711046e` (2026-10-20) [MJ]. Update
+known to fail, and what may. State of 2026-10-20 [MJ]. Update
 this file when any of it changes.
 
 ## Background: what a registration is
@@ -64,6 +64,10 @@ this file when any of it changes.
 - An authorized link that drops ("ready for immediate reconnection") is
   opened again in about a second, or as soon as the device registers
   again.
+- `delete_device <id> <name>` forgets that registration
+  (`handle_delete_device`, matched on id and name), so a device that left
+  is not tried until it registers again, and then at its new port. Links
+  to it are left alone, as in C++.
 
 ### Incoming links
 
@@ -90,6 +94,8 @@ Setup: rts2ng centrald, `rts2-camd-dummy`, `rtspy-watcher` watching it,
   - the link was dropped after 30 s and retried every 10, 20, 40 s;
   - one warning.
 - **Camera restart:** link up again about 5 s after the camera came back.
+  With `delete_device` handled: no attempts while it was gone, and
+  authorized at the first attempt when it registered again.
 
 ## Known to fail
 
@@ -107,29 +113,46 @@ Setup: rts2ng centrald, `rts2-camd-dummy`, `rtspy-watcher` watching it,
     with flores), a network cut is therefore noticed only after that
     time, and re-registration starts only then.
   - Fix: time out on data *received* (`T OK` counts), as C++ does.
-- **`delete_device` is ignored** (`commands.py`, `handle_ignore`).
-  - A device that restarted is reached at its old port first, which
-    costs one refused attempt, a few seconds.
-  - A device that is gone for good stays in `entities`, and the interest
-    loop keeps trying it, up to every 300 s, until the centrald link
-    drops.
 - **A command sent on a link that then drops never gets its callback.**
-  - `close()` neither fails the pending command nor clears the queue, so
-    a caller waiting for the result waits for ever, unless it has its own
-    timeout.
-  - Replies we owe a peer on a dead link (`defer_response`, the filter
-    waiter) are simply never sent, which is harmless.
-- **After "already registered", recovery can take up to centrald's own
-  timeout.**
-  - This happens when the link died only on our side, or in the network.
-  - centrald keeps the old registration until it times the old link out
-    (C++ `connectionTimeout`, 300 s, enforced after twice that).
-  - We retry every 60 s and get in once it does.
-- **Values and metadata are not sent to centrald**, neither at start nor
-  after re-registering, only state and BOP. C++ sends all of them
-  (`sendMetaInfo`). Nothing is known to depend on it.
+  `close()` neither fails the pending command nor clears the queue. This
+  cannot block anything, so it costs only a log line:
+  - Every link is a new `Connection` with its own queue, so a lost command
+    cannot hold up the next link's commands. C++ keeps one object for the
+    centrald link, and there it did (rts2ng `d272f7e`).
+  - The callbacks (`queue_selector._on_executor_command_result`,
+    `grbd._on_*_result`) only log, and nothing waits for them. The
+    handshake callbacks (`_complete_device_authorization`,
+    `_handle_registration_result`) act only on the dead link.
+  - Replies we owe a peer on a dead link go nowhere. `send()` on a closed
+    link returns False, and `run_queued` for a removed link is ignored.
+  - Device waiters are freed by the hardware, not by the client. The
+    filter/focus waiter is taken when the wheel stops, or replaced by the
+    next request. The TOPTEC relay waiters time out.
+  - What is lost: the result of an executor command that was cut off is
+    not logged.
+- **"already registered" after a host crash or a long network cut.**
+  - centrald still holds our old link and refuses the new `register`.
+    We retry every 60 s.
+  - It does not happen when only our process restarts: the kernel closes
+    the old socket, and centrald sees it at once.
+  - centrald drops the old link the first time it sends on it, because
+    our side answers with a reset. It sends state changes and the other
+    devices' announcements; on a quiet link it sends `T ready` after
+    300 s, and it drops a silent link after 600 s.
+  - So it heals itself within about 5 minutes, usually sooner. Shortening
+    it would need centrald to let a new registration replace an old one
+    under the same name. Two copies started by mistake would then fight
+    over the name, so it is left as it is.
+- **No metadata to centrald.** rtspy never sent any, neither before nor
+  now: no `E` lines. Value changes (`V`) do go to centrald, as to every
+  `AUTH_OK` link, and C++ centrald drops them silently because it does not
+  know the values (`Connection::commandValue` returns -2, which is not
+  answered). State and BOP go as in C++. C++ also pushes all metadata
+  (`sendMetaInfo`); nothing is known to use it.
 - **Only one centrald.** There is one `--server`; a device cannot
-  register with two, as the BART sensors do in C++.
+  register with two, as the BART sensors do in C++. The architecture
+  allows it (`get_associated_centrald_connection`), but the change would
+  be extensive, so it is left for later. Do not make it harder.
 
 ## May fail (not seen, not tested)
 

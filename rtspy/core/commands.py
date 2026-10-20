@@ -181,7 +181,7 @@ class ProtocolCommands:
             "client": self.handle_client,
             "this_device": self.handle_this_device_info,
             "delete_client": self.handle_delete_client,
-            "delete_device": self.handle_ignore
+            "delete_device": self.handle_delete_device
         }
         # Commands that need responses
         self.needs_response = {
@@ -538,6 +538,29 @@ class ProtocolCommands:
             del self.network_manager.entities[client_id]
         else:
             logging.warning(f"Received delete_client for unknown client ID: {client_id}")
+
+        conn.command_in_progress = False
+        return True
+
+    def handle_delete_device(self, conn, params):
+        """
+        delete_device <id> <name> from centrald: the device left (its centrald
+        link closed). Forget that registration, so the interest loop stops
+        connecting to it - a device gone for good was tried every 300 s, and
+        one that restarted was tried at its old port first. Ids are never
+        reused, so the id says which registration. Links to the device are
+        left alone; they close by themselves if it is really gone.
+        """
+        parts = params.split()
+        if len(parts) >= 2:
+            try:
+                device_id = int(parts[0])
+            except ValueError:
+                device_id = None
+            entity = self.network_manager.entities.get(device_id)
+            if entity is not None and entity.get('name') == parts[1]:
+                del self.network_manager.entities[device_id]
+                logging.debug(f"Device {parts[1]} (ID: {device_id}) left centrald")
 
         conn.command_in_progress = False
         return True
