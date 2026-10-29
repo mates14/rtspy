@@ -204,20 +204,27 @@ def write_snapshot(path: str, sources: Dict[str, Dict[str, Any]], host: str):
 class Cond(Device, DeviceConfig):
     """Observing conditions from pipeline ECSVs and other COND snapshots."""
 
+    # rtspy's registry hands option defaults to argparse, and the command line
+    # outranks --config files, so any non-None default would override the file.
+    # Hence default=None everywhere and the real defaults applied here.
+    DEFAULTS = dict(ecsv_dir='~/phdb-rt', ecsv_date_fmt='%y/%m%d', camera='', camera_name=None, zpref='',
+                    show='', remote='', snapshot='', push='', push_interval=30.0, poll=10.0, max_age=3600.0)
+
     def setup_config(self, config):
-        config.add_argument('--ecsv-dir', default='~/phdb-rt', help='real-time ECSV root', section='cond')
-        config.add_argument('--ecsv-date-fmt', default='%y/%m%d', help='night subdirectory format', section='cond')
-        config.add_argument('--camera', default='', help="cameras, e.g. 'C1:floor=76:bgk=0.70:pix=3.12;C2:...'", section='cond')
-        config.add_argument('--camera-name', help='use this camera name for all local frames (Makak: MK)', section='cond')
-        config.add_argument('--zpref', default='', help="'C1/Sloan_r=18.38:0.16,...' zp1 at X=1 : extinction", section='cond')
-        config.add_argument('--show', default='', help="sources published as values, 'C1/Sloan_r,MK/N,...'", section='cond')
-        config.add_argument('--remote', default='', help='cond.json URLs of other COND instances, comma-separated', section='cond')
-        config.add_argument('--snapshot', default='', help='where to write this instance\'s cond.json', section='cond')
-        config.add_argument('--push', default='', help="command run after a changed snapshot is written, {} = its path "
-                            "(e.g. 'rsync -q {} lascaux.asu.cas.cz:')", section='cond')
-        config.add_argument('--push-interval', type=float, default=30.0, help='minimum time between pushes [s]', section='cond')
-        config.add_argument('--poll', type=float, default=10.0, help='poll interval [s]', section='cond')
-        config.add_argument('--max-age', type=float, default=3600.0, help='older sources are not published [s]', section='cond')
+        opt = lambda name, help, **kw: config.add_argument(name, default=None, help=help, section='cond', **kw)
+        opt('--ecsv-dir', 'real-time ECSV root (~/phdb-rt)')
+        opt('--ecsv-date-fmt', 'night subdirectory format (%%y/%%m%%d)')
+        opt('--camera', "cameras, e.g. 'C1:floor=76:bgk=0.70:pix=3.12;C2:...'")
+        opt('--camera-name', 'use this camera name for all local frames (Makak: MK)')
+        opt('--zpref', "'C1/Sloan_r=18.38:0.16,...' zp1 at X=1 : extinction")
+        opt('--show', "sources published as values, 'C1/Sloan_r,MK/N,...'")
+        opt('--remote', 'cond.json URLs of other COND instances, comma-separated')
+        opt('--snapshot', "where to write this instance's cond.json")
+        opt('--push', "command run after a changed snapshot is written, {} = its path "
+                      "(e.g. 'rsync -q {} lascaux.asu.cas.cz:')")
+        opt('--push-interval', 'minimum time between pushes [s] (30)', type=float)
+        opt('--poll', 'poll interval [s] (10)', type=float)
+        opt('--max-age', 'older sources are not published [s] (3600)', type=float)
 
     def __init__(self, device_name='COND', port=0):
         super().__init__(device_name, DeviceType.SENSOR, port)
@@ -228,6 +235,7 @@ class Cond(Device, DeviceConfig):
         self.set_state(self.STATE_IDLE, 'Initializing COND')
 
     def apply_config(self, config: Dict[str, Any]):
+        config = {k: (config.get(k) if config.get(k) is not None else v) for k, v in self.DEFAULTS.items()}
         self.poll = config.get('poll', 10.0)
         self.max_age = config.get('max_age', 3600.0)
         self.snapshot = os.path.expanduser(config.get('snapshot') or '')
