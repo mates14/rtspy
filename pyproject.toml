@@ -94,6 +94,7 @@ rtspy-filterd-spec2m = "rtspy.drivers.spec2m:main"
 rtspy-focusd-dummy = "rtspy.drivers.focusd_dummy:main"
 rtspy-focusd-toptec = "rtspy.drivers.toptec:main"
 rtspy-sensor-temp = "rtspy.drivers.sensor_temp:main"
+rtspy-sensor-cond = "rtspy.drivers.sensor_cond:main"
 
 # CLI utilities. rtspy-*, like everything else rtspy installs: these land in
 # /usr/local/bin, which precedes /usr/bin, so an rts2-* name here would
