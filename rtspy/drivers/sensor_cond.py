@@ -17,6 +17,17 @@ Makak sky monitor), and publishes per camera/filter, normalised to 1 s:
 and the freshest transparency over all shown sources as transp/transp_src.
 <p> is the camera plus a short filter name, e.g. C1_r for C1/Sloan_r.
 
+Dew (or frost) on the optics shows as a loss of a camera's own throughput
+while the sky monitor (--dew-ref, Makak) still sees a clear sky.  For each
+local frame with a fresh reference, the offset tr - tr_ref is compared with
+its baseline, which follows slowly (--dew-tau, a week) so that dust and other
+slow changes of the zeropoints are absorbed; the shortfall is
+
+    <p>_dl    throughput lost against the baseline [mag]
+
+and dew/dew_src warn when it stays above --dew-limit for --dew-hold.  This is
+a warning only, nothing closes on it.
+
 It writes its own local sources into a cond.json snapshot (atomically), for
 the web and for the COND of the other systems, and optionally pushes it
 (--push, e.g. Makak on morpheus rsyncs it to lascaux).  It does no modelling: the
@@ -46,7 +57,7 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from rtspy.core.value import ValueDouble, ValueString
+from rtspy.core.value import ValueBool, ValueDouble, ValueString
 from rtspy.core.device import Device
 from rtspy.core.constants import DeviceType
 from rtspy.core.config import DeviceConfig
@@ -56,7 +67,7 @@ _META = re.compile(r'^# - \{([A-Za-z0-9_\-]+): (.*)\}\s*$')
 _KEYS = {'CCD_NAME', 'FILTER', 'EXPTIME', 'MAGZERO', 'BGSIGMA', 'MEDIAN', 'FWHM', 'AIRMASS',
          'TEL_ALT', 'TEL_AZ', 'DATE-OBS', 'JD', 'PHQUAL', 'TELESCOP'}
 _FILTER_SHORT = {'Sloan_g': 'g', 'Sloan_r': 'r', 'Sloan_i': 'i', 'Sloan_z': 'z'}
-_FIELDS = ('zp1', 'sky', 'bgv', 'fwhm', 'X', 'alt', 'az', 'tr', 'age')
+_FIELDS = ('zp1', 'sky', 'bgv', 'fwhm', 'X', 'alt', 'az', 'tr', 'dl', 'age')
 
 
 def read_header(path: str) -> Dict[str, Any]:
@@ -185,6 +196,84 @@ class EcsvScanner:
         return self.latest
 
 
+class DewMonitor:
+    """Throughput lost by local cameras against a reference sky monitor (dew, frost).
+
+    Each new frame with a fresh reference frame (within ref_dt), not too low
+    (X <= xmax) and under a clear reference sky (tr_ref >= -clear) gives an
+    offset tr - tr_ref.  The baseline of each camera/filter starts as the mean
+    of its first n_start offsets, then follows them with a time constant tau
+    (per frame at most max_dt / tau), so slow changes such as dust are absorbed; frames
+    short of it by limit or more do not move it.  A camera/filter is in
+    warning once its shortfall has stayed >= limit for hold seconds, while its
+    newest frame is less than stale seconds old.
+    """
+
+    def __init__(self, ref, limit=0.3, hold=900.0, xmax=2.5, clear=0.3, tau=7 * 86400.0,
+                 ref_dt=600.0, max_dt=600.0, stale=3600.0, n_start=30, state=''):
+        self.ref, self.limit, self.hold, self.xmax, self.clear = ref, limit, hold, xmax, clear
+        self.tau, self.ref_dt, self.max_dt, self.stale, self.state = tau, ref_dt, max_dt, stale, state
+        self.n_start = n_start
+        self.base: Dict[str, Dict[str, float]] = {}   # key -> off, t (last frame), n
+        self.since: Dict[str, float] = {}             # key -> first frame of the current shortfall
+        self.last: Dict[str, float] = {}              # key -> last frame processed
+        self.saved = 0.0
+        if state and os.path.exists(state):
+            try:
+                with open(state) as f:
+                    self.base = json.load(f)
+            except (OSError, ValueError) as e:
+                logging.warning(f'COND: dew baseline {state}: {e}')
+
+    def save(self, now):
+        if not self.state or now - self.saved < 600:
+            return
+        d = os.path.dirname(os.path.abspath(self.state))
+        os.makedirs(d, exist_ok=True)
+        with tempfile.NamedTemporaryFile('w', dir=d, delete=False, suffix='.tmp') as f:
+            json.dump(self.base, f, indent=1)
+        os.replace(f.name, self.state)
+        self.saved = now
+
+    def frame(self, key, c, ref):
+        """Shortfall [mag] of a new frame c against the baseline, nan if not comparable."""
+        tr, X = c.get('tr', math.nan), c.get('X', math.nan)
+        if (key == self.ref or ref is None or math.isnan(tr) or not X <= self.xmax
+                or abs(c['tend'] - ref['tend']) > self.ref_dt
+                or ref.get('tr') is None or not ref['tr'] >= -self.clear):
+            return math.nan
+        off = tr - ref['tr']
+        b = self.base.get(key)
+        if b is None:
+            self.base[key] = dict(off=off, t=c['tend'], n=1)
+            logging.info(f'COND: dew baseline of {key} starts at {off:+.2f}')
+            return 0.0
+        dl = b['off'] - off
+        if dl < self.limit:
+            b['n'] += 1
+            w = max(1 / b['n'] if b['n'] <= self.n_start else 0.0,
+                    min(c['tend'] - b['t'], self.max_dt) / self.tau)
+            b['off'] += w * (min(off, b['off'] + self.limit) - b['off'])
+            b['t'] = c['tend']
+        return dl
+
+    def update(self, local, ref, now):
+        """Fills c['dl'] of the local frames; returns the camera/filters in warning."""
+        warn = []
+        for key, c in local.items():
+            if c['tend'] > self.last.get(key, 0):
+                self.last[key] = c['tend']
+                c['dl'] = self.frame(key, c, ref)
+                if c['dl'] >= self.limit:
+                    self.since.setdefault(key, c['tend'])
+                elif not math.isnan(c['dl']):
+                    self.since.pop(key, None)
+            if key in self.since and c['tend'] - self.since[key] >= self.hold and now - c['tend'] <= self.stale:
+                warn.append(key)
+        self.save(now)
+        return warn
+
+
 def fetch_snapshot(url: str, timeout: float = 5.0) -> Dict[str, Dict[str, Any]]:
     with urllib.request.urlopen(url, timeout=timeout) as r:
         return json.loads(r.read().decode()).get('sources', {})
@@ -208,7 +297,9 @@ class Cond(Device, DeviceConfig):
     # outranks --config files, so any non-None default would override the file.
     # Hence default=None everywhere and the real defaults applied here.
     DEFAULTS = dict(ecsv_dir='~/phdb-rt', ecsv_date_fmt='%y/%m%d', camera='', camera_name=None, zpref='',
-                    show='', remote='', snapshot='', push='', push_interval=30.0, poll=10.0, max_age=3600.0)
+                    show='', remote='', snapshot='', push='', push_interval=30.0, poll=10.0, max_age=3600.0,
+                    dew_ref='MK/N', dew_limit=0.3, dew_hold=900.0, dew_xmax=2.5, dew_clear=0.3,
+                    dew_tau=7.0, dew_state='~/.local/state/cond-dew.json')
 
     def setup_config(self, config):
         opt = lambda name, help, **kw: config.add_argument(name, default=None, help=help, section='cond', **kw)
@@ -225,6 +316,13 @@ class Cond(Device, DeviceConfig):
         opt('--push-interval', 'minimum time between pushes [s] (30)', type=float)
         opt('--poll', 'poll interval [s] (10)', type=float)
         opt('--max-age', 'older sources are not published [s] (3600)', type=float)
+        opt('--dew-ref', "sky monitor the throughput is compared with ('MK/N'; '' = no dew check)")
+        opt('--dew-limit', 'throughput loss that counts as dew [mag] (0.3)', type=float)
+        opt('--dew-hold', 'how long the loss must last before the warning [s] (900)', type=float)
+        opt('--dew-xmax', 'frames above this airmass are not compared (2.5)', type=float)
+        opt('--dew-clear', 'only under a reference sky clearer than -this [mag] (0.3)', type=float)
+        opt('--dew-tau', 'time constant of the baseline, slow changes such as dust [days] (7)', type=float)
+        opt('--dew-state', 'file keeping the baselines (~/.local/state/cond-dew.json)')
 
     def __init__(self, device_name='COND', port=0):
         super().__init__(device_name, DeviceType.SENSOR, port)
@@ -255,6 +353,14 @@ class Cond(Device, DeviceConfig):
         self.transp = ValueDouble('transp', 'freshest transparency over shown sources [mag]', write_to_fits=True)
         self.transp_src = ValueString('transp_src', 'source of transp', write_to_fits=True)
         self.last_file = ValueString('last_file', 'newest local frame used', write_to_fits=False)
+        self.dew_mon = None
+        if config.get('dew_ref'):
+            self.dew_mon = DewMonitor(config['dew_ref'], config['dew_limit'], config['dew_hold'],
+                                      config['dew_xmax'], config['dew_clear'], config['dew_tau'] * 86400,
+                                      state=os.path.expanduser(config.get('dew_state') or ''))
+        self.dew = ValueBool('dew', 'throughput lost against the sky monitor (dew?), warning only',
+                             write_to_fits=True)
+        self.dew_src = ValueString('dew_src', 'camera/filters losing throughput', write_to_fits=False)
         logging.info(f'COND: cameras {list(self.scanner.cameras)}, showing {list(self.vals)}, remotes {self.remotes}')
 
     def start(self):
@@ -291,11 +397,6 @@ class Cond(Device, DeviceConfig):
     def update(self, now=None):
         now = now or time.time()
         local = dict(self.scanner.scan(now))
-        if self.snapshot and local:
-            write_snapshot(self.snapshot, local, os.uname().nodename)
-            newest = max(c['tend'] for c in local.values())
-            if self.push and newest != self.pushed[1] and now - self.pushed[0] >= self.push_interval:
-                self._push(now, newest)
         sources = {}
         for url in self.remotes:
             try:
@@ -306,6 +407,21 @@ class Cond(Device, DeviceConfig):
                 if url not in self.remote_err:           # log the change, not every poll
                     logging.warning(f'COND: {url}: {e}')
                 self.remote_err[url] = str(e)
+        if self.dew_mon:
+            warn = self.dew_mon.update(local, sources.get(self.dew_mon.ref, local.get(self.dew_mon.ref)), now)
+            if bool(warn) != bool(self.dew.value):
+                if warn:
+                    logging.warning(f'COND: throughput lost against {self.dew_mon.ref} (dew?): ' + ', '.join(
+                        f"{k} {local[k]['dl']:.2f} mag" for k in warn))
+                else:
+                    logging.info('COND: throughput back, dew warning off')
+            self.dew.value = bool(warn)
+            self.dew_src.value = ','.join(warn)
+        if self.snapshot and local:
+            write_snapshot(self.snapshot, local, os.uname().nodename)
+            newest = max(c['tend'] for c in local.values())
+            if self.push and newest != self.pushed[1] and now - self.pushed[0] >= self.push_interval:
+                self._push(now, newest)
         sources.update(local)          # local frames win over a stale remote copy
         best = None
         for key, vals in self.vals.items():
