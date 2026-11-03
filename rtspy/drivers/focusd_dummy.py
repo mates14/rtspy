@@ -42,6 +42,7 @@ class DummyFocuser(Focusd):
     def __init__(self, device_name="F0", port=0):
         """Initialize dummy focuser."""
         super().__init__(device_name, port)
+        self.mark_essential('FOC_POS')
         
         # Set focuser type
         self.focuser_type = "Dummy"

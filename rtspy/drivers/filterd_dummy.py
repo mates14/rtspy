@@ -28,6 +28,7 @@ class DummyFilter(Filterd):
         """Initialize the dummy filter wheel."""
 
         super().__init__(device_name, port)
+        self.mark_essential('filter')
 
         # Current filter position
         self.filter_num = 0

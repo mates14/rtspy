@@ -123,6 +123,7 @@ class SerialCommunicator:
         self.connected = False
         self.status_callback = None
         self.connect_callback = None
+        self.fw_version = ''  # VER reply, '' if the firmware has no VER
 
         # Threading
         self.running = False
@@ -176,6 +177,11 @@ class SerialCommunicator:
                 response = self._exchange("ID", True)
                 if response != "RPI_PICO_SPECTRAL_AVCR":
                     logging.warning(f"Unknown device ID: {response}")
+
+                # Firmware version. Builds before VER ignore unknown
+                # commands silently, so no reply means old firmware and
+                # nothing arrives late to shift later replies.
+                self.fw_version = self._exchange("VER", True, timeout=1.0)
 
                 self.connected = True
                 return True
@@ -370,6 +376,8 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
         """Initialize OVIS multi-function device."""
         # Initialize as a filter wheel device type (we could also use FOCUS or custom)
         super().__init__(device_name, DeviceType.FW, port)
+        # first in the value list (filter and FOC_POS are created later)
+        self.mark_essential('filter', 'FOC_POS', 'NEON')
 
         # Hardware configuration (will be set by apply_config)
         self.device_file = None
@@ -395,8 +403,10 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
         self._last_home_reply = {}  # 'filter'/'focuser' -> firmware reply to HOM
 
         # OVIS-specific values (from filterd_ovis.py)
-        self.m0pos = ValueInteger("M0POS", "[int] focuser motor position", write_to_fits=True)
-        self.m1pos = ValueInteger("M1POS", "[int] filter motor position", write_to_fits=True)
+        self.m0pos = ValueInteger("M0POS", "[int] focuser motor position", write_to_fits=True,
+                                 flags=ValueFlags.DEBUG)
+        self.m1pos = ValueInteger("M1POS", "[int] filter motor position", write_to_fits=True,
+                                 flags=ValueFlags.DEBUG)
 
         # Written into every frame for the automated reduction; the image
         # writer also adds NEON.CHANGED = T if it changed during the exposure
@@ -409,12 +419,12 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
         self.neon.add_sel_val("on")
 
         # Filter position values (hardware supports positions 0-5)
-        self.f0pos = ValueInteger("F0POS", "[int] filter 0 position", write_to_fits=False, writable=True, initial=2000)
-        self.f1pos = ValueInteger("F1POS", "[int] filter 1 position", write_to_fits=False, writable=True, initial=54500)
-        self.f2pos = ValueInteger("F2POS", "[int] filter 2 position", write_to_fits=False, writable=True, initial=107000)
-        self.f3pos = ValueInteger("F3POS", "[int] filter 3 position", write_to_fits=False, writable=True, initial=159500)
-        self.f4pos = ValueInteger("F4POS", "[int] filter 4 position", write_to_fits=False, writable=True, initial=212000)
-        self.f5pos = ValueInteger("F5POS", "[int] filter 5 position (grism)", write_to_fits=False, writable=True, initial=292000)
+        self.f0pos = ValueInteger("F0POS", "[int] filter 0 position", write_to_fits=False, writable=True, flags=ValueFlags.DEBUG, initial=2000)
+        self.f1pos = ValueInteger("F1POS", "[int] filter 1 position", write_to_fits=False, writable=True, flags=ValueFlags.DEBUG, initial=54500)
+        self.f2pos = ValueInteger("F2POS", "[int] filter 2 position", write_to_fits=False, writable=True, flags=ValueFlags.DEBUG, initial=107000)
+        self.f3pos = ValueInteger("F3POS", "[int] filter 3 position", write_to_fits=False, writable=True, flags=ValueFlags.DEBUG, initial=159500)
+        self.f4pos = ValueInteger("F4POS", "[int] filter 4 position", write_to_fits=False, writable=True, flags=ValueFlags.DEBUG, initial=212000)
+        self.f5pos = ValueInteger("F5POS", "[int] filter 5 position (grism)", write_to_fits=False, writable=True, flags=ValueFlags.DEBUG, initial=292000)
 
         # Set device types for mixins
         self.focuser_type = "OVIS_FOCUSER"
@@ -494,6 +504,10 @@ class OvisMultiFunction(Device, FilterMixin, FocuserMixin):
         """Power the motors and home the filter wheel. Runs on the serial thread."""
         logging.info("Initializing OVIS multi-function device")
         self.motor_initialized = False
+
+        fw = self.serial_comm.fw_version
+        self.set_hw_version(fw or "unknown (firmware without VER)")
+        logging.info(f"OVIS firmware: {fw or 'no VER answer, older than 2026-11'}")
 
         # The controller may have been power cycled: a move that was under
         # way before will never report its end, so release it now

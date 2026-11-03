@@ -34,7 +34,7 @@ except ImportError:
 from rtspy.core.constants import ConnectionState, DeviceType
 from rtspy.core.device import Device
 from rtspy.core.config import DeviceConfig
-from rtspy.core.value import (ValueBool, ValueString, ValueInteger, ValueTime, ValueDouble, ValueRaDec)
+from rtspy.core.value import (ValueBool, ValueString, ValueInteger, ValueTime, ValueDouble, ValueRaDec, ValueFlags)
 from rtspy.core.app import App
 from rtspy.core.voevent import VoEventParser, GrbTarget
 
@@ -217,6 +217,12 @@ class GrbDaemon(Device, DeviceConfig):
     def __init__(self, device_name="GRBD", port=0):
         """Initialize GRB daemon."""
         super().__init__(device_name, DeviceType.GRB, port)
+        # first in the value list: switches, the last trigger, the GCN link
+        self.mark_essential('enabled', 'queue_name',
+                            'last_target', 'last_target_id', 'last_mission',
+                            'last_target_time', 'last_target_radec', 'last_target_errorbox',
+                            'gcn_connected', 'last_heartbeat', 'gcn_client_id',
+                            'status', 'executor_status', 'last_error', 'last_error_time')
 
         # Add thread safety for statistics
         self._stats_lock = threading.Lock()
@@ -358,14 +364,14 @@ class GrbDaemon(Device, DeviceConfig):
         self.last_error_time = ValueTime("last_error_time", "Time of last error")
 
         # === PERFORMANCE METRICS ===
-        self.processing_time_avg = ValueDouble("processing_time_avg", "Average message processing time [ms]")
-        self.database_time_avg = ValueDouble("database_time_avg", "Average database operation time [ms]")
-        self.gcn_queue_size = ValueInteger("gcn_queue_size", "Current GCN message queue size")
+        self.processing_time_avg = ValueDouble("processing_time_avg", "Average message processing time [ms]", flags=ValueFlags.DEBUG)
+        self.database_time_avg = ValueDouble("database_time_avg", "Average database operation time [ms]", flags=ValueFlags.DEBUG)
+        self.gcn_queue_size = ValueInteger("gcn_queue_size", "Current GCN message queue size", flags=ValueFlags.DEBUG)
 
         # === OPERATIONAL STATUS ===
         self.status_message = ValueString("status", "Current daemon status")
-        self.uptime_hours = ValueDouble("uptime_hours", "Daemon uptime in hours")
-        self.topics_subscribed = ValueInteger("topics_subscribed", "Number of GCN topics subscribed", initial=0)
+        self.uptime_hours = ValueDouble("uptime_hours", "Daemon uptime in hours", flags=ValueFlags.DEBUG)
+        self.topics_subscribed = ValueInteger("topics_subscribed", "Number of GCN topics subscribed", initial=0, flags=ValueFlags.DEBUG)
 
         # Initialize daily counters
         self._reset_daily_counters()

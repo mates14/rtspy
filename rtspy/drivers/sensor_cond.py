@@ -361,6 +361,9 @@ class Cond(Device, DeviceConfig):
 
     def __init__(self, device_name='COND', port=0):
         super().__init__(device_name, DeviceType.SENSOR, port)
+        # first in the value list (all created in apply_config)
+        self.mark_essential('dew', 'k_r', 'k_r_src', 'sky_r', 'sky_r_src',
+                            'transp', 'transp_src', 'dew_remote')
         self.vals: Dict[str, Dict[str, ValueDouble]] = {}
         self.remote_err: Dict[str, str] = {}
         self.running = False

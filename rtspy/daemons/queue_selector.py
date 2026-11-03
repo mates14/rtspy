@@ -146,6 +146,7 @@ class QueueSelector(Device, DeviceConfig):
     def __init__(self, device_name="SEL", device_type=DeviceType.SELECTOR, port=0):
         """Initialize the queue selector."""
         super().__init__(device_name, device_type, port)
+        self.mark_essential('enabled')
 
         # RTS2 values for monitoring and control
         self.enabled = ValueBool("enabled", "Enable/disable selector daemon", writable=True, initial=True)
