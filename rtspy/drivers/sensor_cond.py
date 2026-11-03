@@ -28,8 +28,9 @@ slow changes of the zeropoints are absorbed; the shortfall is
 and dew/dew_src warn when it stays above --dew-limit for --dew-hold.  This is
 a warning only, nothing closes on it.
 
-It writes its own local sources into a cond.json snapshot (atomically), for
-the web and for the COND of the other systems, and optionally pushes it
+It writes its own local sources and the dew warning into a cond.json
+snapshot (atomically), for the web and for the COND of the other systems,
+and optionally pushes it
 (--push, e.g. Makak on morpheus rsyncs it to lascaux).  It does no modelling: the
 exposure-time calculation and the transfer between cameras/filters belong to
 the consumers (asarina snrexp).
@@ -285,13 +286,16 @@ def fetch_snapshot(url: str, timeout: float = 5.0) -> Dict[str, Dict[str, Any]]:
         return json.loads(r.read().decode()).get('sources', {})
 
 
-def write_snapshot(path: str, sources: Dict[str, Dict[str, Any]], host: str):
+def write_snapshot(path: str, sources: Dict[str, Dict[str, Any]], host: str, dew: Optional[Dict[str, Any]] = None):
     d = os.path.dirname(os.path.abspath(path))
     os.makedirs(d, exist_ok=True)
     clean = {k: {f: (None if isinstance(v, float) and math.isnan(v) else v) for f, v in s.items()}
              for k, s in sources.items()}
     with tempfile.NamedTemporaryFile('w', dir=d, delete=False, suffix='.tmp') as f:
-        json.dump(dict(host=host, written=time.time(), sources=clean), f, indent=1)
+        snap = dict(host=host, written=time.time(), sources=clean)
+        if dew is not None:
+            snap['dew'] = dew           # the warning, for the other systems' monitor pages
+        json.dump(snap, f, indent=1)
     os.chmod(f.name, 0o644)
     os.replace(f.name, path)
 
@@ -424,7 +428,8 @@ class Cond(Device, DeviceConfig):
             self.dew.value = bool(warn)
             self.dew_src.value = ','.join(warn)
         if self.snapshot and local:
-            write_snapshot(self.snapshot, local, os.uname().nodename)
+            write_snapshot(self.snapshot, local, os.uname().nodename,
+                           dict(on=bool(self.dew.value), src=self.dew_src.value) if self.dew_mon else None)
             newest = max(c['tend'] for c in local.values())
             if self.push and newest != self.pushed[1] and now - self.pushed[0] >= self.push_interval:
                 self._push(now, newest)
