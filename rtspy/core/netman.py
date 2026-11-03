@@ -1014,7 +1014,7 @@ class NetworkManager:
 
     def _send_value(self, conn, value):
         """Send a value to a connection."""
-        msg = f"V {value.name} {value.get_string_value()}\n"
+        msg = f"V {value.name} {value.get_wire_value()}\n"
         conn.send(msg)
 
     def _handle_send_value(self, value, conn_id):
@@ -1541,7 +1541,7 @@ class NetworkManager:
         # Send raw value message to each connection directly
         for conn in auth_conns.values():
             try:
-                msg = f"V {value.name} {value.get_string_value()}\n"
+                msg = f"V {value.name} {value.get_wire_value()}\n"
                 conn.send(msg)
             except Exception as e:
                 logging.error(f"Error sending immediate value to {conn.name}: {e}")

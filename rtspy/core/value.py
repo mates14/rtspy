@@ -245,6 +245,10 @@ class Value(Generic[T]):
         """Get value as string for network transmission."""
         return str(self._value) if self._value is not None else ""
 
+    def get_wire_value(self) -> str:
+        """The value as it goes in a V line."""
+        return self.get_string_value()
+
     def is_null(self) -> bool:
         """Check if value is null."""
         return self._value is None
@@ -339,7 +343,7 @@ class Value(Generic[T]):
 
     def send(self, conn) -> None:
         """Send value through connection."""
-        conn.send_value_raw(self.name, self.get_string_value())
+        conn.send_value_raw(self.name, self.get_wire_value())
 
     def __str__(self) -> str:
         return f"{self.name}={self.get_string_value()}"
@@ -363,6 +367,14 @@ class ValueString(Value[str]):
     def is_null(self) -> bool:
         """Check if string is empty."""
         return not bool(self._value)
+
+    def get_wire_value(self) -> str:
+        # Quoted, as C++ sends it: unquoted, a string with a space (or an
+        # empty one) fails the C++ parser, which then drops the update.
+        # C++ takes everything up to the last quote, so inner quotes are
+        # fine; a line break would end the protocol line.
+        s = self.get_string_value().replace('\r', ' ').replace('\n', ' ')
+        return f'"{s}"'
 
 
 class ValueDouble(Value[float]):
