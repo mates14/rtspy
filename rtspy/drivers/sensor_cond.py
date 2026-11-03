@@ -26,8 +26,10 @@ slow changes of the zeropoints are absorbed; the shortfall is
     <p>_dl    throughput lost against the baseline [mag]
 
 and dew/dew_src warn when it stays above --dew-limit for --dew-hold.  This is
-a warning only, nothing closes on it.  dew_remote/dew_remote_src carry the
-warnings of the other systems, from their snapshots.
+a warning only, nothing closes on it.  dew_age is the age of the last frame
+actually compared (a fresh reference, low enough, clear sky), so that a
+missing comparison is not read as "no dew".  dew_remote, dew_remote_src and
+dew_remote_age carry the same of the other systems, from their snapshots.
 
 With --snrexp (rts2ng's python/rts2/snrexp.py) it also publishes the site's
 conditions for the monitor pages, best effort from all sources:
@@ -233,6 +235,7 @@ class DewMonitor:
         self.base: Dict[str, Dict[str, float]] = {}   # key -> off, t (last frame), n
         self.since: Dict[str, float] = {}             # key -> first frame of the current shortfall
         self.last: Dict[str, float] = {}              # key -> last frame processed
+        self.compared = 0.0                           # end of the last frame compared
         self.saved = 0.0
         if state and os.path.exists(state):
             try:
@@ -280,6 +283,8 @@ class DewMonitor:
             if c['tend'] > self.last.get(key, 0):
                 self.last[key] = c['tend']
                 c['dl'] = self.frame(key, c, ref)
+                if not math.isnan(c['dl']):
+                    self.compared = max(self.compared, c['tend'])
                 if c['dl'] >= self.limit:
                     self.since.setdefault(key, c['tend'])
                 elif not math.isnan(c['dl']):
@@ -395,6 +400,9 @@ class Cond(Device, DeviceConfig):
                                     write_to_fits=False)
         self.dew_remote_src = ValueString('dew_remote_src', "'host: camera/filters' in warning, "
                                           "'n/a' if no remote checks for dew", write_to_fits=False)
+        self.dew_age = ValueDouble('dew_age', 'seconds since the last frame compared for dew', write_to_fits=False)
+        self.dew_remote_age = ValueDouble('dew_remote_age', 'seconds since the last frame another system '
+                                          'compared for dew', write_to_fits=False)
         self.snrexp = load_snrexp(config['snrexp']) if config.get('snrexp') else None
         self.telescope = self.snrexp.telescope_of(self.scanner.cameras) if self.snrexp else None
         self.site = {'sky_r': ValueDouble('sky_r', 'sky at the zenith in r, best effort [mag/arcsec2]', write_to_fits=False),
@@ -462,7 +470,8 @@ class Cond(Device, DeviceConfig):
             self.dew_src.value = ','.join(warn)
         if self.snapshot and local:
             write_snapshot(self.snapshot, local, os.uname().nodename,
-                           dict(on=bool(self.dew.value), src=self.dew_src.value) if self.dew_mon else None)
+                           dict(on=bool(self.dew.value), src=self.dew_src.value,
+                                compared=self.dew_mon.compared or None) if self.dew_mon else None)
             newest = max(c['tend'] for c in local.values())
             if self.push and newest != self.pushed[1] and now - self.pushed[0] >= self.push_interval:
                 self._push(now, newest)
@@ -484,6 +493,9 @@ class Cond(Device, DeviceConfig):
         on = [f"{host}: {d.get('src', '')}" for host, d in remote_dew if d.get('on')]
         self.dew_remote.value = bool(on)
         self.dew_remote_src.value = '; '.join(on) if remote_dew else 'n/a'
+        seen = [d['compared'] for _, d in remote_dew if d.get('compared')]
+        self.dew_remote_age.value = now - max(seen) if seen else math.nan
+        self.dew_age.value = now - self.dew_mon.compared if self.dew_mon and self.dew_mon.compared else math.nan
         if self.snrexp:
             try:
                 site = self.snrexp.site_conditions(self.telescope, sources, now)
