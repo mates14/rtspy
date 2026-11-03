@@ -301,13 +301,19 @@ class ProtocolCommands:
 
     def handle_value(self, conn, params):
         """Handle 'V' (value) command."""
-        parts = params.split(maxsplit=2)
+        parts = params.split(maxsplit=1)
         if len(parts) < 2:
             conn.command_in_progress = False
             return False
 
         value_name = parts[0]
-        value_data = parts[1] if len(parts) > 1 else ""
+        # The rest of the line: a quoted string (C++ and rtspy send strings
+        # as "...") is everything up to the last quote, as C++ reads it;
+        # otherwise all of it, so that two-part values (RA DEC) stay whole
+        value_data = parts[1].strip()
+        if value_data.startswith('"'):
+            end = value_data.rfind('"')
+            value_data = value_data[1:end] if end > 0 else value_data[1:]
 
         # Check if any component has registered interest in this value
         if hasattr(conn,'remote_device_name'):
