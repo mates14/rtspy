@@ -26,14 +26,23 @@ slow changes of the zeropoints are absorbed; the shortfall is
     <p>_dl    throughput lost against the baseline [mag]
 
 and dew/dew_src warn when it stays above --dew-limit for --dew-hold.  This is
-a warning only, nothing closes on it.
+a warning only, nothing closes on it.  dew_remote/dew_remote_src carry the
+warnings of the other systems, from their snapshots.
+
+With --snrexp (rts2ng's python/rts2/snrexp.py) it also publishes the site's
+conditions for the monitor pages, best effort from all sources:
+
+    sky_r, sky_i   sky at the zenith [mag/"2]: sky model + measured departure
+    k_r            extinction in r [mag/airmass]: D50, else Makak, else SBT
+
+each with a *_src value naming the frame (or 'model').  The models are
+snrexp's, as are the exposure-time calculation and the transfer between
+cameras/filters.
 
 It writes its own local sources and the dew warning into a cond.json
 snapshot (atomically), for the web and for the COND of the other systems,
-and optionally pushes it
-(--push, e.g. Makak on morpheus rsyncs it to lascaux).  It does no modelling: the
-exposure-time calculation and the transfer between cameras/filters belong to
-the consumers (asarina snrexp).
+and optionally pushes it (--push, e.g. Makak on morpheus rsyncs it to
+lascaux).
 
 A camera is described by --camera, one entry per camera, ';'-separated:
     C1:floor=76:bgk=0.70:pix=3.12             sky from BGSIGMA: (BGSIGMA^2 - floor) / bgk
@@ -281,9 +290,19 @@ class DewMonitor:
         return warn
 
 
-def fetch_snapshot(url: str, timeout: float = 5.0) -> Dict[str, Dict[str, Any]]:
+def fetch_snapshot(url: str, timeout: float = 5.0) -> Dict[str, Any]:
+    """Another COND's cond.json: {host, written, sources, dew (if it checks for dew)}."""
     with urllib.request.urlopen(url, timeout=timeout) as r:
-        return json.loads(r.read().decode()).get('sources', {})
+        return json.loads(r.read().decode())
+
+
+def load_snrexp(path: str):
+    """rts2ng's snrexp.py (pure python) from path, for the site conditions."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('snrexp', os.path.expanduser(path))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def write_snapshot(path: str, sources: Dict[str, Dict[str, Any]], host: str, dew: Optional[Dict[str, Any]] = None):
@@ -309,7 +328,7 @@ class Cond(Device, DeviceConfig):
     DEFAULTS = dict(ecsv_dir='~/phdb-rt', ecsv_date_fmt='%y/%m%d', camera='', camera_name=None, zpref='',
                     show='', remote='', snapshot='', push='', push_interval=30.0, poll=10.0, max_age=3600.0,
                     dew_ref='MK/N', dew_limit=0.3, dew_hold=900.0, dew_xmax=2.5, dew_clear=0.3,
-                    dew_tau=7.0, dew_state='~/.local/state/cond-dew.json')
+                    dew_tau=7.0, dew_state='~/.local/state/cond-dew.json', snrexp='')
 
     def setup_config(self, config):
         opt = lambda name, help, **kw: config.add_argument(name, default=None, help=help, section='cond', **kw)
@@ -333,6 +352,7 @@ class Cond(Device, DeviceConfig):
         opt('--dew-clear', 'only under a reference sky clearer than -this [mag] (0.3)', type=float)
         opt('--dew-tau', 'time constant of the baseline, slow changes such as dust [days] (7)', type=float)
         opt('--dew-state', 'file keeping the baselines (~/.local/state/cond-dew.json)')
+        opt('--snrexp', "rts2ng's python/rts2/snrexp.py, for sky_r, sky_i and k_r ('' = none)")
 
     def __init__(self, device_name='COND', port=0):
         super().__init__(device_name, DeviceType.SENSOR, port)
@@ -371,6 +391,16 @@ class Cond(Device, DeviceConfig):
         self.dew = ValueBool('dew', 'throughput lost against the sky monitor (dew?), warning only',
                              write_to_fits=True)
         self.dew_src = ValueString('dew_src', 'camera/filters losing throughput', write_to_fits=False)
+        self.dew_remote = ValueBool('dew_remote', 'dew warning of another system (remote snapshots)',
+                                    write_to_fits=False)
+        self.dew_remote_src = ValueString('dew_remote_src', "'host: camera/filters' in warning, "
+                                          "'n/a' if no remote checks for dew", write_to_fits=False)
+        self.snrexp = load_snrexp(config['snrexp']) if config.get('snrexp') else None
+        self.telescope = self.snrexp.telescope_of(self.scanner.cameras) if self.snrexp else None
+        self.site = {'sky_r': ValueDouble('sky_r', 'sky at the zenith in r, best effort [mag/arcsec2]', write_to_fits=False),
+                     'sky_i': ValueDouble('sky_i', 'sky at the zenith in i, best effort [mag/arcsec2]', write_to_fits=False),
+                     'k_r': ValueDouble('k_r', 'extinction in r, best effort [mag/airmass]', write_to_fits=True)}
+        self.site_src = {k: ValueString(f'{k}_src', f'source of {k}', write_to_fits=False) for k in self.site}
         logging.info(f'COND: cameras {list(self.scanner.cameras)}, showing {list(self.vals)}, remotes {self.remotes}')
 
     def start(self):
@@ -407,10 +437,13 @@ class Cond(Device, DeviceConfig):
     def update(self, now=None):
         now = now or time.time()
         local = dict(self.scanner.scan(now))
-        sources = {}
+        sources, remote_dew = {}, []
         for url in self.remotes:
             try:
-                sources.update(fetch_snapshot(url))
+                snap = fetch_snapshot(url)
+                sources.update(snap.get('sources', {}))
+                if 'dew' in snap:
+                    remote_dew.append((snap.get('host', url), snap['dew']))
                 if self.remote_err.pop(url, None):
                     logging.info(f'COND: {url} reachable again')
             except Exception as e:
@@ -448,6 +481,18 @@ class Cond(Device, DeviceConfig):
         self.transp_src.value = best[0] if best else ''
         if local:
             self.last_file.value = max(local.values(), key=lambda c: c['tend'])['file']
+        on = [f"{host}: {d.get('src', '')}" for host, d in remote_dew if d.get('on')]
+        self.dew_remote.value = bool(on)
+        self.dew_remote_src.value = '; '.join(on) if remote_dew else 'n/a'
+        if self.snrexp:
+            try:
+                site = self.snrexp.site_conditions(self.telescope, sources, now)
+            except Exception as e:
+                logging.warning(f'COND: site conditions: {type(e).__name__}: {e}')
+                site = {}
+            for k, v in self.site.items():
+                v.value = site[k][0] if k in site else math.nan
+                self.site_src[k].value = site[k][1] if k in site else ''
         return sources
 
 
