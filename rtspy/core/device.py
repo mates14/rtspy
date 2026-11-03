@@ -11,7 +11,8 @@ import fcntl
 import math
 from dataclasses import dataclass
 
-from rtspy.core.value import ValueTime
+from rtspy.core.value import ValueTime, ValueString, ValueFlags
+from rtspy.core.identity import get_identity
 from rtspy.core.netman import NetworkManager
 from rtspy.core.config import DeviceConfig
 from rtspy.core.constants import DeviceType
@@ -146,6 +147,48 @@ class Device(DeviceConfig):
         self.infotime.value = time.time()
         self.uptime.value = time.time()
 
+        # Identity, right after those two (as rts2ng); DEVPREFIX so that each
+        # device's BUILD gets its own FITS key (COND.BUILD, F0.BUILD, ...)
+        ident = get_identity()
+        self.identity = ident
+        self.driver_value = ValueString("DRIVER", "driver executable",
+                                        flags=ValueFlags.DEVPREFIX)
+        self.build_value = ValueString(
+            "BUILD", "package version, or git describe for a plain build",
+            flags=ValueFlags.DEVPREFIX)
+        self.linked_value = ValueTime(
+            "LINKED", "commit time of the running code, or its install time",
+            write_to_fits=True, flags=ValueFlags.DEVPREFIX)
+        self.driver_value.value = ident.driver
+        self.build_value.value = ident.build
+        self.linked_value.value = ident.linked
+        self.sdk_version_value = None
+        self.hw_version_value = None
+
+    def set_sdk_version(self, version):
+        """Version of the vendor library/protocol the driver uses (SDK_VER).
+        Creates the value on the first call, best during device init."""
+        if self.sdk_version_value is None:
+            self.sdk_version_value = ValueString(
+                "SDK_VER", "version of the vendor library the driver uses",
+                flags=ValueFlags.DEVPREFIX)
+        self.sdk_version_value.value = str(version)
+
+    def set_hw_version(self, version):
+        """Firmware/hardware revision of the connected device (HW_VER).
+        Creates the value on the first call, best during device init."""
+        if self.hw_version_value is None:
+            self.hw_version_value = ValueString(
+                "HW_VER", "firmware/hardware revision of the connected device",
+                flags=ValueFlags.DEVPREFIX)
+        self.hw_version_value.value = str(version)
+
+    def mark_essential(self, *values):
+        """Values an operator looks for first: sent right after the identity
+        values, in the order marked. Takes Value objects or names."""
+        for v in values:
+            self.network.mark_essential(v if isinstance(v, str) else v.name)
+
     def apply_config(self, config: Dict[str, Any]):
         """
         Apply resolved configuration to device.
@@ -199,6 +242,13 @@ class Device(DeviceConfig):
         """Start the device network services."""
         # Set initial state
         logging.info(f"Device {self.device_name} started (type: {self.device_type})")
+        # same line as rts2ng daemons: grep ": build " lists them all
+        ident = self.identity
+        if ident.linked == ident.linked:
+            linked = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ident.linked))
+        else:
+            linked = "unknown"
+        logging.info(f"{ident.driver}: build {ident.build}, linked {linked}")
         if self.simulation_mode:
             logging.info("Device running in SIMULATION mode")
         self.set_state(self.STATE_IDLE, "Initializing")
@@ -430,7 +480,7 @@ class DeviceCommands:
 
             # Send all values
             with self.network._lock:
-                for value_name, value in self.network.values.items():
+                for value in self.network.ordered_values():
                     self.network._send_value(conn, value)
 
             # Send current state

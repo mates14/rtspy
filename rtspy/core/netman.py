@@ -59,8 +59,10 @@ class NetworkManager:
         # Server socket
         self.server_socket = None
 
-        # Registered values
+        # Registered values, in creation order; sent in ordered_values() order
         self.values = {}
+        # names marked essential, in marking order (see ordered_values)
+        self.essential = []
         # the connection whose X command is being applied, while the
         # device's change callbacks run (network thread only): a device may
         # answer it later instead, see defer_value_response()
@@ -650,6 +652,8 @@ class NetworkManager:
         elif msg_type == 'broadcast_value':
             value = args[0]
             self._handle_broadcast_value(value)
+        elif msg_type == 'announce_value':
+            self._handle_announce_value(args[0])
 
     def _handle_command(self, conn_id, line):
         """Handle a command from a connection."""
@@ -916,26 +920,71 @@ class NetworkManager:
             logging.error(f"Exception in _connect_to_device: {e}")
             return None
 
+    # always first, then the identity values in this order (as rts2ng)
+    SYSTEM_VALUES = ('infotime', 'uptime')
+    IDENTITY_VALUES = ('DRIVER', 'BUILD', 'LINKED', 'SDK_VER', 'HW_VER')
+
+    def ordered_values(self):
+        """
+        Values in the order clients get them (as rts2ng): infotime/uptime,
+        identity, essential (in marking order), the rest in creation order,
+        DEBUG-flagged last. Order is not part of the protocol; clients look
+        values up by name.
+        """
+        from rtspy.core.value import ValueFlags
+        with self._lock:
+            essential = {n: i for i, n in enumerate(self.essential)}
+
+            def key(item):
+                pos, value = item
+                name = value.name
+                if name in self.SYSTEM_VALUES:
+                    return (0, self.SYSTEM_VALUES.index(name))
+                if name in self.IDENTITY_VALUES:
+                    return (1, self.IDENTITY_VALUES.index(name))
+                if name in essential:
+                    return (2, essential[name])
+                if value.rts2_type & ValueFlags.DEBUG:
+                    return (4, pos)
+                return (3, pos)
+
+            return [v for _, v in sorted(enumerate(self.values.values()), key=key)]
+
+    def mark_essential(self, name):
+        with self._lock:
+            if name not in self.essential:
+                self.essential.append(name)
+
+    def _send_value_meta(self, conn, value):
+        """E (and F for selections) and the current V of one value."""
+        msg = f"E {int(value.rts2_type)} \"{value.name}\" \"{value.description}\"\n"
+        conn.send(msg)
+
+        # Handle selection values specially
+        from rtspy.core.value import ValueSelection
+        if isinstance(value, ValueSelection):
+            # First send empty selection to clear any existing values
+            conn.send(f"F \"{value.name}\"\n")
+
+            # Then send each selection option
+            for sel_val in value._selection_values:
+                conn.send(f"F \"{value.name}\" \"{sel_val}\"\n")
+
+        # Also send current value
+        self._send_value(conn, value)
+
     def _send_meta_info(self, conn):
         """Send metadata information about all values."""
         with self._lock:
-            for value in self.values.values():
-                # Send detailed metadata using the E protocol command
-                msg = f"E {int(value.rts2_type)} \"{value.name}\" \"{value.description}\"\n"
-                conn.send(msg)
+            for value in self.ordered_values():
+                self._send_value_meta(conn, value)
 
-                # Handle selection values specially
-                from rtspy.core.value import ValueSelection
-                if isinstance(value, ValueSelection):
-                    # First send empty selection to clear any existing values
-                    conn.send(f"F \"{value.name}\"\n")
-
-                    # Then send each selection option
-                    for sel_val in value._selection_values:
-                        conn.send(f"F \"{value.name}\" \"{sel_val}\"\n")
-
-                # Also send current value
-                self._send_value(conn, value)
+    def _handle_announce_value(self, value):
+        """A value created after clients connected: send them its metadata."""
+        if self.values.get(value.name) is not value:
+            return
+        for conn in self.connection_manager.get_connections_by_type('client').values():
+            self._send_value_meta(conn, value)
 
     def _handle_registration_result(self, conn, success, code, msg):
         """Handle result from registration command."""
@@ -987,6 +1036,9 @@ class NetworkManager:
         """Register a value for network distribution."""
         with self._lock:
             self.values[value.name] = value
+        # clients already connected got the dump without it
+        if self.running:
+            self.put_message(('announce_value', value))
 
     def unregister_value(self, value_name):
         """Unregister a value."""
@@ -1225,7 +1277,7 @@ class NetworkManager:
     def _send_info(self, conn):
         """Send metadata information about all values."""
         with self._lock:
-            for value in self.values.values():
+            for value in self.ordered_values():
                 # send current values
                 self._send_value(conn, value)
 

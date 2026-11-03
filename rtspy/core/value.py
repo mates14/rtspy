@@ -36,7 +36,11 @@ class ValueType(IntFlag):
 
 class ValueFlags(IntFlag):
     """Flags for value attributes."""
+    # hidden by default in rts2-mon (classic RTS2_VALUE_DEBUG); display only
+    DEBUG = 0x0000_0080
     FITS = 0x0000_0100
+    # FITS key gets the device name prefix, e.g. COND.BUILD
+    DEVPREFIX = 0x0000_0200
     WRITABLE = 0x0200_0000
     NOTNULL = 0x0800_0000
     AUTOSAVE = 0x0080_0000
@@ -389,7 +393,8 @@ class ValueTime(ValueDouble):
     def __init__(self, name, description, write_to_fits=False, flags=0, initial=None, writable: bool = False):
         # Use TIME type (0x3) instead of DOUBLE type (0x4)
         super().__init__(name, description, write_to_fits, flags, initial=initial, writable=writable)
-        self.rts2_type = ValueType['TIME']
+        # swap the base type, keep the flags (FITS, WRITABLE, ...)
+        self.rts2_type = (self.rts2_type & ~ValueType.MASK) | ValueType.TIME
 
 class ValueInteger(Value[int]):
     """Integer value."""
