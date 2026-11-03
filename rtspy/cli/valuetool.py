@@ -21,6 +21,9 @@ import logging
 import argparse
 import threading
 import os
+import csv
+import io
+import shlex
 from typing import Optional, Any, List, Tuple, Dict
 
 from rtspy.core.value import ValueString
@@ -171,9 +174,9 @@ def main():
     mode_group.add_argument('-w', '--write', metavar='DEVICE.VALUE=NEWVAL',
                            help='Write mode: set device.value=new_value')
     mode_group.add_argument('-R', '--read-csv', metavar='DEVICE.VALUE,DEVICE.VALUE,...',
-                           help='Read mode: comma-separated output')
+                           help='Read mode: comma-separated output (CSV quoting)')
     mode_group.add_argument('-r', '--read-shell', metavar='DEVICE.VALUE,DEVICE.VALUE,...',
-                           help='Read mode: shell eval format')
+                           help='Read mode: NAME=value lines, shell-quoted, for eval')
 
     # Register device-specific options
     app.register_device_options(RTS2ValueClient)
@@ -219,10 +222,11 @@ def main():
                 sys.exit(1)
 
             results = client.collect_values(pairs)
-            output = []
-            for result in results:
-                output.append(result if result is not None else "-")
-            print(",".join(output))
+            # CSV quoting: a value with a comma or quote comes as "..."
+            out = io.StringIO()
+            csv.writer(out, lineterminator='').writerow(
+                [result if result is not None else "-" for result in results])
+            print(out.getvalue())
 
         elif args.read_shell:
             # Read mode: shell eval format
@@ -234,10 +238,9 @@ def main():
 
             results = client.collect_values(pairs)
             for (device, value), result in zip(pairs, results):
-                if result is not None:
-                    print(f"{value}={result}")
-                else:
-                    print(f"{value}=-")
+                # shell-quoted where needed, so eval gets the whole string
+                # and expands nothing in it
+                print(f"{value}={shlex.quote(result) if result is not None else '-'}")
 
     except KeyboardInterrupt:
         print("Interrupted", file=sys.stderr)
