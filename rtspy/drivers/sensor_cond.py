@@ -35,9 +35,12 @@ exposure-time calculation and the transfer between cameras/filters belong to
 the consumers (asarina snrexp).
 
 A camera is described by --camera, one entry per camera, ';'-separated:
-    C1:floor=76:bgk=0.70:pix=3.12             sky from BGSIGMA
-    MK:sky=median:pix=56.8:alt=65.8:az=359.3  sky from MEDIAN (bias-subtracted); a fixed
+    C1:floor=76:bgk=0.70:pix=3.12             sky from BGSIGMA: (BGSIGMA^2 - floor) / bgk
+    MK:rn=60.7:dk=268:dkt=3.87:bgk=9.2:pix=56.8:alt=65.8:az=359.3
+                                              an uncooled camera: floor = rn^2 + dk 2^(CCD_TEMP/dkt)
+                                              at the dark-model chip temperature; a fixed
                                               camera's pointing (its headers have none)
+    XX:sky=median:pix=...                     sky from MEDIAN (only where the level is trusted)
 and a reference zeropoint per camera/filter by --zpref:
     C1/Sloan_r=18.38:0.16,C1/Sloan_i=17.53:0.12   (zp1 at airmass 1 : extinction)
 """
@@ -65,7 +68,7 @@ from rtspy.core.app import App
 
 _META = re.compile(r'^# - \{([A-Za-z0-9_\-]+): (.*)\}\s*$')
 _KEYS = {'CCD_NAME', 'FILTER', 'EXPTIME', 'MAGZERO', 'BGSIGMA', 'MEDIAN', 'FWHM', 'AIRMASS',
-         'TEL_ALT', 'TEL_AZ', 'DATE-OBS', 'JD', 'PHQUAL', 'TELESCOP'}
+         'TEL_ALT', 'TEL_AZ', 'DATE-OBS', 'JD', 'PHQUAL', 'TELESCOP', 'CCD_TEMP'}
 _FILTER_SHORT = {'Sloan_g': 'g', 'Sloan_r': 'r', 'Sloan_i': 'i', 'Sloan_z': 'z'}
 _FIELDS = ('zp1', 'sky', 'bgv', 'fwhm', 'X', 'alt', 'az', 'tr', 'dl', 'age')
 
@@ -142,7 +145,10 @@ def conditions(h: Dict[str, Any], cam: Dict[str, Any], zpref: Optional[tuple]) -
         rate = h.get('MEDIAN', math.nan) / t                       # ADU/s/px
         bgv = math.nan
     else:
-        bgv = max(h.get('BGSIGMA', math.nan)**2 - cam['floor'], 0.0) / t
+        floor = cam['floor']
+        if 'dk' in cam:     # uncooled: read noise plus dark current at the fitted chip temperature
+            floor += cam.get('rn', 0.0)**2 + cam['dk'] * 2**(h.get('CCD_TEMP', math.nan) / cam['dkt'])
+        bgv = max(h.get('BGSIGMA', math.nan)**2 - floor, 0.0) / t
         rate = bgv / cam['bgk']
     sky = zp1 - 2.5 * math.log10(rate / cam['pix']**2) if rate > 0 else math.nan
     alt, az = cam.get('alt', h.get('TEL_ALT', math.nan)), cam.get('az')
