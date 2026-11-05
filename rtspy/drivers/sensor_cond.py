@@ -80,7 +80,7 @@ from rtspy.core.app import App
 
 _META = re.compile(r'^# - \{([A-Za-z0-9_\-]+): (.*)\}\s*$')
 _KEYS = {'CCD_NAME', 'FILTER', 'EXPTIME', 'MAGZERO', 'BGSIGMA', 'MEDIAN', 'FWHM', 'AIRMASS',
-         'TEL_ALT', 'TEL_AZ', 'DATE-OBS', 'JD', 'PHQUAL', 'TELESCOP', 'CCD_TEMP'}
+         'TEL_ALT', 'TEL_AZ', 'DATE-OBS', 'JD', 'PHQUAL', 'TELESCOP', 'CCD_TEMP', 'ACCNUM'}
 _FILTER_SHORT = {'Sloan_g': 'g', 'Sloan_r': 'r', 'Sloan_i': 'i', 'Sloan_z': 'z'}
 _FIELDS = ('zp1', 'sky', 'bgv', 'fwhm', 'X', 'alt', 'az', 'tr', 'dl', 'age')
 
@@ -153,7 +153,12 @@ def conditions(h: Dict[str, Any], cam: Dict[str, Any], zpref: Optional[tuple]) -
     if h.get('PHQUAL', 'OK') != 'OK' or not t or t < 1 or 'MAGZERO' not in h:
         return None
     zp1 = h['MAGZERO'] - 2.5 * math.log10(t)
-    if cam['sky'] == 'median':
+    if h.get('ACCNUM', 1) > 1:
+        # a sum of ACCNUM scans (Andor accumulate): its noise and level are not those of
+        # one frame (read noise of every scan, another readout mode), so no sky from it;
+        # its zeropoint holds
+        rate = bgv = math.nan
+    elif cam['sky'] == 'median':
         rate = h.get('MEDIAN', math.nan) / t                       # ADU/s/px
         bgv = math.nan
     else:
