@@ -58,18 +58,26 @@ The selector handles automatic calibrations based on RTS2 system state using pro
   - **DUSK** (`CentralState.ON + CentralState.DUSK`): System transitioning from day to night  
   - **DAWN** (`CentralState.ON + CentralState.DAWN`): System transitioning from night to day
   
-- **Calibration Script**: Single script (target ID 2) handles both flats and darks
-  - Script internally decides between flats/darks based on actual light conditions
-  - Runs automatically when system state indicates twilight periods
+- **Flats** (target ID 2) only while the Sun is inside the flat window,
+  `flat_sun_min` .. `flat_sun_max` in `/etc/rts2/rts2.ini` `[observatory]`
+  (or `--flat-sun-min`/`--flat-sun-max`); **darks** (target ID 1) for the rest
+  of dusk and dawn. The Sun's altitude is computed in the selector from the
+  site's `longitude`/`latitude` there (centrald's `sun_alt` is only as fresh
+  as its last info, minutes old). [JS 2026-11-07]
+  - Into the window: `now 2` - darks are interrupted, flats cannot wait
+  - Out of it while flats run: `next 1` - the flat script finishes first (in the
+    morning it closes the dome and takes its own darks), then the darks follow
+  - No window or no site coordinates: flats for the whole of dusk and dawn, as before
+  - The flat script itself still decides from the sky level when to expose
   
 - **Science Observations**: During `ON + NIGHT + good weather`
 
 - **Priority**: Calibrations override queue execution during twilight system states
 
 **System State Examples**:
-- `ON_DUSK`: Calibration script active
+- `ON_DUSK`: Darks, flats inside the flat window
 - `ON_NIGHT`: Science observations from scheduler queue  
-- `ON_DAWN`: Calibration script active
+- `ON_DAWN`: Darks, flats inside the flat window
 - `STANDBY_DAY`: System in standby, no observations
 - `HARD_OFF_*`: System disabled, no observations
 - `*_BAD_WEATHER`: Informational only - centrald automatically changes ON→STANDBY when weather is bad
@@ -161,7 +169,8 @@ name = stars           # → config.get('db_name')
 username = observer    # → config.get('db_user')
 ```
 
-**Calibration timing** is handled automatically by RTS2 system states - no configuration needed.
+**Calibration timing**: dusk and dawn come from the RTS2 system states; within them the flat
+window from `rts2.ini` `[observatory]` (`flat_sun_min`, `flat_sun_max`, `longitude`, `latitude`).
 
 ### Configuration Options
 
@@ -207,6 +216,8 @@ The selector provides RTS2 monitoring values and control parameters:
 - `next_target`: Name of next target to observe
 - `system_state`: Current RTS2 system state description (ON_NIGHT, ON_DUSK, etc.)
 - `grb_grace_until`: Grace period end time (0.0 when inactive)
+- `flat_sun_min`, `flat_sun_max`: the flat window [deg] (NaN when not configured)
+- `sun_alt`: the Sun's altitude [deg] as the flat window sees it
 - `last_update`: Last selector update timestamp
 - `executor_current_target`: Current target running on executor (-1 if none)
 - `last_target_id`: Last target sent to executor

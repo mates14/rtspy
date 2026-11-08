@@ -6,13 +6,16 @@ RTS2 Queue Selector Daemon
 A simplified queue-based target selector that:
 1. Reads scheduled targets from the RTS2 PostgreSQL database
 2. Executes targets from queues in proper time order
-3. Handles calibrations during DUSK/DAWN system states
+3. Handles calibrations during DUSK/DAWN system states: flats (target 2) while
+   the Sun is between flat_sun_min and flat_sun_max of rts2.ini [observatory],
+   darks (target 1) for the rest of dusk and dawn
 4. Respects GRB grace periods to avoid interrupting alert observations
 
 This replaces the complex C++ selector with a simple queue executor.
 """
 
 import time
+import math
 import logging
 import threading
 import psycopg2
@@ -52,7 +55,11 @@ class QueueSelector(Device, DeviceConfig):
     """
 
     # Target type constants (from C++ RTS2)
+    TARGET_DARK = 1  # Dark frames: dusk and dawn outside the flat window
     TARGET_FLAT = 2  # Calibration script (handles both flats and darks internally)
+
+    # how long to wait for the executor to follow a calibration 'now' before repeating it [s]
+    CALIBRATION_RETRY = 30.0
 
     # Default configuration
     DEFAULT_CONFIG = {
@@ -91,6 +98,14 @@ class QueueSelector(Device, DeviceConfig):
         # Executor device
         config.add_argument('--executor', default='EXEC',
                           help='Executor device name')
+
+        # Flat window - the Sun's altitude range for target 2 in dusk/dawn; default: rts2.ini [observatory]
+        config.add_argument('--flat-sun-min', type=float, default=None,
+                          help='Lowest Sun altitude for flats (default: flat_sun_min in rts2.ini [observatory])')
+        config.add_argument('--flat-sun-max', type=float, default=None,
+                          help='Highest Sun altitude for flats (default: flat_sun_max in rts2.ini [observatory])')
+        config.add_argument('--rts2-ini', default='/etc/rts2/rts2.ini',
+                          help='RTS2 configuration file with the flat window')
 
         # Idle target
         config.add_argument('--idle-target', type=int, default=4,
@@ -143,6 +158,40 @@ class QueueSelector(Device, DeviceConfig):
         self.startup_time = None
         self.startup_completed = False  # Track if initial evaluation is done
 
+        # Flat window: flats only while the Sun is in it, darks for the rest of dusk/dawn
+        lo, hi = self._read_flat_window(config)
+        self.flat_sun_min.value = lo if lo is not None else float('nan')
+        self.flat_sun_max.value = hi if hi is not None else float('nan')
+        if lo is None or hi is None:
+            logging.warning("No flat window (flat_sun_min/flat_sun_max) - flats for the whole of dusk and dawn")
+        else:
+            logging.info(f"Flat window: Sun from {lo} to {hi} deg; darks (target {self.TARGET_DARK}) for the rest of dusk and dawn")
+        self.calibration_sent = 0.0	# when the last calibration 'now' went out
+        self.calibration_window_logged = None
+
+    def _read_flat_window(self, config):
+        """The flat window: command line, else flat_sun_min/flat_sun_max in rts2.ini [observatory]; also the
+        site's longitude and latitude from there, for the Sun's altitude."""
+        lo, hi = config.get('flat_sun_min'), config.get('flat_sun_max')
+        self.site_lat = self.site_lng = None
+        ini = configparser.ConfigParser(inline_comment_prefixes=(';', '#'), strict=False, interpolation=None)
+        try:
+            ini.read(config.get('rts2_ini') or '/etc/rts2/rts2.ini')
+            if lo is None and ini.has_option('observatory', 'flat_sun_min'):
+                lo = float(ini.get('observatory', 'flat_sun_min'))
+            if hi is None and ini.has_option('observatory', 'flat_sun_max'):
+                hi = float(ini.get('observatory', 'flat_sun_max'))
+            if ini.has_option('observatory', 'longitude') and ini.has_option('observatory', 'latitude'):
+                self.site_lng = float(ini.get('observatory', 'longitude'))
+                self.site_lat = float(ini.get('observatory', 'latitude'))
+            else:
+                logging.warning("No longitude/latitude in rts2.ini [observatory] - flats for the whole of dusk and dawn")
+        except (configparser.Error, ValueError) as e:
+            logging.error(f"Cannot read the flat window from rts2.ini: {e}")
+        if lo is not None and hi is not None and lo > hi:
+            lo, hi = hi, lo
+        return lo, hi
+
     def __init__(self, device_name="SEL", device_type=DeviceType.SELECTOR, port=0):
         """Initialize the queue selector."""
         super().__init__(device_name, device_type, port)
@@ -158,6 +207,9 @@ class QueueSelector(Device, DeviceConfig):
         self.system_state_desc = ValueString("system_state", "Current system state description", initial="unknown")
         self.grb_grace_active = ValueBool("grb_grace_active", "GRB grace period active", writable=True, initial=False)
         self.grb_grace_until = ValueTime("grb_grace_until", "GRB grace period end time", initial=0.0)
+        self.flat_sun_min = ValueDouble("flat_sun_min", "[deg] lowest Sun altitude for flats in dusk/dawn", initial=float('nan'))
+        self.flat_sun_max = ValueDouble("flat_sun_max", "[deg] highest Sun altitude for flats in dusk/dawn", initial=float('nan'))
+        self.sun_alt = ValueDouble("sun_alt", "[deg] the Sun's altitude, as the flat window sees it", initial=float('nan'))
 
         # Grace period control callback is handled automatically via on_grb_grace_active_changed method
 
@@ -253,8 +305,10 @@ class QueueSelector(Device, DeviceConfig):
         if old_state != state and (onoff == CentralState.ON and
                                   (period == CentralState.DUSK or period == CentralState.DAWN)):
             period_name = "dusk" if period == CentralState.DUSK else "dawn"
-            logging.info(f"State changed to {period_name} - issuing calibration")
-            self._send_executor_command("now 2")
+            target_id = self._calibration_target_id()
+            logging.info(f"State changed to {period_name} - issuing calibration, target {target_id}")
+            self._send_executor_command(f"now {target_id}")
+            self.calibration_sent = time.time()
 
         # Update system state description immediately
         state_desc = self._get_system_state_description()
@@ -273,6 +327,93 @@ class QueueSelector(Device, DeviceConfig):
         # (centrald handles weather by changing ON→STANDBY automatically)
         return (onoff == CentralState.ON and
                 (period == CentralState.DUSK or period == CentralState.DAWN))
+
+    def _sun_altitude(self, when=None) -> Optional[float]:
+        """Geometric altitude of the Sun's centre [deg] at the site, None without the site's coordinates.
+
+        Low-precision solar position (Astronomical Almanac, ~0.01 deg 1950-2050): no ephemeris files,
+        nothing to download - enough to place the flat window, whose edges centrald's own Sun (libnova)
+        matches to within a few hundredths of a degree.
+        """
+        if self.site_lat is None or self.site_lng is None:
+            return None
+        t = time.time() if when is None else when
+        n = t / 86400.0 + 2440587.5 - 2451545.0		# days from J2000.0
+        L = (280.460 + 0.9856474 * n) % 360
+        g = math.radians((357.528 + 0.9856003 * n) % 360)
+        lam = math.radians(L + 1.915 * math.sin(g) + 0.020 * math.sin(2 * g))
+        eps = math.radians(23.439 - 0.0000004 * n)
+        ra = math.atan2(math.cos(eps) * math.sin(lam), math.cos(lam))
+        dec = math.asin(math.sin(eps) * math.sin(lam))
+        gmst = math.radians((280.46061837 + 360.98564736629 * n) % 360)
+        ha = gmst + math.radians(self.site_lng) - ra
+        lat = math.radians(self.site_lat)
+        return math.degrees(math.asin(math.sin(dec) * math.sin(lat) + math.cos(dec) * math.cos(lat) * math.cos(ha)))
+
+    def _in_flat_window(self) -> bool:
+        """Is the Sun inside the flat window? True when the window or the site is unknown (flats as before)."""
+        lo, hi = self.flat_sun_min.value, self.flat_sun_max.value
+        alt = self._sun_altitude()
+        if alt is not None:
+            self.sun_alt.value = alt
+        if alt is None or lo != lo or hi != hi:
+            return True
+        return lo <= alt <= hi
+
+    def _calibration_target_id(self) -> int:
+        """Target for the dusk/dawn calibration time: flats in the flat window, darks outside it.
+
+        A running flat script is never cut short for darks - in the morning it closes the dome
+        and takes its own darks; _calibration_step () queues the darks behind it with 'next'.
+        """
+        if self._in_flat_window():
+            return self.TARGET_FLAT
+        if self.executor_current_target.value == self.TARGET_FLAT:
+            return self.TARGET_FLAT
+        return self.TARGET_DARK
+
+    def _calibration_target(self) -> ScheduledTarget:
+        target_id = self._calibration_target_id()
+        return ScheduledTarget(
+            qid=-1, tar_id=target_id,
+            queue_start=datetime.now(timezone.utc),
+            queue_end=None,
+            tar_name="flats" if target_id == self.TARGET_FLAT else "darks",
+            tar_ra=0.0, tar_dec=0.0,
+            queue_name="calibration"
+        )
+
+    def _calibration_step(self):
+        """Dusk/dawn: flats (target 2) while the Sun is in the flat window, darks (target 1) outside it.
+
+        Into the window - darks or anything else running - 'now 2': flats cannot wait. Out of it
+        while flats run - 'next 1': the flat script finishes (morning: closes the dome, takes its
+        darks), the executor then goes on to the darks. [JS 2026-11-07]
+        """
+        want = self.TARGET_FLAT if self._in_flat_window() else self.TARGET_DARK
+        running = self.executor_current_target.value
+        if self.calibration_window_logged != want:
+            alt = self.sun_alt.value
+            logging.info(f"Calibration: {'flats' if want == self.TARGET_FLAT else 'darks'}"
+                         f" (Sun at {alt:.2f} deg,"
+                         f" flat window {self.flat_sun_min.value} .. {self.flat_sun_max.value})")
+            self.calibration_window_logged = want
+        target = self._calibration_target()
+        self._update_target_status(target)
+
+        if running == want:
+            return
+        if want == self.TARGET_DARK and running == self.TARGET_FLAT:
+            if self.expected_executor_target.value != self.TARGET_DARK:
+                logging.info(f"Sun out of the flat window - issuing 'next {self.TARGET_DARK}', the flats finish first")
+                self._send_executor_command(f"next {self.TARGET_DARK}")
+            return
+        # not yet followed: give the executor time before repeating
+        if self.expected_executor_target.value == want and time.time() - self.calibration_sent < self.CALIBRATION_RETRY:
+            return
+        logging.info(f"Calibration: executor runs {running} - issuing 'now {want}'")
+        self._send_executor_command(f"now {want}")
+        self.calibration_sent = time.time()
 
     def _get_system_state_description(self) -> str:
         """Get human-readable system state description."""
@@ -367,6 +508,12 @@ class QueueSelector(Device, DeviceConfig):
                     if self.grb_grace_active.value:
                         self.grb_grace_active.value = False
 
+                # Dusk/dawn: flats in the flat window, darks outside it
+                if self._is_calibration_time():
+                    self._calibration_step()
+                    time.sleep(self.update_interval)
+                    continue
+
                 # First check if currently running target is correct (NOW mode)
                 current_target = self._select_current_target()
                 if (current_target
@@ -438,16 +585,7 @@ class QueueSelector(Device, DeviceConfig):
 
         # 1. Check for calibrations first (during DUSK/DAWN)
         if self._is_calibration_time():
-            # Return calibration target with immediate action
-            calibration_target = ScheduledTarget(
-                qid=-1, tar_id=self.TARGET_FLAT,
-                queue_start=datetime.now(timezone.utc),
-                queue_end=None,
-                tar_name="calibration",
-                tar_ra=0.0, tar_dec=0.0,
-                queue_name="calibration"
-            )
-            return calibration_target, 0  # Action needed immediately
+            return self._calibration_target(), 0  # Action needed immediately
 
         # 2. Manual queue always has priority - if there are ANY manual targets,
         # scheduler is completely ignored until all manual targets are done
@@ -501,15 +639,7 @@ class QueueSelector(Device, DeviceConfig):
 
         # 1. Check for calibrations first (during DUSK/DAWN)
         if self._is_calibration_time():
-            # Return calibration target
-            return ScheduledTarget(
-                qid=-1, tar_id=self.TARGET_FLAT,
-                queue_start=datetime.now(timezone.utc),
-                queue_end=None,
-                tar_name="calibration",
-                tar_ra=0.0, tar_dec=0.0,
-                queue_name="calibration"
-            )
+            return self._calibration_target()
 
         # 2. Manual queue always has priority - check for currently active manual targets
         manual_target, _ = self._get_queue_target('manual', mode="now")
@@ -943,6 +1073,9 @@ class QueueSelector(Device, DeviceConfig):
             our_targets = {self.expected_executor_target.value, self.last_target_id.value,
                            self.idle_target.value}
             our_targets.discard(-1)  # Remove -1 values
+            # in dusk/dawn the flats and darks are ours: after 'next 1' the flats still run for a while
+            if self._is_calibration_time():
+                our_targets |= {self.TARGET_FLAT, self.TARGET_DARK}
 
             if self.executor_current_target.value != -1 and self.executor_current_target.value not in our_targets:
                 # Executor is running a target we didn't tell it to run
