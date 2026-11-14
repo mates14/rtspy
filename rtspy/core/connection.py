@@ -312,21 +312,20 @@ class Connection:
         """
         Check if it's time to send a keepalive message.
 
-        Following the C++ implementation, we send a keepalive if 1/4 of the
-        timeout period has passed since the last activity.
+        As C++ (Connection::idle): "T ready" once nothing has been received
+        for the timeout, then every timeout/4 until the peer answers "T OK";
+        is_timed_out () drops the link at twice the timeout. Counted from
+        data received, as the drop is: counting our own sends kept a link
+        we keep sending values on (HTTPD, IMGP, rts2-mon listening to COND)
+        from ever getting a keepalive, so it was dropped every 650 s.
+        [JS 2026-11-14]
 
         Returns:
             True if keepalive was sent, False otherwise
         """
         current_time = time.time()
-
-        # Calculate the idle time threshold (1/4 of timeout)
-        idle_threshold = self.connection_timeout / 4
-
-        # Check if we've been idle for more than the threshold
-        idle_time = current_time - self.last_activity
-        if idle_time > idle_threshold:
-            # Time to send a keepalive
+        if (current_time - self.last_received > self.connection_timeout
+                and current_time - self.last_keepalive_time > self.connection_timeout / 4):
             if self.send_keepalive():
                 self.last_keepalive_time = current_time
                 return True
